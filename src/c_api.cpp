@@ -3,6 +3,7 @@
 #include "engine.hpp"
 #include "engine35.hpp"
 #include "specx.hpp"
+#include "gpu_caps.hpp"
 #include <chrono>
 #include "yskn_abi.h"
 #include <string>
@@ -13,7 +14,7 @@ struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel
 static yskn::Engine& E(yskn_engine* e) { if (!e->e) throw std::runtime_error("this API is not available for the qwen3_5 engine yet"); return *e->e; }
 #define YSKN_TRY(body) try { body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
 extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int flags) {
-  try { cudaSetDevice(device); std::string arch; { yskn::Container c; c.open(path); arch = c.model.arch; }
+  try { yskn::select_gpu(device); std::string arch; { yskn::Container c; c.open(path); arch = c.model.arch; }
     if (arch == "qwen3_5") return new yskn_engine{nullptr, new yskn::Engine35(path, max_ctx, flags)};
     return new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr}; } catch (const std::exception& ex) { g_err = ex.what(); return nullptr; }
 }

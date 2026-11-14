@@ -12,11 +12,13 @@ logits of the whole vocabulary at the same positions and computes, with the form
 perplexity tool): the mean KL divergence from the reference, how often the most likely next token is the same, and the perplexity.
 
 --kv default  the engine as the package starts it: the compressed key-value cache KV5
---kv int8     the 8-bit key-value cache without the KV5 compression
+--kv int8     YSKN_TB_CAP=0: the keys and values are still rounded by KV5 and only kept unpacked in 8-bit form (not a plain
+              8-bit cache: the released engine cannot run one)
 --kv fp16     an FP16 key-value cache, the setting of the YASAKANI rows of the quality table in docs/MEASUREMENTS.md.  The
-              yskn.dll of the releases is built for the 8-bit cache and refuses this setting; it needs an engine built for it.
+              yskn.dll of the releases always rounds the cache with KV5, has no FP16 cache and refuses this setting; it needs an engine
+              built for it.
 
-Needs: Windows, an RTX 5090, the yasakani package of this repository (pip install . in python/, or the quickstart), numpy.
+Needs: Windows, an NVIDIA GPU the engine runs on (the published numbers are from an RTX 5090), the yasakani package of this repository (pip install . in python/, or the quickstart), numpy.
 The engine is used through documented exports of yskn.dll (include/yskn_abi.h): yskn_verify_nll, yskn_logits_rows, yskn_commit.
 """
 import argparse

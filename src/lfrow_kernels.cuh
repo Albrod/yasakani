@@ -199,6 +199,7 @@ __global__ void __launch_bounds__(512) wk_attn_post_kernel(WkAttnPostArgs W) {
   else if (d < Q35_RD) { const float2 cs = A.rope[(size_t)rpos * (Q35_RD / 2) + d - Q35_RD / 2];                          
     out = rbf(__fadd_rn(rbf(__fmul_rn(xn, cs.x)), rbf(__fmul_rn(buf[tid - Q35_RD / 2], cs.y)))); }
 #if YSKN_KVX_ROT
+  __syncthreads();
   out=kvx_rotate(out,buf,false);
 #endif
   if (blk < Q35_NH) { if (tid < Q35_HD) A.q16[((size_t)tok * Q35_NH + blk) * Q35_HD + d] = f2bf(out); }

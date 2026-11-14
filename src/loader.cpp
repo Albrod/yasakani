@@ -10,8 +10,11 @@
 #include "devmem.hpp"   
 namespace yskn {
 static float h2f_host(uint16_t u) { __half h = *reinterpret_cast<__half*>(&u); return __half2float(h); }
-template <class T2> static T2* dev_copy(const void* src, size_t bytes) { T2* d = nullptr; cudaMalloc(&d, bytes); cudaMemcpy(d, src, bytes, cudaMemcpyHostToDevice); return d; }
-template <class T2> static T2* dev_zero(size_t bytes) { T2* d = nullptr; cudaMalloc(&d, bytes); cudaMemset(d, 0, bytes); return d; }
+static void load_check(cudaError_t e, const char* what) {
+  if (e != cudaSuccess) throw std::runtime_error(std::string("loading the model: ") + what + " failed (" + cudaGetErrorString(e) + "); is there enough free GPU memory?");
+}
+template <class T2> static T2* dev_copy(const void* src, size_t bytes) { T2* d = nullptr; load_check(cudaMalloc(&d, bytes), "cudaMalloc"); load_check(cudaMemcpy(d, src, bytes, cudaMemcpyHostToDevice), "cudaMemcpy"); return d; }
+template <class T2> static T2* dev_zero(size_t bytes) { T2* d = nullptr; load_check(cudaMalloc(&d, bytes), "cudaMalloc"); load_check(cudaMemset(d, 0, bytes), "cudaMemset"); return d; }
 
 uint16_t* Model::upload_vector(const std::string& name, int n) { const VectorDesc& v = c.vector(name); if (v.n != n) throw std::runtime_error("vector size mismatch: " + name); return dev_copy<uint16_t>(c.at<uint16_t>(v.off), (size_t)n * 2); }
 
@@ -39,16 +42,16 @@ DevTensor Model::upload_linear(const TensorDesc& d, int Mmax, int want_workers, 
   const int ntiles = rows / 64;
   if (!d.has_rar) {
     const int wps = 4 * d.bits; const size_t nwords = (size_t)rows * seqs * wps;
-    uint32_t* dw = dev_copy<uint32_t>(words, nwords * 4); cudaMalloc(&t.frag, nwords * 4);
-    yskn_repack_warp_to_frag(dw, (uint32_t*)t.frag, rows, seqs, wps, nullptr); cudaDeviceSynchronize(); cudaFree(dw);
+    uint32_t* dw = dev_copy<uint32_t>(words, nwords * 4); load_check(cudaMalloc(&t.frag, nwords * 4), "cudaMalloc");
+    load_check((cudaError_t)yskn_repack_warp_to_frag(dw, (uint32_t*)t.frag, rows, seqs, wps, nullptr), "repack"); load_check(cudaDeviceSynchronize(), "repack"); cudaFree(dw);
     t.tiles_by_k.assign(9, {}); for (int i = 0; i < ntiles; ++i) t.tiles_by_k[d.bits].push_back(i); t.kmax = d.bits;
   } else {
     const uint8_t* kt = c.at<uint8_t>(d.rar.k_off); const uint64_t* off = c.at<uint64_t>(d.rar.off_off);
     size_t total_u4 = 0; std::vector<uint64_t> toff(ntiles); std::vector<uint8_t> tk(ntiles);
     for (int i = 0; i < ntiles; ++i) { tk[i] = kt[i]; toff[i] = total_u4; total_u4 += (size_t)64 * seqs * (4 * kt[i]) / 4; }
-    cudaMalloc(&t.frag, total_u4 * 16);
+    load_check(cudaMalloc(&t.frag, total_u4 * 16), "cudaMalloc");
     for (int i = 0; i < ntiles; ++i) { const int wps = 4 * tk[i]; const size_t nw = (size_t)64 * seqs * wps;
-      uint32_t* dw = dev_copy<uint32_t>(words + off[i], nw * 4); yskn_repack_warp_to_frag(dw, (uint32_t*)(t.frag + toff[i]), 64, seqs, wps, nullptr); cudaDeviceSynchronize(); cudaFree(dw); }
+      uint32_t* dw = dev_copy<uint32_t>(words + off[i], nw * 4); load_check((cudaError_t)yskn_repack_warp_to_frag(dw, (uint32_t*)(t.frag + toff[i]), 64, seqs, wps, nullptr), "repack"); load_check(cudaDeviceSynchronize(), "repack"); cudaFree(dw); }
     t.tile_off = dev_copy<uint64_t>(toff.data(), ntiles * 8); t.tile_k = dev_copy<uint8_t>(tk.data(), ntiles);
     t.tiles_by_k.assign(9, {}); t.kmax = 0; for (int i = 0; i < ntiles; ++i) { t.tiles_by_k[tk[i]].push_back(i); t.kmax = std::max(t.kmax, (int)tk[i]); }
   }
@@ -68,7 +71,7 @@ void Model::upload_embedding(const TensorDesc& d) {
 }
 void Model::load(const std::string& path, int max_ctx_, int Mmax) {
   c.open(path); cfg = c.model; max_ctx = ((max_ctx_ + 63) / 64) * 64;
-  cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0);
+  { int dev = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }   // the current GPU, not device 0
   int want = sm_count * 8;                                            
   { const char* e = std::getenv("YSKN_GEMV_WANT"); if (e && std::atoi(e) > 0) want = std::atoi(e); }   
   layers.resize(cfg.layers);

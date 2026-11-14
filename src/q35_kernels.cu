@@ -23,7 +23,9 @@ __device__ __forceinline__ void q35_l2pf(const Q35Pf& f, unsigned part, unsigned
     const unsigned long long a = (f.n[s] * part / np) & ~15ull, b = (f.n[s] * (part + 1) / np) & ~15ull;
     for (unsigned long long o = a; o < b; o += 65520ull) {
       const unsigned len = (unsigned)(b - o < 65520ull ? b - o : 65520ull);
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900   // cp.async.bulk needs sm_90+
       asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(static_cast<const char*>(f.p[s]) + o), "r"(len) : "memory");
+#endif
     }
   }
 }
@@ -1052,6 +1054,7 @@ __global__ void __launch_bounds__(512) q35_attn_post_kernel(Q35AttnPostArgs A) {
   else if (d < Q35_RD) { const float2 cs = A.rope[(size_t)pos * (Q35_RD / 2) + d - Q35_RD / 2];
     out = rbf(__fadd_rn(rbf(__fmul_rn(xn, cs.x)), rbf(__fmul_rn(buf[tid - Q35_RD / 2], cs.y)))); }
 #if YSKN_KVX_ROT
+  __syncthreads();
   out=kvx_rotate(out,buf,false);
 #endif
   if (blk < Q35_NH) { if (tid < Q35_HD) A.q16[((size_t)tok * Q35_NH + blk) * Q35_HD + d] = f2bf(out); }
@@ -1081,7 +1084,7 @@ void launch_tb_requant(const Q35AttnPostArgs& A, cudaStream_t st) {
   if (!H.scr) { tb_requant_kernel<<<dim3(4, A.M), dim3(512), 0, st>>>(A); return; }      
   TbFastArgs F{};                                                                         
   F.blob = A.tb; F.nm = H.nm; F.has_cdq = H.has_cdq; F.q8_0 = A.k8; F.q8_1 = A.v8; F.qs_0 = A.ks; F.qs_1 = A.vs;
-  F.max_ctx = A.max_ctx; F.d_pos = A.d_pos; F.layer = A.tb_layer; F.scr = H.scr;
+  F.max_ctx = A.max_ctx; F.d_pos = A.d_pos; F.layer = A.tb_layer; F.scr = A.tb_scr ? A.tb_scr : H.scr;
   F.stg_k = A.kstg; F.stg_v = A.vstg; F.pk_pay = A.kp; F.pk_pay1 = A.vp; F.pk_scl0 = A.kps; F.pk_scl1 = A.vps; F.pk_stride = A.pks;   
   for (int t0 = 0; t0 < A.M; t0 += TBF_TILE) { F.tok0 = t0; F.nrow = 8 * std::min(TBF_TILE, A.M - t0); launch_tb_fast(F, st); }
 }
@@ -1560,7 +1563,9 @@ __global__ void __launch_bounds__(32) q35_l2pf_kernel(Q35Pf f) {
     if (!f.p[s] || !f.n[s]) continue;
     for (unsigned long long o = (unsigned long long)blockIdx.x * 65536ull; o < f.n[s]; o += (unsigned long long)gridDim.x * 65536ull) {
       const unsigned len = (unsigned)((f.n[s] - o < 65536ull ? f.n[s] - o : 65536ull) & ~15ull);
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900   // cp.async.bulk needs sm_90+
       if (len) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(static_cast<const char*>(f.p[s]) + o), "r"(len) : "memory");
+#endif
     }
   }
 }

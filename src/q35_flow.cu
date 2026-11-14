@@ -277,7 +277,7 @@ static const FlowSched& flow_prep(Q35FlowMlpArgs& A) {
   A.nwe_gu = std::min(A.gu.seg[0].t.n_workers, G_gu); A.nwe_dn = std::min(A.dn.seg[0].t.n_workers, G_dn);
   if (A.gu.seg[1].t.n_workers != A.gu.seg[0].t.n_workers || A.gu.seg[1].t.N != A.gu.seg[0].t.N || A.M > 8 || A.F / 512 + 1 + 16 + 2 > 64)
     throw std::runtime_error("flow: unsupported shape");
-  if (!g_flow_grid) { int sms = 0, per = 0; cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
+  if (!g_flow_grid) { int sms = 0, per = 0, dev = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, q35_flow_mlp_kernel<10>, 64, 0); g_flow_grid = sms * per;
     std::fprintf(stderr, "[flow] persistent grid %d CTAs (%d per SM)\n", g_flow_grid, per); }
   const FlowSched& f = flow_schedule(A.M, ctas_seg, A.nwe_gu, ctas_dn, A.nwe_dn, A.F / 512);

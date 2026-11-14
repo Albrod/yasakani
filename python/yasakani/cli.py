@@ -9,7 +9,7 @@ import importlib
 import json
 import os
 import platform
-import shutil
+import shutil                                    # noqa: F401  (gpu.smi_path looks nvidia-smi up through it; tests patch cli.shutil.which)
 import signal
 import subprocess
 import sys
@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from . import __version__
+from . import gpu as gpus
 from ._native import YasakaniError, find_library
-from .runtime import ModelPack
+from .runtime import ModelPack, RuntimeProfile
 
 DEFAULT_PORT = 8765
 
@@ -59,7 +60,7 @@ def _model_dir(args) -> Path:
 
 
 def _gpu_lines() -> List[str]:
-    exe = shutil.which("nvidia-smi")
+    exe = gpus.smi_path()                       # nvidia-smi, or the one YASAKANI_NVIDIA_SMI names
     if not exe:
         return ["nvidia-smi not found (is the NVIDIA driver installed?)"]
     try:
@@ -74,7 +75,7 @@ def _gpu_lines() -> List[str]:
 def _gpu_memory_warning(device: int = 0) -> Optional[str]:
     """After loading: is the GPU's memory (almost) full?  When the model does not fit, Windows keeps part of it in ordinary memory
     and generation becomes several times slower, without any error.  None when all is well or when it cannot be told."""
-    exe = shutil.which("nvidia-smi")
+    exe = gpus.smi_path()                       # nvidia-smi, or the one YASAKANI_NVIDIA_SMI names
     if not exe:
         return None
     try:
@@ -94,7 +95,9 @@ def _gpu_memory_warning(device: int = 0) -> Optional[str]:
 def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--model-dir", help="folder with the model files (default: $YASAKANI_MODEL_DIR)")
     sp.add_argument("--dll", help="path of yskn.dll (default: $YASAKANI_DLL, or the bin folder next to the package)")
-    sp.add_argument("--max-ctx", type=int, default=None, help="context length in tokens: input + thinking + answer (default: the model's 262144)")
+    sp.add_argument("--max-ctx", type=int, default=None,
+                    help="context length in tokens: input + thinking + answer (default: the model's 262144; on a GPU with less than "
+                         "30,000 MiB, the longest that fits the free GPU memory)")
     sp.add_argument("--device", type=int, default=0, help="CUDA device index (default 0)")
     sp.add_argument("--seed0", type=int, default=1, help="seed of the first request; every request without its own seed uses the next one")
 
@@ -150,9 +153,22 @@ def _open_stack(args, *, warm: bool = True):
     pack = ModelPack.load(_model_dir(args))
     fmt = ChatFormatter(pack.root)
     vision = _vision(args)                       # wrong image input options fail here, before the long load
+    det = gpus.detect(args.device)               # nvidia-smi only; CUDA is not started here
+    args.gpu_detected = det
+    note = gpus.untested_note(det)
+    if note:
+        _say(note)
+    max_ctx, profile = args.max_ctx, None
+    if max_ctx is None:                          # 0.1.3: a context that fits the free GPU memory (unchanged on the RTX 5090)
+        plan = gpus.plan_context(pack, det)
+        for line in plan.notes:
+            _say(line)
+        max_ctx = plan.max_ctx
+        if plan.env:
+            profile = RuntimeProfile.default(pack, plan.env)
     _say("loading the model (%s of weights) ..." % _human(pack.weights.stat().st_size))
     t0 = time.time()
-    eng = Engine(pack, max_ctx=args.max_ctx, device=args.device, dll=args.dll)
+    eng = Engine(pack, max_ctx=max_ctx, device=args.device, dll=args.dll, profile=profile)
     try:
         if eng.removed_env:
             _say("note: ignored %d YSKN_* setting(s) from the environment: %s" % (len(eng.removed_env), ", ".join(sorted(eng.removed_env))))
@@ -163,7 +179,7 @@ def _open_stack(args, *, warm: bool = True):
         eng.close()
         raise
     _say("model ready in %.0f s (context %d tokens)" % (time.time() - t0, eng.max_ctx))
-    note = _gpu_memory_warning(args.device)
+    note = _gpu_memory_warning(det.gpu.index if det.gpu else args.device)    # nvidia-smi's row of the GPU, when it is known
     if note:
         _say(note)
     return pack, eng, fmt, runner
@@ -190,6 +206,8 @@ def cmd_info(args) -> int:
         ok = False
     for ln in _gpu_lines():
         print("gpu      " + ln)
+    for g in gpus.query() or []:
+        print("         GPU %d: compute capability %s - %s" % (g.index, g.cc_text, gpus.describe(g)))
     d = getattr(args, "model_dir", None) or os.environ.get("YASAKANI_MODEL_DIR")
     if d:
         try:
@@ -500,7 +518,7 @@ def cmd_selfcheck(args) -> int:
         print("the reference file has an unknown format (%r)" % ref.get("format"))
         return 2
     want = {c["name"]: c for c in ref.get("cases", [])}
-    bad = 0
+    bad = differs = 0
     for g in got:
         w = want.get(g["name"])
         if w is None:
@@ -512,16 +530,27 @@ def cmd_selfcheck(args) -> int:
         elif w["sha256"] != g["sha256"] or w["tokens"] != g["tokens"]:
             n = next((i for i, (a, b) in enumerate(zip(w["head"], g["head"])) if a != b), None)
             print("  %-14s FAIL  the output differs%s" % (g["name"], "" if n is None else " (first different token: #%d)" % (n + 1)))
-            bad += 1
+            differs += 1
         else:
             print("  %-14s PASS  (%d tokens)" % (g["name"], g["tokens"]))
-    print("self-check passed: this installation reproduces the reference output." if not bad else "self-check FAILED for %d case(s)." % bad)
-    return 0 if not bad else 1
+    if not bad and not differs:
+        print("self-check passed: this installation reproduces the reference output.")
+        return 0
+    print("self-check FAILED for %d case(s)." % (bad + differs))
+    det = getattr(args, "gpu_detected", None)
+    if not bad and det is not None and det.untested:
+        # 0.1.3: the reference was made on an RTX 5090.  On another card the work can be split differently, and the greedy output
+        # can then part from the reference after some tokens.  Exit code 3 tells this case apart (the quickstart goes on with it).
+        print("note: the reference output was made on an RTX 5090, and this GPU is not one.  On other GPUs the output can differ from "
+              "it, and we have not checked this GPU.  Exit code 3: only the output differs.")
+        return 3
+    return 1
 
 
 # ---- entry point ------------------------------------------------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="yasakani", description="Run Qwen3.8-27B locally on one RTX 5090 (Windows) with the YASAKANI engine.")
+    ap = argparse.ArgumentParser(prog="yasakani", description="Run Qwen3.8-27B locally on one NVIDIA RTX GPU with the YASAKANI engine "
+                                                           "(tested on the RTX 5090 under Windows).")
     ap.add_argument("--version", action="version", version="yasakani " + __version__)
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="{info,serve,chat,bench,selfcheck,verify}")
 
@@ -559,7 +588,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-loop-guard", action="store_true")
     sp.set_defaults(func=cmd_chat)
 
-    sp = sub.add_parser("selfcheck", help="run a few fixed greedy prompts and compare the output with the reference file")
+    sp = sub.add_parser("selfcheck", help="run a few fixed greedy prompts and compare the output with the reference file "
+                                          "(exit code 0 same, 1 different, 2 no reference, 3 only the output differs on a GPU other than the RTX 5090)")
     _add_engine_args(sp)
     sp.add_argument("--reference", help="reference file (default: selfcheck.json in the model folder)")
     sp.add_argument("--write", metavar="FILE", help="write a new reference file instead of checking (for people who publish a model folder)")

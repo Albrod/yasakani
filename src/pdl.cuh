@@ -10,8 +10,15 @@
 #include <cuda_runtime.h>
 #include <utility>
 namespace yskn {
+// Programmatic dependent launch (griddepcontrol) needs compute capability 9.0. The sm_86 / sm_89 code gets empty stubs, and
+// pdl_enabled() (engine.cpp) never sets the launch attribute unless the GPU runs sm_90+ code (gpu_caps.cu).
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+#else
+__device__ __forceinline__ void pdl_wait() {}
+__device__ __forceinline__ void pdl_trigger() {}
+#endif
 bool pdl_enabled();
 template <typename... KArgs, typename... Args>
 inline void launch_k(void (*kern)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {

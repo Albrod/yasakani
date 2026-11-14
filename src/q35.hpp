@@ -78,7 +78,7 @@ struct Q35AttnPostArgs { const float *part_q, *part_k, *part_v; const float *tau
                          const int8_t *sg_q, *sg_k, *sg_v; const uint16_t *qn_w, *kn_w; float eps; int M; const int* d_pos;
                          const float2* rope; uint16_t* q16; uint16_t* gate16; uint16_t* kc; uint16_t* vc; int max_ctx; Q35Xsm xsm;
                          int8_t* k8 = nullptr; int8_t* v8 = nullptr; float* ks = nullptr; float* vs = nullptr; Q35Pf pf; int kv_fp16 = 0;
-                         const unsigned char* tb = nullptr; int tb_layer = 0;
+                         const unsigned char* tb = nullptr; int tb_layer = 0; unsigned char* tb_scr = nullptr;
                          
                          
                          int kstg = 0, vstg = 0; int pks = 128; uint8_t* kp = nullptr; uint8_t* vp = nullptr; float* kps = nullptr; float* vps = nullptr; };   

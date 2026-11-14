@@ -145,16 +145,37 @@ def main(argv=None):
     t = lambda key, **kw: T[key][lang].format(**kw) if kw else T[key][lang]     # noqa: E731
     say = (lambda *x: print(*x, file=sys.stderr, flush=True)) if a.json else (lambda *x: print(*x, flush=True))
 
-    from yasakani import Engine, ModelPack, __version__
+    from yasakani import Engine, ModelPack, YasakaniError, __version__
     from yasakani.engine import Sampling
+    from yasakani.runtime import RuntimeProfile
     from yasakani.textio import ChatFormatter
 
     pack = ModelPack.load(a.model_dir)
     fmt = ChatFormatter(pack.root)
     say(t("title", n=a.tokens))
+    max_ctx = profile = None
+    try:                                     # 0.1.3: on a GPU with less memory than the RTX 5090, a context that fits (as `yasakani chat`)
+        from yasakani import gpu as gpus
+    except ImportError:
+        gpus = None
+    if gpus is not None:
+        det = gpus.detect(0)
+        note = gpus.untested_note(det)
+        if note:
+            say(note)
+        try:
+            plan = gpus.plan_context(pack, det)
+        except YasakaniError as ex:
+            say("error: %s" % ex)
+            return 2
+        for line in plan.notes:
+            say(line)
+        max_ctx = plan.max_ctx
+        if plan.env:
+            profile = RuntimeProfile.default(pack, plan.env)
     say(t("load", g=human(pack.weights.stat().st_size)))
     t0 = time.time()
-    eng = Engine(pack, dll=a.dll)
+    eng = Engine(pack, dll=a.dll, max_ctx=max_ctx, profile=profile)
     rows = []
     try:
         eng.warmup([fmt.encode("warm-up"), fmt.prompt([{"role": "user", "content": "warm-up"}])[0]], n_gen=32)

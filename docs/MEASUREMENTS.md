@@ -177,19 +177,44 @@ the two: less than 0.000001).
 
 ### The released engine (added November 14, 2026)
 
-The two YASAKANI rows above were measured with a research build and an FP16 KV cache. The released `yskn.dll` is built for its 8-bit KV
-cache only, and the published source builds only this configuration, so those rows cannot be repeated with the released engine. On the
+The two YASAKANI rows above were measured with a research build and an FP16 KV cache. The released `yskn.dll` always rounds the KV
+cache with KV5 and has no FP16 cache, and the published source builds only this configuration, so those rows cannot be repeated with the
+released engine. On the
 same 20 windows and against the same reference, the engine of release 0.1.1 gives:
 
 | Model | KV cache | KL on thinking text↓ | Top-1 agreement↑ |
 |---|---|---|---|
 | quality model | KV5 (the engine as the package starts it) | 0.0126 | 95.35% |
-| quality model | 8-bit, without the KV5 compression | 0.0125 | 95.23% |
+| quality model | KV5 values kept unpacked in 8-bit form (`YSKN_TB_CAP=0`) | 0.0125 | 95.23% |
 | fastest model | KV5 (the engine as the package starts it) | 0.0309 | 92.98% |
-| fastest model | 8-bit, without the KV5 compression | 0.0307 | 93.06% |
+| fastest model | KV5 values kept unpacked in 8-bit form (`YSKN_TB_CAP=0`) | 0.0307 | 93.06% |
+
+In the rows with `YSKN_TB_CAP=0` the keys and values are still rounded by KV5; they are only kept unpacked, in 8-bit form, and read by
+another attention kernel. They are not a measurement of a plain 8-bit cache, which the released engine cannot run. (Until 0.1.3 these
+rows were labelled "8-bit, without the KV5 compression", which was not correct.)
 
 Against a reference made from the original model with Hugging Face transformers (`tools/quality/make_reference.py`), the two KV5 rows
 are 0.0126 / 95.35% and 0.0309 / 92.98%. How to repeat this: [`tools/quality/README.md`](../tools/quality/README.md).
+
+**For comparison: a plain 8-bit and an FP16 cache (added November 15, 2026).** The released `yskn.dll` cannot run either of them. We
+measured them with two measurement builds of the 0.1.2 source: `YSKN_KVX_MODE=2` (a plain rotated 8-bit cache) and `YSKN_KVX_MODE=0`
+(FP16). These two modes also need a three-line change in `src/engine35.cpp` (one `#include` moved out of the block for mode 3), and the
+builds are not released. Same 20 windows, same reference, a context of 2,048 tokens:
+
+| Model | KV cache | Engine | KL on thinking text↓ | Top-1 agreement↑ |
+|---|---|---|---|---|
+| quality model | KV5 (default) | released `yskn.dll` (0.1.0 to 0.1.2) | 0.0126 | 95.35% |
+| quality model | plain 8-bit | measurement build (`YSKN_KVX_MODE=2`) | 0.0122 | 95.31% |
+| quality model | FP16 | measurement build (`YSKN_KVX_MODE=0`) | 0.0122 | 95.24% |
+| fastest model | KV5 (default) | released `yskn.dll` (0.1.0 to 0.1.2) | 0.0309 | 92.98% |
+| fastest model | plain 8-bit | measurement build (`YSKN_KVX_MODE=2`) | 0.0304 | 93.14% |
+| fastest model | FP16 | measurement build (`YSKN_KVX_MODE=0`) | 0.0304 | 93.01% |
+
+With KV5 the KL is about 3% higher than with the plain 8-bit cache for the quality model (+0.0004) and about 2% higher for the fastest
+model (+0.0005); with both models KV5 was higher in 18 of the 20 windows. The plain 8-bit and the FP16 cache differ only within the noise of
+this measurement. The FP16 build gives the values of the two YASAKANI rows of the table above, to every digit. Longer contexts were not
+compared this way. The records of these runs are not in the repository. The KV5 rows were measured with the `yskn.dll` of 0.1.0 to
+0.1.2; in our checks on the RTX 5090 the `yskn.dll` of 0.1.3 wrote the same tokens (see the 0.1.3 fix below).
 
 ## KV5 (the compressed key-value cache) with the fastest model
 
@@ -204,14 +229,17 @@ a small difference as proof of equivalence.
 
 With 256K reserved, the engine's memory is 27.12598 GiB with FP16 and 16.78320 GiB with KV5. Per token the KV cache takes 64.25 KiB against
 21.875 KiB, about 66% less; for the whole engine it is about 38% less. These are the amounts reserved at start; they are not the peak during
-generation, not the whole setup with the helper model, and not a measurement of quality at 256K. The quality of this model with an INT8 KV
-cache has not been measured.
+generation, not the whole setup with the helper model, and not a measurement of quality at 256K. A plain 8-bit (INT8) KV
+cache was measured only at a context of 2,048 tokens (see above), not at long contexts.
 
 ## Supported environment
 
-This release covers text chat with Qwen3.8-27B on Windows 11 and the RTX 5090. Image input is optional since 0.1.2 (a community contribution, [#4](https://github.com/yasakani-dev/yasakani/pull/4)); we have not measured image quality, and it is not part of the measurements on this page. Tool calling through the API is in the package since 0.1.1; it is not part of the measurements on this page.
-Which configurations and context lengths work on 24 GB and 16 GB GPUs will be checked on each actual card; operation is not promised from
-the file size alone, and the conversation history and working memory are included in that check. The executables are not code-signed, so
+This release covers text chat with Qwen3.8-27B on Windows 11. Every measurement on this page is from the RTX 5090. Since 0.1.3 the engine
+is also built to run on other RTX 30, 40 and 50 series cards with 16 GB or more, but it is not optimized or tested on them: nothing on this page was
+measured on them, and neither speed nor operation is promised there. On those cards the context is chosen from the free GPU memory with
+a rule calculated from RTX 5090 measurements (`python/yasakani/gpu.py`). Image input is optional since 0.1.2 (a community contribution, [#4](https://github.com/yasakani-dev/yasakani/pull/4)); we have not measured image quality, and it is not part of the measurements on this page. Tool calling through the API is in the package since 0.1.1; it is not part of the measurements on this page.
+Which configurations and context lengths really work on each 24 GB and 16 GB card will be checked on the actual card; operation is not
+promised from the file size alone, and the conversation history and working memory are included in that check. The executables are not code-signed, so
 Windows may show a warning.
 
 ## The uncut screen recording of November 8 (fastest model)
@@ -262,8 +290,32 @@ Checked with the files that are published: the `yskn.dll` above, the Python pack
   case (#110) and one greedy case in which all three kinds of off differed from the first run at token #67. A repeated run with the same
   settings differed from the first run in one case per model (#115; #67). With speculative decoding off the engine needed at least 1.5 times as
   many passes in all 62 cases, so "off" really ran differently.
-* What this means: when nothing else uses the GPU, the same request gave the same tokens every time. When other programs use the GPU at the
-  same time, a token now and then comes out differently, more often in plain decoding (one token per pass) than with the default settings.
-  We have not found the cause yet. It is not the hardware: the same computations repeated in PyTorch on the same GPU and compared bit for
-  bit (about 540,000 repeats, including four minutes at the 600 W power limit with two processes at once) showed no difference. Until the
-  cause is found, this release does not promise bit-identical output from run to run.
+* What this meant for 0.1.0 to 0.1.2: when nothing else used the GPU, the same request gave the same tokens every time. When other
+  programs used the GPU at the same time, a token now and then came out differently, more often in plain decoding (one token per pass)
+  than with the default settings. It was not the hardware: the same computations repeated in PyTorch on the same GPU and compared bit for
+  bit (about 540,000 repeats, including four minutes at the 600 W power limit with two processes at once) showed no difference. The cause
+  and the fix in 0.1.3 are in the next section.
+
+## The cause, and the fix in 0.1.3 (added for 0.1.3)
+
+* **The cause** (found on November 11, 2026). `q35_attn_post_kernel` and `wk_attn_post_kernel` apply the position rotation to queries and
+  keys. The rotation reads values of other threads from shared memory, and the next step (`kvx_rotate`) wrote into the same memory
+  without waiting for those reads: one `__syncthreads()` was missing. When the timing of the threads shifted, for example because another
+  program was using the GPU, a key could be computed from a value that had already been overwritten. The first layer that differed was
+  always one of the 16 attention layers (177 of 177 cases that could be traced).
+* **Passes compared bit for bit** (the same pass repeated, its result compared with a run alone; the shipping settings; another process
+  kept the GPU busy): without the fix 6 of 3,200 differed (the released engine 5 of 2,400, an unchanged rebuild 1 of 800); with the fix
+  0 of 2,800.
+* **Repeated generation** (November 11 and 12, one engine, the desktop drawing): the engine of 0.1.0 to 0.1.2 differed in 10 of 593
+  runs (11 at most: one test kept the result of only one of two repeats); builds with the fix 0 of 272 each. An unchanged rebuild of the same source also gave 0 of 272 in this test,
+  so this test alone does not show the fix; the comparison of passes above does.
+* With the fix, the text written alone was the same as with the released engine (8 runs of 256 tokens), and a one-row pass took about
+  as long (8.01 ms against 7.98 ms).
+* These tests used test builds of the engine with the fix (November 11 and 12, 2026), not the 0.1.3 release files. We do not promise
+  bit-identical output in every condition.
+* **The `yskn.dll` of 0.1.3** (tested on the RTX 5090 on November 15, 2026). 0.1.3 also gives every engine its own scratch buffer for
+  the KV5 encoder; before, two engines in one process shared it. With two engines writing at the same time in one process (fastest
+  model, greedy), the 0.1.3 engine gave the same text as one engine alone in 32 of 32 runs, the engine of 0.1.0 to 0.1.2 in 0 of 8.
+  In 240 repeated runs of one engine (fastest model, 768 tokens each) neither engine differed this time, so that test shows no
+  difference between them. With both models the 0.1.3 engine wrote the same tokens as the engine of 0.1.0 to 0.1.2 (`yasakani
+  selfcheck`, 48 runs of the look-ahead check, 12 benchmark texts), and its speed was the same within our measurement noise.

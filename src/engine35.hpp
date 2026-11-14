@@ -267,7 +267,7 @@ private:
   int kv8_ = 1;
   int tbcap_ = 0;        
   int tbcap_kb_ = 4;     
-  int stg_rows_ = 0; int8_t *stg_k8_ = nullptr, *stg_v8_ = nullptr; float *stg_ks_ = nullptr, *stg_vs_ = nullptr; unsigned char* tb_rec_ = nullptr;   
+  int stg_rows_ = 0; int8_t *stg_k8_ = nullptr, *stg_v8_ = nullptr; float *stg_ks_ = nullptr, *stg_vs_ = nullptr; unsigned char* tb_rec_ = nullptr; unsigned char* tb_scr_ = nullptr;   
   int kv_fp16_ = 0; 
   int emb_host_ = 0;     
   

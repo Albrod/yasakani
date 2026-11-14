@@ -12,7 +12,9 @@ Open an issue and include:
 * what you ran, what you expected and what happened;
 * for a crash or a wrong result: whether `yasakani selfcheck` passes.
 
-A result from another GPU (RTX 4090, 3090, 5080, ...) is useful even when it says "does not work": give `yasakani info` and the error text.
+A result from a GPU other than the RTX 5090 (RTX 4090, 3090, 5080, ...) is very useful, also when it says "does not work": give
+`yasakani info`, the output of `yasakani selfcheck` and the error text. Since 0.1.3 the engine is built for these cards, but we have not
+tested it on them.
 Please link large logs and model files instead of pasting them.
 
 For a security problem, do not open an issue: see [SECURITY.md](SECURITY.md).
@@ -24,7 +26,7 @@ For a security problem, do not open an issue: see [SECURITY.md](SECURITY.md).
   One person cannot always take a large change, and it is better to learn that before you spend the time.
 * The Python package has unit tests that need no GPU (the engine library is replaced by a small stand-in). Run `python -m unittest` in the package
   folder before you send a change.
-* Keep the scope in mind: Windows 11, RTX 5090, Qwen3.8-27B, one request at a time. A change that adds another platform, GPU or model needs its own
+* Keep the scope in mind: Windows 11, RTX 30, 40 and 50 series cards with 16 GB or more (tested on the RTX 5090), Qwen3.8-27B, one request at a time. A change that adds another platform, GPU or model needs its own
   test results to be useful.
 * By sending a contribution you agree that it is licensed under the Apache License 2.0 like the rest of the project (see [LICENSE](LICENSE)).
   Do not send code or data you do not have the right to license that way.

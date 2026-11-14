@@ -12,6 +12,7 @@
 #include "q35_flow.hpp"
 #include "signs.hpp"
 #include "devmem.hpp"   
+#include "gpu_caps.hpp"
 
 #ifndef _WIN32
 // 64-bit file offsets: MSVC names them _fseeki64 / _ftelli64, POSIX names them fseeko / ftello.
@@ -212,6 +213,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   (void)tb_dev_ptr();
   { const char* e = std::getenv("YSKN_TB_CAP"); tbcap_ = (e && e[0]) ? std::atoi(e) : 0; tbcap_kb_ = g_tb_kb; }
   if (tbcap_) { tb_rec_ = g_tb_rec; if (!tb_rec_) throw std::runtime_error("YSKN_TB_CAP=1: the KVQ profile has no decode records"); if (!tbf_host().scr) throw std::runtime_error("YSKN_TB_CAP=1 needs the fast encoder (YSKN_TB_FAST=1)"); }
+  if (tbf_host().scr) tb_scr_ = dz35<unsigned char>(tbf_scratch_bytes());
 #endif
   if (kv_fp16_ && kv8_) throw std::runtime_error("FP16 KV requires YSKN_Q35_KV8=0");
   { const char* e = std::getenv("YSKN_Q35_XSUM"); if (e && e[0]) xsm_ = std::atoi(e) != 0;
@@ -223,7 +225,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
     throw std::runtime_error("Engine35: kernels are built for the 27B shapes (hidden 5120, 24 / 4 heads of 256)");
   V_ = c.vocab; H_ = c.hidden; F_ = c.ffn; nlayers_ = c.layers; eps_ = c.eps;
   max_ctx_ = ((max_ctx + 63) / 64) * 64; m_.max_ctx = max_ctx_;
-  cudaDeviceGetAttribute(&m_.sm_count, cudaDevAttrMultiProcessorCount, 0);
+  { int dev = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&m_.sm_count, cudaDevAttrMultiProcessorCount, dev); }   // the GPU being opened, not device 0
   want_ = m_.sm_count * 8;
   { const char* e = std::getenv("YSKN_Q35_WANT"); if (e && std::atoi(e) > 0) want_ = std::atoi(e); }   
   shared_weights_ = get_shared35(path, want_, xsm_ != 0);
@@ -366,6 +368,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   { const char* u = std::getenv("YSKN_L2PF"); if (u && u[0]) l2pf_ = std::atoi(u);
     const char* nm[3] = {"YSKN_L2PF_GU", "YSKN_L2PF_DN", "YSKN_L2PF_IN"};
     for (int i = 0; i < 3; ++i) { const char* v = std::getenv(nm[i]); if (v && v[0]) l2pf_mb_[i] = std::atof(v); } }
+  if (!gpu_sm90_features()) { l2pf_ = 0; l2pf2_mb_ = 0.0; }   // the bulk L2 prefetch needs sm_90+ code (q35_kernels.cu)
   { const char* u = std::getenv("YSKN_Q35_PMATH"); if (u && u[0]) kz_ = std::atoi(u); }
   apply_kz();
   { const char* f = std::getenv("YSKN_Q35_FA"); if (f && f[0]) fa_ = std::atoi(f); const char* s = std::getenv("YSKN_Q35_FA_SPLITS"); if (s && std::atoi(s) > 0) fa_splits_ = std::min(32, std::atoi(s)); }
@@ -694,7 +697,7 @@ void Engine35::attn_block(Q35Layer& Y, int M, const int* dpos, int* slices) {
 #if YSKN_KVX_MODE == 3
     { const long li = (long)(&Y - L_.data()); int ord = -1;                
       if (li >= 0 && li < (long)L_.size() && &L_[(size_t)li] == &Y && L_[(size_t)li].full) { ord = 0; for (long i = 0; i < li; ++i) if (L_[(size_t)i].full) ++ord; }
-      X.tb = ord >= 0 ? tb_dev_ptr() : nullptr; X.tb_layer = ord < 0 ? 0 : ord; }
+      X.tb = ord >= 0 ? tb_dev_ptr() : nullptr; X.tb_layer = ord < 0 ? 0 : ord; X.tb_scr = tb_scr_; }
 #endif
 #if YSKN_KVX_MODE == 3
     if (cap_ord >= 0) {                                                
@@ -916,6 +919,7 @@ void Engine35::set_opt(int key, int value) {
   rp_launch(); cudaStreamSynchronize(st2_); replay_fence();           
   if (key == 15) { opt_rp_async_ = value; return; }
   if (key == 26) { opt_rp_defer_ = value; return; }                   
+  if ((key == 25 || key == 27) && value && !gpu_sm90_features()) value = 0;   // bulk L2 prefetch: sm_90+ code only
   if (key == 27) { if (value != (int)l2pf2_mb_) drop_pass_graphs(); l2pf2_mb_ = value; return; }   
   if (key == 28) { if (value != opt_lo_) drop_pass_graphs(); opt_lo_ = value; return; }   
   if (key == 1) opt_replay_graph_ = value; else if (key == 2) opt_single_commit_ = value; else if (key == 3) opt_catchup_nosync_ = value;

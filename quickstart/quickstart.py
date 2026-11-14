@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""YASAKANI quickstart (Windows + one NVIDIA RTX 5090).
+"""YASAKANI quickstart (Windows + one NVIDIA RTX GPU of the RTX 30, 40 or 50 series with 16 GB or more; tested on the RTX 5090).
 
 Double-click START.cmd.  This script then
   1. checks this computer (Windows, Python, GPU, free disk space),
-  2. lets you pick one of the two models,
+  2. lets you pick one of the two models (on a GPU with less than 24 GB only the fastest model fits),
   3. downloads the engine zip from the release page and checks its SHA-256,
   4. makes a private Python environment in this folder and installs the package,
   5. downloads the model folder from Hugging Face,
@@ -24,6 +24,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -35,10 +36,10 @@ import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-QS_VERSION = "0.1.2"
-ENGINE_ZIP = "yasakani-0.1.2-win-x64.zip"
-ENGINE_URL = "https://github.com/yasakani-dev/yasakani/releases/download/v0.1.2/" + ENGINE_ZIP
-ENGINE_SHA256 = "401d931ae4c26543197fbf52a8bc697784bbea9dd8e77804abfba19122169c2d"
+QS_VERSION = "0.1.3"
+ENGINE_ZIP = "yasakani-0.1.3-win-x64.zip"
+ENGINE_URL = "https://github.com/yasakani-dev/yasakani/releases/download/v0.1.3/" + ENGINE_ZIP
+ENGINE_SHA256 = "d1afd966d033d21864823ee04c7da48d5fd8248482bfe94b2f25874030b53896"
 REPO_URL = "https://github.com/yasakani-dev/yasakani"
 SUPPORT_URL = "https://camp-fire.jp/projects/992233/view"
 ENGINE_PORT, WEB_PORT = 8765, 8766      # `yasakani serve` and the browser chat; the next free ports are used if these are taken
@@ -50,10 +51,24 @@ MODELS = {
     "speed": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-speed", "need_gb": 14},
 }
 
+# ---- GPUs (0.1.3).  The engine is built for compute capability 8.6, 8.9 and 12.x (RTX 30, 40 and 50 series) and tested on the
+# RTX 5090 only.  The context rule is the one of yasakani/gpu.py, which the package applies each time it opens the model; it is
+# repeated here only to tell the context before anything is downloaded (python/tests/test_gpu.py checks that the two agree).
+GPU_FIELDS = ("index", "uuid", "name", "compute_cap", "memory.total", "memory.used", "driver_version")
+MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the models fit on (fastest model only)
+QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
+FULL_CONTEXT_MIN_TOTAL_MIB = 30000    # cards with this much memory keep the full context (the RTX 5090)
+KV_BYTES_PER_TOKEN, CONTEXT_STEP, MIN_CONTEXT, HEAD_OFF_BELOW, MARGIN_MIB, FULL_CONTEXT = 22400, 16384, 16384, 65536, 512, 262144
+MODEL_BYTES = {   # weights, draft model, its output head (the published files)
+    "quality": (12365242368, 1164969472, 1411010584),
+    "speed": (10311344128, 1164969472, 1411010584),
+}
+OVERHEAD_MIB = {"quality": 2300, "speed": 2100}
+
 T = {
     "banner": {
-        "ja": "YASAKANI クイックスタート {v}  -  Qwen3.8-27B を RTX 5090 1 枚で動かします",
-        "en": "YASAKANI quickstart {v}  -  runs Qwen3.8-27B on one RTX 5090",
+        "ja": "YASAKANI クイックスタート {v}  -  Qwen3.8-27B を NVIDIA の RTX 1 枚で動かします（確かめたのは RTX 5090）",
+        "en": "YASAKANI quickstart {v}  -  runs Qwen3.8-27B on one NVIDIA RTX card (tested on the RTX 5090)",
     },
     "support": {
         "ja": "開発を応援してください: CAMPFIRE のクラウドファンディング（2026 年 12 月 16 日まで）\n  {u}",
@@ -82,15 +97,66 @@ T = {
     "s_verify": {"ja": "点検（info・verify・selfcheck）", "en": "Checks (info, verify, selfcheck)"},
     "s_menu": {"ja": "準備ができました", "en": "Ready"},
     "no_smi": {
-        "ja": "nvidia-smi が見つかりません。NVIDIA のドライバーを入れてから、もう一度試してください。",
-        "en": "nvidia-smi was not found. Install the NVIDIA driver and try again.",
+        "ja": "nvidia-smi が見つかりません。NVIDIA の GPU とドライバーが要ります。ドライバーを入れてから、もう一度試してください。\n"
+              "AMD・Intel の GPU と Mac には対応していません。",
+        "en": "nvidia-smi was not found. YASAKANI needs an NVIDIA GPU and its driver; install the driver and try again.\n"
+              "AMD and Intel GPUs and Macs are not supported.",
     },
-    "gpu_is": {"ja": "GPU: {g}", "en": "GPU: {g}"},
+    "no_gpu": {
+        "ja": "NVIDIA の GPU が見つかりません。YASAKANI は NVIDIA の RTX 30・40・50 シリーズ（GPU のメモリ 16 GB 以上）で動きます。\n"
+              "AMD・Intel の GPU と Mac には対応していません。",
+        "en": "No NVIDIA GPU was found. YASAKANI runs on NVIDIA RTX 30, 40 and 50 series cards with 16 GB or more.\n"
+              "AMD and Intel GPUs and Macs are not supported.",
+    },
+    "gpu_is": {
+        "ja": "GPU: {g}（計算能力 {c}、メモリ {t} MiB、ドライバー {d}）",
+        "en": "GPU: {g} (compute capability {c}, {t} MiB, driver {d})",
+    },
+    "gpu_pick": {"ja": "GPU が {n} 枚あります。使うのは {g} です。", "en": "There are {n} GPUs. Using {g}."},
+    "gpu_tested": {"ja": "動作を確かめてある GPU です。", "en": "This is the GPU YASAKANI is tested on."},
     "gpu_other": {
-        "ja": "この版が対象にしているのは NVIDIA GeForce RTX 5090 だけです（ほかの GPU では確かめていません）。",
-        "en": "This version is made for the NVIDIA GeForce RTX 5090 only (it has not been tested on other GPUs).",
+        "ja": "この GPU は動くように作ってありますが、最適化も動作の確認もしていません（確かめたのは RTX 5090 だけです）。\n"
+              "速さは RTX 5090 より遅く、動作も保証しません。",
+        "en": "YASAKANI is made to run on this GPU, but it has not been optimized or tested on it (only the RTX 5090 has been tested).\n"
+              "It is slower than on the RTX 5090, and its operation is not guaranteed.",
     },
-    "continue_q": {"ja": "それでも続けますか？ [y/N]: ", "en": "Continue anyway? [y/N]: "},
+    "gpu_small": {
+        "ja": "この GPU のメモリ（{t} MiB）では足りません。YASAKANI には GPU のメモリが 16 GB 以上要ります。",
+        "en": "This GPU's memory ({t} MiB) is too small. YASAKANI needs a GPU with 16 GB or more.",
+    },
+    "gpu_old": {
+        "ja": "この GPU（計算能力 {c}）では動きません。動くのは RTX 30・40・50 シリーズ（計算能力 8.6 以上）で、メモリが 16 GB 以上のカードです。",
+        "en": "YASAKANI does not run on this GPU (compute capability {c}). It runs on RTX 30, 40 and 50 series cards "
+              "(compute capability 8.6 or higher) with 16 GB or more.",
+    },
+    "gpu_nocode": {
+        "ja": "この GPU（計算能力 {c}）用のコードは、この版のエンジンに入っていません。動くのは RTX 30・40・50 シリーズ"
+              "（計算能力 8.6・8.9・12.x）です。",
+        "en": "The engine of this version has no code for this GPU (compute capability {c}). It runs on RTX 30, 40 and 50 series "
+              "cards (compute capability 8.6, 8.9 and 12.x).",
+    },
+    "speed_only": {
+        "ja": "GPU のメモリが 24 GB 未満なので、使えるのは最速モデルだけです（品質モデルは入りません）。",
+        "en": "The GPU has less than 24 GB, so only the fastest model can be used (the quality model does not fit).",
+    },
+    "quality_no": {
+        "ja": "品質モデルには GPU のメモリが 24 GB 以上要ります。--model speed で最速モデルを選んでください。",
+        "en": "The quality model needs a GPU with 24 GB or more. Choose the fastest model with --model speed.",
+    },
+    "ctx_auto": {
+        "ja": "文脈の長さは、起動のたびに GPU の空きメモリから決めます（いまの空きで {n} トークン。最大 262,144）。",
+        "en": "The context length is chosen from the free GPU memory each time the model starts ({n} tokens with what is free now; "
+              "at most 262,144).",
+    },
+    "ctx_head": {
+        "ja": "文脈の場所を空けるため、補助モデルの出口の表（bdraft2_k8.shead）は読み込みません（1 回の計算が約 3% 長くなります）。",
+        "en": "To make room for the context, the output head of the draft model (bdraft2_k8.shead) is not loaded "
+              "(each pass takes about 3% longer).",
+    },
+    "ctx_short": {
+        "ja": "いまの空きメモリでは足りません（GPU のメモリを {u} MiB 使用中）。GPU を使うほかのプログラムを閉じてから、もう一度試してください。",
+        "en": "There is not enough free GPU memory now ({u} MiB in use). Close other programs that use the GPU and try again.",
+    },
     "disk": {
         "ja": "空き容量: {f:.0f} GB（必要: 約 {n} GB）",
         "en": "Free disk space: {f:.0f} GB (needed: about {n} GB)",
@@ -148,6 +214,15 @@ T = {
     "checks_ok": {
         "ja": "点検はすべて合格です。このパソコンは、公開されている基準と同じ出力を再現しました。",
         "en": "All checks passed. This computer reproduces the published reference output.",
+    },
+    "checks_other": {
+        "ja": "info と verify は合格です。selfcheck の出力は、RTX 5090 で作った基準と違いました。\n"
+              "ほかの GPU では、計算の細かな違いで途中から別の語になることがあります。この GPU での動作は確かめていません。\n"
+              "おかしな出力が続くときは、yasakani info の結果を添えて GitHub の Issues で知らせてください。このまま続けます。",
+        "en": "info and verify passed. The output of selfcheck differs from the reference, which was made on an RTX 5090.\n"
+              "On other GPUs small differences in the computation can make the output take another word part-way through. "
+              "Its operation on this GPU has not been checked.\n"
+              "If the output looks wrong, please report it on GitHub Issues with the output of yasakani info. Going on.",
     },
     "menu": {
         "ja": "\n何をしますか？\n"
@@ -302,11 +377,100 @@ def ask(prompt, default=""):
     return s or default
 
 
-def gpu_names():
-    out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
-        capture_output=True, text=True, timeout=60)
-    return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+def parse_gpus(text, fields=GPU_FIELDS):
+    """Lines of ``nvidia-smi --query-gpu=... --format=csv,noheader,nounits`` -> dicts (index, uuid, name, cc, total, used,
+    driver).  Values nvidia-smi could not give are None; lines without one value per field are skipped."""
+    def val(s):
+        s = s.strip()
+        return None if (not s or s.startswith("[") or s.upper() == "N/A") else s
+
+    def num(s):
+        try:
+            return int(round(float(s))) if s is not None else None
+        except ValueError:
+            return None
+    out = []
+    for n, line in enumerate(ln for ln in text.splitlines() if ln.strip()):
+        parts = line.split(",")
+        if len(parts) != len(fields):
+            continue
+        v = {k: val(p) for k, p in zip(fields, parts)}
+        cc = None
+        if v.get("compute_cap"):
+            try:
+                major, minor = v["compute_cap"].split(".")
+                cc = (int(major), int(minor))
+            except ValueError:
+                cc = None
+        index = num(v.get("index")) if "index" in v else n
+        if not v.get("name") or index is None:
+            continue
+        out.append(dict(index=index, uuid=v.get("uuid"), name=v["name"], cc=cc, total=num(v.get("memory.total")),
+                        used=num(v.get("memory.used")), driver=v.get("driver_version")))
+    return out
+
+
+def query_gpus(run=subprocess.run):
+    """Every GPU nvidia-smi lists ([] for none).  Raises OSError when nvidia-smi cannot be run.  Drivers that do not know
+    compute_cap are asked without it."""
+    fallback = tuple(f for f in GPU_FIELDS if f != "compute_cap")
+    for fields in (GPU_FIELDS, fallback):
+        out = run(["nvidia-smi", "--query-gpu=" + ",".join(fields), "--format=csv,noheader,nounits"],
+                  capture_output=True, text=True, timeout=60)
+        if out.returncode == 0:
+            return parse_gpus(out.stdout or "", fields)
+    return []
+
+
+def gpu_verdict(g):
+    """"tested" (the RTX 5090), "other" (runs, not optimized or tested), "small" (under 16 GB), "old" (compute capability below 8.6)
+    or "nocode" (9.x to 11.x, 13 and newer: the engine has no code for it)."""
+    cc = g.get("cc")
+    if cc is not None and cc < (8, 6):
+        return "old"
+    if cc is not None and not (cc < (9, 0) or cc[0] == 12):
+        return "nocode"
+    if re.search(r"(^|\s)RTX 5090$", g["name"].strip()) and cc in (None, (12, 0)):
+        return "tested"
+    if g.get("total") is not None and g["total"] < MIN_TOTAL_MIB:
+        return "small"
+    return "other"
+
+
+def pick_gpu(gpus, environ=None):
+    """The GPU to use: the one CUDA_VISIBLE_DEVICES names first, else the best usable one (the RTX 5090 first, then the one with the
+    most memory).  -> (gpu, verdict, pin): ``pin`` is the GPU's UUID to put in CUDA_VISIBLE_DEVICES when the PC has more than one
+    GPU, so that the engine runs on the GPU checked here (None: nothing to set)."""
+    env = os.environ if environ is None else environ
+    rank = {"tested": 0, "other": 1, "small": 2, "nocode": 3, "old": 4}
+    if "CUDA_VISIBLE_DEVICES" in env:
+        first = (env.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+        named = [g for g in gpus if (first.upper().startswith("GPU-") and (g.get("uuid") or "").lower().startswith(first.lower()))
+                 or (first.isdigit() and len(gpus) == 1 and g["index"] == int(first))]
+        if len(named) == 1:
+            return named[0], gpu_verdict(named[0]), None
+        worst = max(gpus, key=lambda g: (rank[gpu_verdict(g)], -(g.get("total") or 0)))   # not known which: the least able one
+        return worst, gpu_verdict(worst), None
+    best = min(gpus, key=lambda g: (rank[gpu_verdict(g)], -(g.get("total") or 0), -((g.get("total") or 0) - (g.get("used") or 0))))
+    pin = best.get("uuid") if len(gpus) > 1 else None
+    return best, gpu_verdict(best), pin
+
+
+def estimate_context(free_mib, model):
+    """The context the package will choose (yasakani/gpu.py, choose()): (tokens, head_off); tokens 0 = it does not fit."""
+    w, d, h = MODEL_BYTES[model]
+    mib = float(1 << 20)
+
+    def ctx(files):
+        room = free_mib - files / mib - OVERHEAD_MIB[model] - MARGIN_MIB
+        n = max(0, int(room * mib // KV_BYTES_PER_TOKEN))
+        return FULL_CONTEXT if n >= FULL_CONTEXT else (n // CONTEXT_STEP) * CONTEXT_STEP
+
+    with_head = ctx(w + d + h)
+    if with_head >= HEAD_OFF_BELOW:
+        return with_head, False
+    without = ctx(w + d)
+    return (without, True) if without > with_head else (with_head, False)
 
 
 # ---------------------------------------------------------------------------------------------------------------- browser chat
@@ -677,22 +841,41 @@ def main(argv=None):
     ui.step(1, n, "s_check")
     print("Python %s" % sys.version.split()[0])
     try:
-        gpus = gpu_names()
+        gpus = query_gpus()
     except (OSError, subprocess.SubprocessError):
         ui.say("no_smi")
         return 2
+    if not gpus:
+        ui.say("no_gpu")
+        return 2
     for g in gpus:
-        ui.say("gpu_is", g=g)
-    if not any("RTX 5090" in g for g in gpus):
-        ui.say("gpu_other")
-        if not a.yes and ask(ui.t("continue_q"), "n").lower() not in ("y", "yes"):
-            ui.say("stopped")
-            return 2
+        ui.say("gpu_is", g=g["name"], c="%d.%d" % g["cc"] if g["cc"] else "?", t=g["total"] if g["total"] is not None else "?",
+               d=g["driver"] or "?")
+    gpu, verdict, pin = pick_gpu(gpus)
+    if len(gpus) > 1:
+        ui.say("gpu_pick", n=len(gpus), g=gpu["name"])
+    if verdict == "old":
+        ui.say("gpu_old", c="%d.%d" % gpu["cc"])
+        return 2
+    if verdict == "nocode":
+        ui.say("gpu_nocode", c="%d.%d" % gpu["cc"])
+        return 2
+    if verdict == "small":
+        ui.say("gpu_small", t=gpu["total"])
+        return 2
+    ui.say("gpu_tested" if verdict == "tested" else "gpu_other")
+    quality_fits = gpu["total"] is None or gpu["total"] >= QUALITY_MIN_TOTAL_MIB
 
     # 2. model
     ui.step(2, n, "s_model")
     ok = st.setdefault("models_ok", {})
     model = a.model
+    if not quality_fits and not a.model_dir:
+        if model == "quality":
+            ui.say("quality_no")
+            return 2
+        model = "speed"
+        ui.say("speed_only")
     if not model:
         prev = st.get("model") or "quality"
         if a.yes or a.model_dir or a.action != "menu":
@@ -701,6 +884,14 @@ def main(argv=None):
             d = "2" if prev == "speed" else "1"
             model = "speed" if ask(ui.t("pick", d=d), d) == "2" else "quality"
     ui.say("picked", m=ui.t("m_" + model))
+    if gpu["total"] is not None and gpu["used"] is not None and gpu["total"] < FULL_CONTEXT_MIN_TOTAL_MIB and not a.model_dir:
+        n_ctx, head_off = estimate_context(gpu["total"] - gpu["used"], model)
+        if n_ctx < MIN_CONTEXT:
+            ui.say("ctx_short", u=gpu["used"])
+        else:
+            ui.say("ctx_auto", n="{:,}".format(n_ctx))
+            if head_off:
+                ui.say("ctx_head")
     mdir = os.path.abspath(a.model_dir) if a.model_dir else os.path.join(home, "models", model)
     try:
         mdir.encode("ascii")
@@ -769,6 +960,8 @@ def main(argv=None):
     env = dict(os.environ)
     env["YASAKANI_DLL"] = dll
     env["YASAKANI_MODEL_DIR"] = mdir
+    if pin:
+        env["CUDA_VISIBLE_DEVICES"] = pin            # more than one GPU: the engine runs on the GPU checked in step 1
 
     # 5. model files
     ui.step(5, n, "s_dl")
@@ -807,15 +1000,18 @@ def main(argv=None):
     if a.skip_checks or (ok.get(model) and not a.model_dir):
         ui.say("checks_done")
     else:
+        differs = False
         for cmd in ("info", "verify", "selfcheck"):
             if cmd == "selfcheck":
                 ui.say("load_note")
             rc = yk(cmd)
-            if rc != 0:
+            if rc == 3 and cmd == "selfcheck" and verdict != "tested":
+                differs = True
+            elif rc != 0:
                 ui.say("check_fail", c=cmd, rc=rc, r=REPO_URL)
                 return 6
         print()
-        ui.say("checks_ok")
+        ui.say("checks_other" if differs else "checks_ok")
         if not a.model_dir:
             ok[model] = True
             save_state(state_path, st)
@@ -825,6 +1021,8 @@ def main(argv=None):
         f.write("@echo off\nrem Run this in a command prompt, then type: yasakani chat   (or serve, bench, info ...)\n")
         f.write('set "YASAKANI_DLL=%s"\nset "YASAKANI_MODEL_DIR=%s"\nset "PATH=%s;%%PATH%%"\n'
                 % (dll, mdir, os.path.join(vdir, "Scripts")))
+        if pin:
+            f.write('set "CUDA_VISIBLE_DEVICES=%s"\n' % pin)
 
     # 7. use it
     ui.step(7, n, "s_menu")

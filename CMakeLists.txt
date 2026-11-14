@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
+# GPU code for RTX 30 (sm_86), RTX 40 (sm_89) and RTX 50 (sm_120) in one library. PTX is kept for compute_120 only, so that
+# newer 12.x GPUs can compile it at load time. To build one architecture, pass e.g. -DCMAKE_CUDA_ARCHITECTURES=120 (or 86, 89).
+set(CMAKE_CUDA_ARCHITECTURES "86-real;89-real;120" CACHE STRING "CUDA architectures to build (default: RTX 30, 40 and 50 series)")
 project(yasakani_engine LANGUAGES CXX CUDA)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -7,7 +10,11 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_ARCHITECTURES 120)
+foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+  if(arch MATCHES "^([0-9]+)" AND CMAKE_MATCH_1 LESS 86)
+    message(FATAL_ERROR "CMAKE_CUDA_ARCHITECTURES contains ${arch}: the engine needs compute capability 8.6 or newer (86, 89, 120).")
+  endif()
+endforeach()
 find_package(CUDAToolkit REQUIRED)
 
 add_library(yskn SHARED
@@ -20,6 +27,7 @@ add_library(yskn SHARED
   src/engine35.cpp
   src/gemm_compressed.cu
   src/gemv_sigma_int.cu
+  src/gpu_caps.cu
   src/kvx_probe.cu
   src/lnord.cu
   src/loader.cpp

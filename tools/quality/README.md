@@ -26,7 +26,7 @@ tool; they are in [`bench/20261108/quality/scripts/kld_base.py`](../../bench/202
    `--offload` keeps the weights in main memory (about 60 GB) and runs every block on one GPU. Without it, transformers spreads
    the model over the devices it finds.
 
-2. **A released model with the released engine** (Windows, RTX 5090, the `yasakani` package installed):
+2. **A released model with the released engine** (Windows, the `yasakani` package installed; the numbers below are from an RTX 5090):
 
        python tools/quality/score_yasakani.py --model-dir <model folder> --dll <yskn.dll> --reference own_reference.kld --out score.json
 
@@ -41,9 +41,9 @@ Measured on November 14, 2026 with the engine of release 0.1.1 (`yskn.dll`, SHA-
 | Model | Key-value cache | Reference | KL divergence | Top-1 agreement | Perplexity (of the reference) |
 |---|---|---|---|---|---|
 | quality | KV5 (as the package starts it) | the one of the table | 0.012591 | 95.347% | 2.0686 (2.0652) |
-| quality | 8-bit, without the KV5 compression | the one of the table | 0.012503 | 95.235% | 2.0687 (2.0652) |
+| quality | KV5 values kept unpacked in 8-bit form (`--kv int8`) | the one of the table | 0.012503 | 95.235% | 2.0687 (2.0652) |
 | fastest | KV5 (as the package starts it) | the one of the table | 0.030890 | 92.981% | 2.0759 (2.0652) |
-| fastest | 8-bit, without the KV5 compression | the one of the table | 0.030728 | 93.065% | 2.0759 (2.0652) |
+| fastest | KV5 values kept unpacked in 8-bit form (`--kv int8`) | the one of the table | 0.030728 | 93.065% | 2.0759 (2.0652) |
 | quality | KV5 (as the package starts it) | made by `make_reference.py` | 0.012591 | 95.347% | 2.0686 (2.0652) |
 | fastest | KV5 (as the package starts it) | made by `make_reference.py` | 0.030890 | 92.981% | 2.0759 (2.0652) |
 
@@ -57,9 +57,11 @@ fastest model 0.0304 and 93.01%.
 
 * The two YASAKANI rows of that table (KL 0.0122 with 95.24% agreement for the quality model, 0.0304 with 93.01% for the fastest
   model) were measured on November 8, 2026 with a research build of the engine that can use an FP16 key-value cache, so that the
-  rows show the weights and not the cache. The released `yskn.dll` is built for its 8-bit cache only, and the published source
-  builds only that configuration, so those two rows cannot be repeated with the released engine. What the released engine gives is
-  in the table above: the row "KV5" is the engine as the package starts it.
+  rows show the weights and not the cache. The released `yskn.dll` always rounds the cache with KV5 and has no FP16 cache, and the
+  published source builds only that configuration, so those two rows cannot be repeated with the released engine. What the released
+  engine gives is in the table above: the row "KV5" is the engine as the package starts it. With `--kv int8` (`YSKN_TB_CAP=0`) the keys
+  and values are still rounded by KV5 and only kept unpacked in 8-bit form; it is not a plain 8-bit cache, which the released engine
+  cannot run (until 0.1.3 these rows were labelled "8-bit, without the KV5 compression", which was not correct).
 * The reference file of that table was made on November 7, 2026 with our own implementation of the original model (bfloat16
   weights, the output matrix in 32-bit floats), not with transformers. It is about 10 GB and is not published. `make_reference.py`
   makes a reference with transformers instead; the last rows of the table above show how far the two references and the scores

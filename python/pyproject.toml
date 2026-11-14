@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "yasakani"
 dynamic = ["version"]
-description = "Run Qwen3.8-27B locally on one RTX 5090 (Windows) with the YASAKANI engine: OpenAI-compatible server, terminal chat, benchmark and self-check."
+description = "Run Qwen3.8-27B locally on one NVIDIA RTX GPU (tested on the RTX 5090 under Windows) with the YASAKANI engine: OpenAI-compatible server, terminal chat, benchmark and self-check."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

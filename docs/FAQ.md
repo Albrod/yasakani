@@ -4,9 +4,9 @@
 
 ## What is YASAKANI?
 
-An inference engine for running **Qwen3.8-27B** on your own Windows PC with **one NVIDIA RTX 5090**. It is GPU kernels, a file format for the
+An inference engine for running **Qwen3.8-27B** on your own Windows PC with **one NVIDIA RTX GPU** (tested on the RTX 5090). It is GPU kernels, a file format for the
 compressed model, and a runtime, with an OpenAI-compatible server, a terminal chat, a benchmark and a self-check. One person in Japan built it. It is
-not a general-purpose engine: one card, one model.
+not a general-purpose engine: one model, tuned on one card.
 
 ## Which model should I download?
 
@@ -44,20 +44,21 @@ are; they are not the rate of correct answers on tasks, and they cover thinking 
 divergence 3-10% larger for the quality model than for our earlier conversion of the same size.
 
 Does the speed-up itself change the answers? It is built not to: speculative decoding only keeps tokens that the main model agrees with.
-In our checks of November 10, 2026, repeated runs of the same request were identical in all 240 runs while nothing else was using the GPU.
-While other programs were using the GPU at the same time, a few runs had the same tokens as the others up to one position and continued
-differently from there (1 of 190 runs with the default settings, 21 of 432 with speculative decoding switched off; 256 tokens each).
-We have not found the cause yet. The release does not promise bit-identical text from run to run; the details are in
-[MEASUREMENTS.md](MEASUREMENTS.md).
+Up to 0.1.2, while other programs were using the GPU at the same time, a few repeated runs had the same tokens as the others up to one
+position and continued differently from there (November 10, 2026: 1 of 190 runs with the default settings, 21 of 432 with speculative
+decoding switched off; 256 tokens each). With nothing else using the GPU, all 240 repeated runs were identical. The cause was a missing
+synchronization in the kernels that apply the position rotation; 0.1.3 fixes it, and in our tests with the fix it did not appear again.
+We still do not promise bit-identical text in every condition; the details are in [MEASUREMENTS.md](MEASUREMENTS.md).
 
 ## Which GPUs, which systems?
 
-Only **Windows 11 and the RTX 5090** (32 GB) are supported and tested. The kernels are built for compute capability 12.0, which
-the whole RTX 50 series shares; on any card other than the RTX 5090 the quickstart asks whether to continue (pressing Enter alone
-stops it). Other NVIDIA cards have not been tested with
-this release; results from them are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)). macOS and
-AMD GPUs are not supported. On Linux the engine can be built from source (a community contribution, [#3](https://github.com/yasakani-dev/yasakani/pull/3), checked on
-WSL2 / Ubuntu 24.04 with an RTX 5090); a prebuilt Linux release with a launcher is one of the campaign's goals. Extending support - 24 GB and 16 GB RTX cards first, then AMD and Mac - is what the
+We test on **Windows 11 and the RTX 5090** (32 GB). Since 0.1.3 the engine is also built to run on other NVIDIA RTX 30, 40 and 50 series cards with
+compute capability 8.6 or higher and 16 GB or more: the RTX 3090, RTX 3090 Ti and RTX 4090 (24 GB; both models) and the
+RTX 4060 Ti 16GB, RTX 4070 Ti SUPER, RTX 4080, RTX 4080 SUPER, RTX 5060 Ti 16GB, RTX 5070 Ti, RTX 5080 (16 GB; the fastest model only, with a shorter context). The engine is
+not optimized for them and we have not tested it on them, so neither its speed nor its operation is guaranteed; they are slower than the
+RTX 5090. The quickstart says so and goes on. Results from these cards are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+AMD GPUs, Macs, cards with less than 16 GB and cards older than the RTX 30 series are not supported. On Linux the engine can be built from source (a community contribution, [#3](https://github.com/yasakani-dev/yasakani/pull/3), checked on
+WSL2 / Ubuntu 24.04 with an RTX 5090); a prebuilt Linux release with a launcher is one of the campaign's goals. Testing and tuning on the 24 GB and 16 GB RTX cards first, then AMD and Mac - that is what the
 crowdfunding campaign is for; the order and the conditions are on the [campaign page](https://camp-fire.jp/projects/992233/view).
 
 ## How much memory and disk does it need?
@@ -69,9 +70,13 @@ in FP16); this is the amount reserved at start, not the peak of the whole setup.
 Together with the helper model that speeds up generation, the GPU memory in use at the full 262,144-token context was about 19.1 GiB for the
 fastest model and about 21.2 GiB for the quality model (about 14.3 GiB and 16.4 GiB with `--max-ctx 32768`; November 11, 2026).
 
+On a GPU with less than 32 GB, the context is chosen from the free GPU memory each time the model starts (at most 262,144 tokens;
+`--max-ctx` sets it yourself). On 16 GB cards only the fastest model fits. The rule is in
+[python/README.md](../python/README.md#gpus-other-than-the-rtx-5090).
+
 ## It is much slower than the tables
 
-Check the GPU memory first. When other programs (games, other LLM servers) use GPU memory and it runs out, there is no error: generation just
+The tables were measured on an RTX 5090; other GPUs are slower, and we have not measured them. Check the GPU memory first. When other programs (games, other LLM servers) use GPU memory and it runs out, there is no error: generation just
 becomes several times slower. In that case a warning that the GPU memory is almost full is printed at start. Close the other programs, or
 lower `--max-ctx`. The speed also depends on what you ask (see "Will I see the same speed?" above).
 

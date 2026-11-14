@@ -448,7 +448,7 @@ the video runs (their usage blocks have no `loop_guard` entry). The commands of 
 |---|---|---|---|
 | `yasakani_std_greedy` | YASAKANI std, greedy | 12 prompts x 2 | `pub_corpus_greedy.py` (in-process) |
 | `yasakani_fast_greedy` | YASAKANI fast, greedy | 12 x 2 | `pub_corpus_cond2.py` (in-process) |
-| `yasakani_std_greedy_kv8` | YASAKANI std, greedy, plain 8-bit KV (`--env YSKN_TB_CAP=0`) | 12 x 2 | `pub_corpus_cond.py` (in-process) |
+| `yasakani_std_greedy_kv8` | YASAKANI std, greedy, KV5-rounded values kept unpacked in 8-bit form (`--env YSKN_TB_CAP=0`; not a plain 8-bit cache) | 12 x 2 | `pub_corpus_cond.py` (in-process) |
 | `yasakani_std_t06` | YASAKANI std, temperature 0.6 | 12 x 5 | `pub_corpus_direct.py` (in-process) |
 | `yasakani_fast_t06` | YASAKANI fast, temperature 0.6 | 12 x 5 | `pub_corpus_cond2.py` (in-process) |
 | `yasakani_std_code2000`, `yasakani_std_code2000_kv8`, `yasakani_fast_code2000` | YASAKANI, the 3 code prompts, answers up to 2,000 tokens | 3 x 2 | `pub_corpus_cond2.py` (in-process) |

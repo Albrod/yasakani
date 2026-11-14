@@ -1,9 +1,9 @@
-﻿YASAKANI quickstart 0.1.2
+﻿YASAKANI quickstart 0.1.3
 =========================
 
 日本語
 ------
-Windows 11 と NVIDIA GeForce RTX 5090 1 枚のパソコンで、YASAKANI をすぐに試すための起動ファイルです。
+Windows 11 と NVIDIA の RTX 1 枚のパソコンで、YASAKANI をすぐに試すための起動ファイルです。動作を確かめたのは RTX 5090 です。
 
 使い方
   1. この zip を、C:\yasakani のような英数字だけの場所に展開します。
@@ -21,6 +21,9 @@ START.cmd がすること
 知っておくこと
   - Python 3.10 以上が要ります（https://www.python.org/downloads/windows/）。
   - 空き容量は 20 GB ほど要ります。
+  - GPU：確かめたのは RTX 5090 だけです。0.1.3 から、RTX 30・40・50 シリーズで GPU のメモリが 16 GB 以上のカードでも
+    動きます。ただし最適化も動作の確認もしていません。24 GB 未満のカードでは最速モデルだけを使い、文脈の長さは空きメモリから
+    決めます。AMD・Intel の GPU と Mac には対応していません。
   - 「先読みあり・なしを比べる」（lookahead_check.py）は、同じ 4 つの課題を、先読みなしと出荷時の設定で書かせます。
     1 回の計算の時間、1 回で確定したトークン数、速さ、書かれた文章が同じかどうかを表示します。
     技術の解説（docs/TECHNOLOGY.ja.md）の 1.3 の表と比べられます。
@@ -33,7 +36,7 @@ START.cmd がすること
 
 English
 -------
-A starter for trying YASAKANI on a Windows 11 computer with one NVIDIA GeForce RTX 5090.
+A starter for trying YASAKANI on a Windows 11 computer with one NVIDIA RTX card (tested on the RTX 5090).
 
 How to use
   1. Unpack this zip to a plain path such as C:\yasakani
@@ -51,6 +54,9 @@ What START.cmd does
 Good to know
   - Python 3.10 or newer is needed (https://www.python.org/downloads/windows/).
   - About 20 GB of free disk space is needed.
+  - GPU: only the RTX 5090 has been tested. Since 0.1.3 YASAKANI also runs on RTX 30, 40 and 50 series cards with 16 GB
+    or more, but it is not optimized or tested on them. On cards with less than 24 GB only the fastest model is used, and
+    the context length is chosen from the free GPU memory. AMD and Intel GPUs and Macs are not supported.
   - "Compare look-ahead on and off" (lookahead_check.py) writes the same four tasks without look-ahead and with the
     shipping settings. It prints the time of one pass, the tokens confirmed per pass, the speed, and whether the text is
     the same. Compare the result with table 1.3 of the technical notes (docs/TECHNOLOGY.md).

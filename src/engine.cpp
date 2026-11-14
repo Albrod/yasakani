@@ -10,6 +10,7 @@
 #include <utility>
 #include <algorithm>
 #include "devmem.hpp"   
+#include "gpu_caps.hpp"
 namespace yskn {
 
 
@@ -17,7 +18,7 @@ thread_local int g_pdl_rows = 1;
 bool pdl_enabled() {
   static const bool on = [] { const char* e = std::getenv("YSKN_NO_PDL"); return !(e && e[0] == '1'); }();
   static const int max_m = [] { const char* e = std::getenv("YSKN_PDL_MAX_M"); return e ? std::atoi(e) : 16; }();   
-  return on && g_pdl_rows <= max_m;
+  return on && g_pdl_rows <= max_m && gpu_sm90_features();   // griddepcontrol exists only in sm_90+ code (pdl.cuh)
 }
 template <class T2> static T2* dz(size_t bytes) { T2* p = nullptr; cudaMalloc(&p, bytes); cudaMemset(p, 0, bytes); return p; }
 

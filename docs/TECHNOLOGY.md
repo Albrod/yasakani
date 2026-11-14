@@ -3,13 +3,14 @@
 Technical notes by the author, written as a map for people who read the source code in this repository.
 日本語: [TECHNOLOGY.ja.md](TECHNOLOGY.ja.md)
 
-* Scope: versions 0.1.0 to 0.1.2 (the engine library is the same in all three). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B.
+* Scope: versions 0.1.0 to 0.1.3. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
+  one missing synchronization (chapter 7). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).
 * "measured" marks a measured value; "calc." marks a value computed from file sizes or from measured values.
 * Most of the methods described here stand on published research ([9. Research this builds on](#9-research-this-builds-on)). What is new is
-  that the compression, the file format, the GPU computation and the look-ahead were **designed together**, for one card and one model.
+  that the compression, the file format, the GPU computation and the look-ahead were **designed together** for one model, and tuned on one card.
 
 ## 1. Speed is set by bytes read and memory bandwidth
 
@@ -223,8 +224,9 @@ In the tasks of the table above almost all confirmed tokens came from the draft 
 
 ## 6. KV5 (the cache for long contexts)
 
-KV5 stores the keys and values of the attention layers at 5 bits per value. It is what lets a context of up to 262,144 tokens sit next to
-the model on a 32 GB card.
+KV5 stores the keys and values of the attention layers at 5 bits per value. Per token it takes about a third of the memory of an FP16
+cache and about two thirds of an 8-bit one, which leaves more memory for long contexts. With the fastest model and 262,144 tokens
+reserved, the engine takes 16.78 GiB with KV5 and 27.13 GiB with an FP16 cache (a research build; [MEASUREMENTS.md](MEASUREMENTS.md)).
 
 * **How it is made.** Keys, values and queries get the same Hadamard rotation (the result of attention does not change), and each row of
   256 values is rounded with a trellis code of the same kind as the weights (in chains of 64 values, with an integer-only Viterbi).
@@ -233,8 +235,13 @@ the model on a 32 GB card.
 * **Reading.** The rows are read at 5 bits and turned back into values inside the attention computation; no 8-bit copy is made.
 * **What is packed.** The keys of all 16 layers and the values of 13 layers. The values of 3 layers stay at 8 bits.
 * **Size.** Per token: about 64 KiB with FP16, about 33 KiB with 8 bits, about 22 KiB with KV5.
-* **Quality and speed.** On fixed texts of 2K to 128K tokens, the KL with KV5 was at most 0.00052 higher than with FP16 on average.
-  The time of one pass was the same as with 8 bits (9.74 ms against 9.78 ms).
+* **Quality and speed.** With the fastest model on fixed texts of 2K to 128K tokens, the KL with KV5 was at most 0.00052 higher than with
+  FP16 on average (the FP16 side was a research build). Against a plain 8-bit cache (a measurement build of the 0.1.2 source, context
+  2,048 tokens) the KL with KV5 was about 3% higher for the quality model and about 2% higher for the fastest model
+  ([MEASUREMENTS.md](MEASUREMENTS.md)). The time of one pass was about the same as with the KV5-rounded values kept unpacked in 8-bit
+  form: on the four tasks at a context of 16,384 tokens the difference was within 1% for prose, the thinking task and CSV to JSON, and
+  KV5 took about 3% longer for code. Only CSV to JSON gave the same text with both settings (chapter 7). The released engine has not
+  been compared with a plain 8-bit cache for speed.
 
 Source: the rotation is in `src/kvx_codec.cuh`, the encoder in `src/kvq_fast.cuh` and `src/kvq_vit2.cuh`, the reader in `src/q35_atxpk.cu`,
 `src/q35_atxpk3.cuh` and `src/q35_atxpk4.cuh`. The code table is `kvq_u5.bin` in the model folder.
@@ -277,10 +284,15 @@ The mechanisms of chapters 4 to 6 are built to change only the speed. To check t
 one mechanism switched off. Comparing the first run of each setting, **all 112 texts were the same as with the shipping settings** (and the
 same as with all look-ahead switched off).
 
-This release does not promise output that is identical to the last character on every run. While other programs used the GPU at the same
-time, a run occasionally turned into a different text part-way through. The cause has not been found yet ([MEASUREMENTS.md](MEASUREMENTS.md)).
+Up to 0.1.2, while other programs used the GPU at the same time, a run occasionally turned into a different text part-way through. The
+cause was found on 11 November 2026. `q35_attn_post_kernel` (`src/q35_kernels.cu`) and `wk_attn_post_kernel` (`src/lfrow_kernels.cuh`)
+apply the position rotation to queries and keys; the rotation reads values of other threads from shared memory, and the next step
+(`kvx_rotate`) wrote into the same memory without waiting for those reads. 0.1.3 adds the missing `__syncthreads()`. In our tests with
+builds that have it, the change did not appear again ([MEASUREMENTS.md](MEASUREMENTS.md)). We still do not promise output that is
+identical to the last character in every condition.
 
-KV5 is a setting that changes the numbers. Switching to the 8-bit KV cache can give a different text.
+KV5 rounds the cached values, so it changes the numbers. The released engine has no unrounded cache to switch to: with `YSKN_TB_CAP=0`
+it keeps the KV5-rounded values unpacked in 8-bit form and reads them with another attention kernel, and that can give a different text too.
 
 ## 8. What each part contributes
 
@@ -309,7 +321,13 @@ time are expanded to int8 and reused (`src/q35_g6.cu`). A request that starts wi
 
 ## 10. What this release does not have, and limits
 
-* Only the RTX 5090, Windows 11 and Qwen3.8-27B are supported. The kernels are written for this card and the shape of this model.
+* Tested on the RTX 5090, Windows 11 and Qwen3.8-27B only. The kernels are written for the shape of this model and tuned on this card.
+  Since 0.1.3 they are also built for compute capability 8.6 and 8.9 (RTX 30 and 40 series); the RTX 50 series shares 12.0 with the
+  RTX 5090. Two kinds of instructions need compute capability 9.0 or higher: the early launch of kernels (`griddepcontrol`, chapter 8) and
+  a bulk prefetch into the L2 cache (off by default); on the RTX 30 and 40 series they are left out. Block sizes and the split of the work
+  were chosen on the RTX 5090; on cards with fewer SMs and less memory bandwidth they are not tuned, and the speed there has not been
+  measured. On cards with less than 32 GB the package chooses a shorter context ([python/README.md](../python/README.md#gpus-other-than-the-rtx-5090)).
+* AMD GPUs and Macs are not supported: the kernels are CUDA.
 * The converter ([`tools/convert/`](../tools/convert/)) knows the layers of Qwen3.8-27B only; another model needs changes to it and to
   the engine.
 * One request is generated at a time.

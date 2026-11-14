@@ -1,18 +1,18 @@
 # yasakani (Python package)
 
-Run **Qwen3.8-27B** on one **NVIDIA RTX 5090** under **Windows** with the YASAKANI engine library (`yskn.dll`).
+Run **Qwen3.8-27B** on one **NVIDIA RTX GPU** under **Windows** with the YASAKANI engine library (`yskn.dll`). It is tested on the RTX 5090.
 
 This package is the part you talk to: a local **OpenAI-compatible server**, a **terminal chat**, a **benchmark**, and two checks that tell you
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.1.2`. Text, and optionally still images (new in 0.1.2, Windows only, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1.
+Status: version `0.1.3`. Text, and optionally still images (new in 0.1.2, Windows only, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
 
 ## What you need
 
 | | |
 |---|---|
-| GPU | NVIDIA **RTX 5090** (the engine is built for this card only) and a current NVIDIA driver |
+| GPU | NVIDIA **RTX 5090** (tested), or since 0.1.3 another RTX 30, 40 or 50 series card with compute capability 8.6 or higher and 16 GB or more (not optimized or tested; [below](#gpus-other-than-the-rtx-5090)); a current NVIDIA driver |
 | OS | **Windows 11**, 64-bit (the only version tested), with the *Microsoft Visual C++ 2015-2022 x64 runtime* ([download](https://aka.ms/vs/17/release/vc_redist.x64.exe)) |
 | Python | 3.10 or newer |
 | Disk | about 15 GB for the quality model folder, about 13 GB for the fastest model folder |
@@ -60,6 +60,35 @@ can be given with `--model-dir` or `YASAKANI_MODEL_DIR`.
 | `yasakani bench` | speed measurement: greedy, fixed length, your own prompts with `--prompts-file`; `--json` for a machine-readable result |
 
 Loading the model takes about a minute; `serve` answers `/health` with `503 loading` until it is ready.
+
+## GPUs other than the RTX 5090
+
+Since 0.1.3 the engine library is built for compute capability 8.6, 8.9 and 12.x. On any GPU other than the RTX 5090, `chat`, `serve`,
+`bench` and `selfcheck` print a note at start: the engine runs there, but it is not optimized or tested, and its speed and operation are not
+guaranteed. `yasakani info` shows what 0.1.3 does on each GPU it finds. AMD GPUs and Macs are not supported.
+
+**Context length.** The engine reserves the key-value cache for the whole context when it opens the model. When you do not give `--max-ctx`,
+on a GPU with less than 30,000 MiB the package chooses the context before it opens the model:
+
+```
+room    = free GPU memory (nvidia-smi: total - used) - the three model files - 2,100 MiB (fastest model) or 2,300 MiB (quality model) - 512 MiB
+context = room / 22,400 bytes per token, rounded down to a multiple of 16,384, at most the model's 262,144
+```
+
+If that is less than 65,536 tokens and leaving out the output head of the draft model (`bdraft2_k8.shead`, 1.3 GiB) gives more, the head
+is not loaded (`YSKN_BDR_SHEAD=0`; on the RTX 5090 each pass took about 3% longer and the output stayed the same). If not even 16,384 tokens
+fit, the command stops before loading and says so; `--max-ctx` tries a given length anyway. On the RTX 5090, and on any card with 30,000 MiB
+or more, nothing changes: the context stays 262,144. The 2,100 and 2,300 MiB were measured on the RTX 5090 under Windows; the rule has not
+been checked on other cards. It is `yasakani.gpu.plan_context`; `Engine` itself does not apply it (pass `max_ctx`).
+
+**Several GPUs.** nvidia-smi numbers the GPUs in PCI order, CUDA by default puts the fastest first. When the PC has more than one GPU and
+neither `CUDA_DEVICE_ORDER=PCI_BUS_ID` nor `CUDA_VISIBLE_DEVICES` tells which one `--device` is, the context is chosen for the smallest of
+them. The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
+
+**The self-check** compares with output made on an RTX 5090. On another GPU the output can differ from it; `selfcheck` then exits with
+code 3 (only the output differs) instead of 1, and the quickstart reports this and goes on.
+
+`YASAKANI_NVIDIA_SMI` names the nvidia-smi to use; `none` turns the GPU check and the context rule off.
 
 ## The server
 
@@ -185,7 +214,7 @@ server, so delete the folder when you no longer want it.
 `selfcheck.json` holds, for three short fixed prompts, a hash of the prompt ids and a hash of the greedy output ids made with the reference installation.
 `yasakani selfcheck` produces the same records on your computer and compares them. A *prompt ids differ* result means the tokenizer or template files are
 not the reference ones; an *output differs* result means the weights, the DLL, or the GPU/driver behave differently from the reference. Send the result
-with your report in that case.
+with your report in that case. The reference was made on an RTX 5090; on other GPUs see [above](#gpus-other-than-the-rtx-5090) (exit code 3).
 
 The three prompts are short on purpose. Output is not guaranteed to be bit-identical from run to run while other programs use the GPU at the
 same time (see `docs/MEASUREMENTS.md` in the repository). In our checks the three self-check requests were identical in all 180 repeats and
@@ -219,6 +248,8 @@ means running an engine configuration that the self-check and the published numb
 
 * *engine library not found / could not be loaded* - give `--dll`, and install the Visual C++ runtime linked above.
 * *could not open the model ... not enough free GPU memory* - close other programs that use the GPU, or lower `--max-ctx`.
+* *the model does not fit in the free GPU memory* (0.1.3, before loading) - close other programs that use the GPU; on a 16 GB card use the
+  fastest model; `--max-ctx` tries a given length anyway.
 * *much slower than the published numbers* - look for the warning *the GPU memory is almost full* at start. When other programs use GPU memory
   and it runs out, Windows keeps part of the model in ordinary memory; there is no error, but generation becomes several times slower.
   Close the other programs, or lower `--max-ctx`.

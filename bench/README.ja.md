@@ -336,7 +336,7 @@ MegaCapybara は、公式の 1 会話向けプリセットの既定（KV 6/4）�
 |---|---|---|---|
 | `yasakani_std_greedy` | YASAKANI std、greedy | 12 問 × 2 | `pub_corpus_greedy.py`（プロセス内） |
 | `yasakani_fast_greedy` | YASAKANI fast、greedy | 12 × 2 | `pub_corpus_cond2.py`（プロセス内） |
-| `yasakani_std_greedy_kv8` | YASAKANI std、greedy、KV を普通の 8 bit に（`--env YSKN_TB_CAP=0`） | 12 × 2 | `pub_corpus_cond.py`（プロセス内） |
+| `yasakani_std_greedy_kv8` | YASAKANI std、greedy、KV5 で丸めた値を詰めずに 8 bit の形で置く（`--env YSKN_TB_CAP=0`。素の 8 bit ではない） | 12 × 2 | `pub_corpus_cond.py`（プロセス内） |
 | `yasakani_std_t06` | YASAKANI std、temperature 0.6 | 12 × 5 | `pub_corpus_direct.py`（プロセス内） |
 | `yasakani_fast_t06` | YASAKANI fast、temperature 0.6 | 12 × 5 | `pub_corpus_cond2.py`（プロセス内） |
 | `yasakani_std_code2000`・`yasakani_std_code2000_kv8`・`yasakani_fast_code2000` | YASAKANI、コードの 3 問、答えは 2,000 トークンまで | 3 × 2 | `pub_corpus_cond2.py`（プロセス内） |

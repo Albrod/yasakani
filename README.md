@@ -1,9 +1,9 @@
 # YASAKANI
 
-A local LLM engine for **Windows** and **one NVIDIA RTX 5090**, built for one model: **Qwen3.8-27B**. Open source, Apache License 2.0.
+A local LLM engine for **Windows** and **one NVIDIA RTX GPU** (tested on the **RTX 5090**), built for one model: **Qwen3.8-27B**. Open source, Apache License 2.0.
 日本語は [README.ja.md](README.ja.md)。
 
-> **Version 0.1.2 (November 14, 2026).** New in this version: the server can take images, optionally (Windows only; contributed in [#4](https://github.com/yasakani-dev/yasakani/pull/4); see [What you need](#what-you-need)). Since 0.1.1 it accepts requests with `tools` (tool / function calling), so coding agents and other tool-using apps can connect to it. Engine: [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.2). Models on Hugging Face: [quality model](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) and [fastest model](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed).
+> **Version 0.1.3 (November 15, 2026).** New in this version: the engine is also built to run on other NVIDIA RTX 30, 40 and 50 series cards with 16 GB or more. We have not run it on them, and it is not optimized for them (see [What you need](#what-you-need)). This version also fixes the cause of a rare change of the text part-way through a run (see [Quality](#quality)). Since 0.1.2 the server can take images, optionally (Windows only; contributed in [#4](https://github.com/yasakani-dev/yasakani/pull/4)). Since 0.1.1 it accepts requests with `tools` (tool / function calling), so coding agents and other tool-using apps can connect to it. Engine: [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.3). Models on Hugging Face: [quality model](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) and [fastest model](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed).
 >
 > **Support the development:** crowdfunding on CAMPFIRE for backers living in Japan, until December 16, 2026 - https://camp-fire.jp/projects/992233/view (outside Japan: see [Support](#support))
 
@@ -14,8 +14,8 @@ time), its fastest model wrote answers faster than every one of them in all seve
 tables and what they do and do not show are under [Speed](#speed). It starts an **OpenAI-compatible server** (so chat front-ends and developer
 tools can use it), a **terminal chat**, and a **benchmark**. After the download it needs no internet connection.
 
-It was built by one person in Japan. The engine is a purpose-built set of GPU kernels, a file format and a runtime for this one card and
-this one model; it is not a general-purpose engine.
+It was built by one person in Japan. The engine is a purpose-built set of GPU kernels, a file format and a runtime for this one model,
+tuned on one card, the RTX 5090; it is not a general-purpose engine.
 
 ## Two models
 
@@ -35,6 +35,7 @@ The two quality rows are agreement with the original model's next-token predicti
 ## Speed
 
 Tokens written per second, on one RTX 5090 (stock 600 W, no overclocking), the same PC for every engine, one request at a time. Bigger is faster.
+All speed numbers in this repository are from the RTX 5090. Other GPUs are slower, and we publish no numbers for them.
 
 **Thinking off** (greedy; average of 2 runs per task, after leaving out runs that fell into a repetition loop or made a tool call nobody asked for):
 
@@ -125,8 +126,8 @@ than for our earlier conversion of the same size. The full table, including the 
 divergence could be measured, is in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
 
 **Checking it yourself.** The numbers above were measured with a research build of the engine and an FP16 key-value cache. The released
-`yskn.dll` works with its 8-bit cache only. Measured again with the released engine as the package starts it (KV5 cache, November 14,
-2026), the quality model gives a KL divergence of 0.0126 and a top-1 agreement of 95.35%, the fastest model 0.0309 and 92.98%. The
+`yskn.dll` has no FP16 cache: it always rounds the cache with KV5. Measured again with the engine of releases 0.1.0 to 0.1.2 as the
+package starts it (KV5 cache, November 14, 2026), the quality model gives a KL divergence of 0.0126 and a top-1 agreement of 95.35%, the fastest model 0.0309 and 92.98%. The
 20 texts, a program that makes the reference from the original model with Hugging Face transformers, and the program that measures a
 released model are in [tools/quality/](tools/quality/). The file format is specified in [docs/FORMAT.md](docs/FORMAT.md), and
 [tools/yskn_decode.py](tools/yskn_decode.py) reads a model file without the engine and compares the stored weights with the original
@@ -134,20 +135,25 @@ ones. The program that made the model files from the original weights is in [too
 that made them, with only the output matrix taken from the released files, it gave the released files byte for byte
 ([its README](tools/convert/README.md)).
 
-Speculative decoding only keeps tokens that the main model agrees with, so it is built not to change what is written. Whether a repeated
-request gives exactly the same tokens depended, in our checks of November 10, 2026, on whether other programs were using the GPU at the same
-time. With the GPU otherwise idle, all 240 repeated runs were identical. While other programs were using the GPU (the desktop was drawing),
-a run now and then had the same tokens as the others up to one position and continued differently from there:
-1 of 190 runs with the default settings and 21 of 432 with speculative decoding switched off (256 tokens each). The cause has not been found
-yet, so this release does not promise bit-identical text from run to run. The details are in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
+Speculative decoding only keeps tokens that the main model agrees with, so it is built not to change what is written. Up to 0.1.2, while
+other programs were using the GPU at the same time (the desktop was drawing), a repeated request now and then had the same tokens as the
+others up to one position and continued differently from there (November 10, 2026: 1 of 190 runs with the default settings and 21 of 432
+with speculative decoding switched off; November 11 and 12: 10 of 593 runs). With the GPU otherwise idle, all 240 repeated runs were identical.
+On November 11 we found the cause: in the kernels that apply the position rotation to queries and keys, one synchronization was missing,
+so a value could be overwritten before another thread had read it. 0.1.3 adds it. In our tests with builds that have this fix, the change
+did not appear again (for example 0 of 2,800 passes compared bit for bit while another process kept the GPU busy, against 6 of 3,200
+without the fix). We still do not promise bit-identical text in every condition. The details are in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
 
 ## Long contexts
 
 The context length goes up to 262,144 tokens. The key-value cache is stored in YASAKANI's own compressed format, **KV5**. With the fastest
 model and the full 262,144-token context reserved, the engine takes 16.78 GiB with KV5 against 27.13 GiB with an FP16 cache (about 38% less
-for the whole engine, about 66% less per cached token). On fixed texts of 2K to 128K tokens, the KL divergence with KV5 was at most 0.00052
-higher on average than with FP16. The 262,144 figure is what the engine reserves at start; quality was checked up to 128K, and this is not a
-statement that the model runs on a 16 GB GPU.
+for the whole engine, about 66% less per cached token). With the fastest model on fixed texts of 2K to 128K tokens,
+the KL divergence with KV5 was at most 0.00052 higher on average than with FP16 (the FP16 side was a research build). Against a plain
+8-bit cache (a measurement build of the 0.1.2 source, context 2,048 tokens), the KL with KV5 was about 3% higher for the quality model and
+about 2% higher for the fastest model ([docs/MEASUREMENTS.md](docs/MEASUREMENTS.md)).
+The 262,144 figure is what the engine reserves at start; quality was checked up to 128K. On a GPU with less
+memory than the RTX 5090 the context is made to fit (see [What you need](#what-you-need)).
 
 Together with the helper model that speeds up generation, the GPU memory in use at the full 262,144-token context was about 19.1 GiB for the
 fastest model and about 21.2 GiB for the quality model (about 14.3 GiB and 16.4 GiB with `--max-ctx 32768`; November 11, 2026, the difference
@@ -157,14 +163,29 @@ of the nvidia-smi values before and after loading).
 
 | | |
 |---|---|
-| GPU | NVIDIA **GeForce RTX 5090** (32 GB). The kernels are built for compute capability 12.0, which the whole RTX 50 series shares, but only the RTX 5090 has been tested; on any other card the quickstart asks whether to continue (pressing Enter alone stops it) |
+| GPU | NVIDIA **GeForce RTX 5090** (32 GB): tested. Since 0.1.3 the engine is also built to run on other NVIDIA RTX 30, 40 and 50 series cards with compute capability 8.6 or higher and 16 GB or more (below), but it is not optimized or tested on them |
 | OS | **Windows 11**, 64-bit (the only version tested) |
 | Driver | a current NVIDIA driver (tested with 616.92) |
 | Software | Microsoft Visual C++ 2015-2022 x64 runtime, Python 3.10 or newer |
 | Disk / RAM | 20 GB free (one model is a download of about 13 to 15 GB); 32 GB of RAM recommended (tested on a PC with 96 GB) |
 
-Not supported in this release: macOS, AMD GPUs, other NVIDIA GPUs (the RTX 4090, 3090 and the 16 GB cards have not been tested with
-this release), other models. Support for more GPUs is the purpose of the crowdfunding campaign; see [Support](#support).
+**Other GPUs (since 0.1.3).** The engine is built for compute capability 8.6, 8.9 and 12.x, and is meant to run on these cards (none of them has been tried yet):
+
+| Memory | Cards | Models |
+|---|---|---|
+| 24 GB | RTX 3090, RTX 3090 Ti, RTX 4090 | both models |
+| 16 GB | RTX 4060 Ti 16GB, RTX 4070 Ti SUPER, RTX 4080, RTX 4080 SUPER, RTX 5060 Ti 16GB, RTX 5070 Ti, RTX 5080 | the fastest model only, with a shorter context |
+
+We have not optimized the engine for these cards and have not tested it on them (we have only an RTX 5090), so neither its speed nor
+its operation is guaranteed there. They are slower than the RTX 5090. On a card with less than 32 GB the context length is chosen from
+the free GPU memory each time the model starts (at most 262,144 tokens; on a 16 GB card about 65,000 to 82,000 tokens when the display
+and other programs use 1 GB of it - calculated from measurements on the RTX 5090, not measured on these cards; the draft model's output
+table `bdraft2_k8.shead` is then left out, which made each pass about 3% slower on the RTX 5090). Testing and tuning on
+each of these cards is a goal of the crowdfunding campaign; see [Support](#support). Results from your card are welcome
+([CONTRIBUTING.md](CONTRIBUTING.md)).
+
+Not supported: AMD GPUs, Macs, NVIDIA cards with less than 16 GB, cards older than the RTX 30 series (compute capability below 8.6),
+other models.
 
 **Linux:** the engine can be built from source (contributed in [#3](https://github.com/yasakani-dev/yasakani/pull/3), which lists the commands; we checked it on WSL2 /
 Ubuntu 24.04 with an RTX 5090). There is no prebuilt Linux release or launcher yet: that is one of the crowdfunding goals.
@@ -183,12 +204,12 @@ generation just becomes several times slower (a warning is printed at start in t
 
 ## Quick start
 
-**The quickest way:** unpack `yasakani-quickstart-0.1.2.zip` from the [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.2) to a plain path such as
+**The quickest way:** unpack `yasakani-quickstart-0.1.3.zip` from the [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.3) to a plain path such as
 `C:\yasakani` and double-click `START.cmd`. It downloads the engine and one model and runs the checks; then you can measure the speed,
 compare look-ahead on and off (the numbers of the technical notes, on your own PC), chat in your browser, or start the server. You only answer its questions with a number (Python 3.10 or newer is needed). What it does is in
 [quickstart/](quickstart/). To install by hand:
 
-1. Download the engine zip (`yskn.dll` and the Python package) from the [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.2) and one model folder from
+1. Download the engine zip (`yskn.dll` and the Python package) from the [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.3) and one model folder from
    Hugging Face ([quality](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) or [fastest](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)). Compare the SHA-256 checksums with the ones on the release page.
 
 ```bat
@@ -229,7 +250,7 @@ To build `yskn.dll` yourself, see [BUILDING.md](BUILDING.md); common questions a
 
 ## Use it as an agent
 
-`yasakani-harness-0.1.0.zip` on the [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.2) opens an agent screen in your browser, run by the model
+`yasakani-harness-0.1.0.zip` on the [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.3) opens an agent screen in your browser, run by the model
 on your PC: the model reads and writes files in a work folder and runs commands (you choose on the screen whether it may change files).
 Run the quickstart above first; then unpack the harness zip into the quickstart folder or next to it and double-click `START_HARNESS.cmd`.
 
@@ -238,6 +259,7 @@ Run the quickstart above first; then unpack the harness zip into the quickstart 
   and a Japanese language pack. YASAKANI is not affiliated with DeepSeek, and this combination is not an official product.
 * The harness zip is the one of 0.1.0, unchanged. It starts the server with the copy of the Python package that comes with it (0.2.0.dev0);
   the tool-calling code of that copy is the code that is in the standard package since 0.1.1. It does not have the image input of 0.1.2.
+  It does not choose the context from the GPU memory either (0.1.3): it opens the full 262,144 tokens, so it needs a card with 24 GB or more.
 * A new session starts with the model's longest thinking setting. One reply may take up to 98,304 tokens; a thinking longer than 49,152
   tokens is closed there and the model goes on to the answer. With both models installed, the screen can switch between them.
 * Everything is kept inside the harness folder. A DeepSeek Harness you already use is not touched.
@@ -248,10 +270,13 @@ What it does, what was checked and what was not: [harness/HARNESS_README.txt](ha
 
 * A file format of its own for the compressed model, and a runtime built around it. Compression and computation are designed together, so
   that the GPU reads less data and does less work.
-* GPU kernels written for the RTX 5090.
+* GPU kernels written and tuned for the RTX 5090. Since 0.1.3 the same source is also built for the RTX 30 and 40 series; two kinds of
+  instructions those cards do not have (an early start of the next kernel and a bulk prefetch into the L2 cache) are left out there.
 * **Speculative decoding.** A small helper model proposes several next tokens at once, and the main model checks them in a single pass and
   accepts the ones it agrees with. The helper model is described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-* A compressed key-value cache (KV5), which is what lets the full 262,144-token context fit next to the model on a 32 GB card.
+* A compressed key-value cache (KV5). Per token it takes about a third of the memory of an FP16 cache and about two thirds of an 8-bit
+  one, which leaves more memory for the context. With the fastest model and the full 262,144-token context reserved, the engine takes
+  16.78 GiB (27.13 GiB with an FP16 cache; see [Long contexts](#long-contexts)).
 * One request is generated at a time.
 
 The source for all of this is in this repository, and so is the program that made the two model files from the original weights
@@ -263,15 +288,16 @@ part contributes, and the source files that go with each.
 
 ## Limits
 
-* Windows 11 + RTX 5090 + Qwen3.8-27B only (Linux: build from source). One request at a time. Images only through the optional image input of the server (Windows only, new in 0.1.2; [python/README.md](python/README.md#image-input-optional)); no `n` above 1, no `logprobs`. Tool / function calling: `tools` with `tool_choice` `auto` or `none` (new in 0.1.1; a forced `tool_choice` is not supported). It is new and has been tested far less than plain chat.
+* Windows 11 + Qwen3.8-27B only (Linux: build from source). Tested on the RTX 5090 only; the build also targets other RTX 30, 40 and 50 series cards with 16 GB or more, untuned and untested. One request at a time. Images only through the optional image input of the server (Windows only, new in 0.1.2; [python/README.md](python/README.md#image-input-optional)); no `n` above 1, no `logprobs`. Tool / function calling: `tools` with `tool_choice` `auto` or `none` (new in 0.1.1; a forced `tool_choice` is not supported). It is new and has been tested far less than plain chat.
 * The release files are not code-signed, so Windows may warn about them (see [SECURITY.md](SECURITY.md)).
 * The answers are not identical to the original model's (see Quality).
 
 ## Support
 
 Development is funded by a crowdfunding campaign on CAMPFIRE: https://camp-fire.jp/projects/992233/view (until December 16, 2026). This
-release does not depend on its result. The support goes to test hardware, electricity and development time for more GPUs: other RTX cards
-first (24 GB and 16 GB), then AMD and Mac, in the order and under the conditions written on the campaign page.
+release does not depend on its result. The support goes to test hardware, electricity and development time: testing and tuning on the other
+RTX cards first (24 GB and 16 GB; 0.1.3 is built for them, but untested and untuned), then AMD and Mac, in the order and under the conditions
+written on the campaign page.
 Supporters who wish to be named are credited in this repository, and in the startup credits from a later version. News and
 measurements: https://x.com/yasakani_dev
 
