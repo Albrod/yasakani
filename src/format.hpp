@@ -26,9 +26,9 @@ struct Container {
   void open(const std::string& path) {
     mf.open(path); base = mf.data(); len = mf.size();
     if (len < 0x20 || std::memcmp(base, "YSKN", 4) != 0) throw std::runtime_error("not a YSKN container");
-    uint32_t version, json_len; std::memcpy(&version, base + 4, 4); std::memcpy(&json_len, base + 8, 4);
+    uint32_t version; uint64_t json_len; std::memcpy(&version, base + 4, 4); std::memcpy(&json_len, base + 8, 8);
     if (version != 1) throw std::runtime_error("unsupported YSKN version");
-    if ((size_t)json_len + 0x20 > len) throw std::runtime_error("YSKN header truncated");
+    if (json_len > len - 0x20) throw std::runtime_error("YSKN header truncated");
     const json j = json::parse(std::string((const char*)base + 0x20, json_len)); raw = j;
     const json& m = j.at("model");
     model.arch = m.at("arch").get<std::string>(); model.layers = m.at("layers").get<int>(); model.hidden = m.at("hidden").get<int>();
