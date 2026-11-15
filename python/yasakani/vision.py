@@ -475,10 +475,12 @@ class VisionProcessor:
                     items.append(item)
                 _check_length(len(prompt) - len(sources) + total, max_tokens, max_ctx)     # every image counted
                 for i, key, job in pending:                  # all limits are met: now encode
-                    item = self._encoder.encode_tokenized(job)
-                    validate_features(item)
-                    self._remember(key, item)
-                    self._store(key, item)
+                    item = self._cached(key)
+                    if item is None:
+                        item = self._encoder.encode_tokenized(job)
+                        validate_features(item)
+                        self._remember(key, item)
+                        self._store(key, item)
                     items[i] = item
             finally:
                 for _, _, job in pending:
