@@ -207,16 +207,16 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
   static const double b16_ratio = [] { const char* e = std::getenv("YSKN_B16_RATIO"); return e && e[0] ? std::atoi(e) / 100.0 : 0.22; }();
   static const int b16_probe = [] { const char* e = std::getenv("YSKN_B16_PROBE"); return e && e[0] ? std::atoi(e) : 256; }();
   static const double b16_decay = [] { const char* e = std::getenv("YSKN_B16_DECAY"); return e && e[0] ? std::atoi(e) / 100.0 : 0.9; }();
-  static double b16_ema = 2.0, b8_ema = 4.0; static int b16_since = 0; static long long b16_passes = 0, b16_all = 0;
+  double b16_ema = 2.0, b8_ema = 4.0; int b16_since = 0; long long b16_passes = 0, b16_all = 0;
   static const bool b16_backoff = [] { const char* e = std::getenv("YSKN_B16_BACKOFF"); return !(e && e[0] == '0'); }();   
-  static int b16_probe_cur = b16_probe;
+  int b16_probe_cur = b16_probe;
   static const int b16_max = [] { const char* e = std::getenv("YSKN_B16_MAX"); return e && e[0] ? std::atoi(e) : 256; }();   
   static const double b16_full = [] { const char* e = std::getenv("YSKN_B16_FULL"); return e && e[0] ? std::atoi(e) / 100.0 : 0.45; }();   
-  static double full8_ema = 0.0;
+  double full8_ema = 0.0;
   static const double b16_floor = [] { const char* e = std::getenv("YSKN_B16_FLOOR"); return e && e[0] ? std::atoi(e) / 100.0 : 0.6; }();   
   static const double b16_decay8 = [] { const char* e = std::getenv("YSKN_B16_DECAY8"); return e && e[0] ? std::atoi(e) / 100.0 : 0.97; }();   
   static const int b16_full_since = [] { const char* e = std::getenv("YSKN_B16_FULL_SINCE"); return e && e[0] ? std::atoi(e) : 4; }();   
-  static int b16_n = 0;                                            
+  int b16_n = 0;                                            
   auto b16_observe = [&](int a_obs) {                              
     const double v = std::max(0, a_obs - 7);
     b16_ema = (b16_n++ == 0) ? v : b16_decay * b16_ema + (1.0 - b16_decay) * v; b16_since = 0;
@@ -575,7 +575,7 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
   if constexpr (std::is_same_v<Eng, Engine35>) { if (bdr && dctx_n) { feed_ctx(dctx_n, dctx_pos); if (dctx_n) e_.bdraft_step(dctx_n, dctx_pos, 0, c_.use_graph); } }   
   stats.ms_total = ms_since(t_loop); stats.produced = std::min(produced, n_tokens); stats.eos = stop ? 1 : 0;
   if (blk_mode) { static const bool lg = std::getenv("YSKN_BLK16_LOG") != nullptr;
-    if (lg) std::fprintf(stderr, "[blk16] mode %d: passes %lld, BDR_J-row passes %lld (cum), ema16 %.2f ema8 %.2f probe %d full8 %.2f\n", blk_mode, b16_all, b16_passes, b16_ema, b8_ema, b16_probe_cur, full8_ema); }
+    if (lg) std::fprintf(stderr, "[blk16] mode %d: passes %lld, BDR_J-row passes %lld, ema16 %.2f ema8 %.2f probe %d full8 %.2f\n", blk_mode, b16_all, b16_passes, b16_ema, b8_ema, b16_probe_cur, full8_ema); }
 }
 template class SpecxT<Engine>;
 template class SpecxT<Engine35>;
