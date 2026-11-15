@@ -85,6 +85,13 @@ class ToolCallFilterTests(unittest.TestCase):
         f = ToolCallFilter(TOOLS)
         ev = feed(f, '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Osaka"}}\n</tool_call>')
         self.assertEqual(calls_of(ev), [{"name": "get_weather", "arguments": {"city": "Osaka"}}])
+        call = {"name": "write_file", "arguments": {"path": "notes.txt", "content": "The format is <function=get_weather>."}}
+        for arguments in (call["arguments"], json.dumps(call["arguments"])):
+            with self.subTest(arguments=arguments):
+                f = ToolCallFilter(TOOLS)
+                block = json.dumps(dict(call, arguments=arguments))
+                ev = feed(f, "<tool_call>\n" + block + "\n</tool_call>")
+                self.assertEqual(calls_of(ev), [call])
 
     def test_parameter_values(self):
         props = tool_schemas(TOOLS)["write_file"]

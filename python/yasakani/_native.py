@@ -46,9 +46,11 @@ _VC_HINT = ("The engine library could not be loaded.  On Windows it needs the Mi
 def _candidates(explicit: Optional[str]):
     if explicit:
         yield Path(explicit)
+        return
     env = os.environ.get("YASAKANI_DLL")
     if env:
         yield Path(env)
+        return
     name = "yskn.dll" if sys.platform == "win32" else "libyskn.so"
     here = Path(__file__).resolve().parent
     for d in (here / "bin", here.parent / "bin", here.parents[1] / "build" / "bin", here.parents[1] / "build" / "Release",
@@ -62,7 +64,7 @@ def find_library(explicit: Optional[str] = None) -> Path:
     for p in _candidates(explicit):
         tried.append(str(p))
         if p.is_file():
-            return p
+            return p.resolve()
     raise YasakaniError("engine library (yskn.dll) not found; set YASAKANI_DLL or pass --dll.  Looked in: " + "; ".join(tried))
 
 

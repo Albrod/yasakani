@@ -214,6 +214,19 @@ class ProcessorCase(unittest.TestCase):
 
 
 class CacheTests(ProcessorCase):
+    def test_repeated_image_reuses_features(self):
+        vp = self.processor()
+        ids, v = self.prepare(vp, [png_uri((9, 4))] * 2)
+        self.assertEqual(FakeEncoder.encoded, [6])
+        self.assertEqual(ids.tolist(), [1] + [IMG] * 12 + [2])
+        self.assertEqual(v["slots"].tolist(), list(range(1, 13)))
+        self.assertEqual(v["features"].shape, (12, 5120))
+        np.testing.assert_array_equal(v["features"][:6], v["features"][6:])
+        np.testing.assert_array_equal(v["positions"][:, 7:13], v["positions"][:, 1:7] + 3)
+        self.assertEqual(len(vp._memory), 1)
+        self.assertEqual(vp._memory_bytes, sum(a.nbytes for item in vp._memory.values() for a in item.values()))
+        self.assertEqual([job.closed for job in FakeEncoder.jobs], [True, True])
+
     def test_damaged_entry_is_rebuilt(self):
         uri = png_uri((9, 4))
         self.prepare(self.processor(cache=self.t / "cache"), [uri])
