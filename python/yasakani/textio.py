@@ -193,7 +193,7 @@ class OutputStream:
 #
 # ToolCallFilter takes the answer text as it is streamed and splits it into plain text and complete tool calls.
 TOOL_OPEN, TOOL_CLOSE = "<tool_call>", "</tool_call>"
-_FUNCTION = re.compile(r"<function=([^>\n]+)>")
+_FUNCTION = re.compile(r"^\s*<function=([^>\n]+)>")
 _PARAMETER = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
 
 
