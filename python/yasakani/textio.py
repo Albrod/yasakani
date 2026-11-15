@@ -193,7 +193,7 @@ class OutputStream:
 #
 # ToolCallFilter takes the answer text as it is streamed and splits it into plain text and complete tool calls.
 TOOL_OPEN, TOOL_CLOSE = "<tool_call>", "</tool_call>"
-_FUNCTION = re.compile(r"^\s*<function=([^>\n]+)>")
+_FUNCTION = re.compile(r"<function=([^>\n]+)>")
 _PARAMETER = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
 
 
@@ -236,7 +236,9 @@ def convert_parameter(value: str, schema) -> object:
 
 def parse_tool_call(block: str, schemas: Dict[str, dict]) -> Optional[dict]:
     """The inside of one <tool_call> block -> {"name": ..., "arguments": {...}}, or None when it is not a call."""
-    m = _FUNCTION.search(block)
+    # A block that starts with "{" is the JSON form only, so a <function=...> inside one of its values is not a call.  Other
+    # blocks may have text before the tag (a sentence, a second <tool_call>), as before.
+    m = None if block.lstrip().startswith("{") else _FUNCTION.search(block)
     if m:
         name = m.group(1).strip()
         props = schemas.get(name) or {}

@@ -93,6 +93,22 @@ class ToolCallFilterTests(unittest.TestCase):
                 ev = feed(f, "<tool_call>\n" + block + "\n</tool_call>")
                 self.assertEqual(calls_of(ev), [call])
 
+    def test_text_before_the_function_tag(self):
+        xml = "<function=get_weather>\n<parameter=city>\nOsaka\n</parameter>\n</function>\n"
+        for text in ("<tool_call>\nI will look it up.\n" + xml + "</tool_call>",      # a sentence before the tag
+                     "<tool_call>\n<tool_call>\n" + xml + "</tool_call>"):            # the open tag written twice
+            with self.subTest(text=text):
+                f = ToolCallFilter(TOOLS)
+                ev = feed(f, text)
+                self.assertEqual((calls_of(ev), content_of(ev)), ([{"name": "get_weather", "arguments": {"city": "Osaka"}}], ""))
+
+    def test_broken_json_is_not_read_as_a_function_tag(self):
+        call = {"name": "write_file", "arguments": {"path": "a.txt", "content": "see <function=get_weather> here"}}
+        block = "<tool_call>\n" + json.dumps(call)[:-2] + "\n</tool_call>"
+        f = ToolCallFilter(TOOLS)
+        ev = feed(f, block)
+        self.assertEqual((calls_of(ev), content_of(ev)), ([], block))                 # comes back as text, not as get_weather()
+
     def test_parameter_values(self):
         props = tool_schemas(TOOLS)["write_file"]
         text = 'line 1\n  "quoted" <b>tag</b>\n\n123\n'
