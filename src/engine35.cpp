@@ -352,6 +352,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   q16_ = dz35<uint16_t>((size_t)M * Q35_NH * Q35_HD * 2); gate16_ = dz35<uint16_t>((size_t)M * Q35_NH * Q35_HD * 2);
   { const char* u = std::getenv("YSKN_Q35_ATX_SPLITS"); if (u && std::atoi(u) > 0) atx_splits_ = std::min(64, std::atoi(u));   
     const char* l = std::getenv("YSKN_Q35_ATX_LONG"); if (l) atx_long_ = std::atoi(l); }
+  atx_short_ = std::min(atx_short_, atx_splits_);
   { const int ns = std::max(splits_, atx_splits_);
     pm_ = dz35<float>((size_t)Mmax_ * ns * Q35_NH * 4); pl_ = dz35<float>((size_t)Mmax_ * ns * Q35_NH * 4); pacc_ = dz35<float>((size_t)Mmax_ * ns * Q35_NH * Q35_HD * 4); }
   pos_slices_ = dz35<int>(64 * 4); mtp_pos_slices_ = dz35<int>(64 * 4);
