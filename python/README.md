@@ -77,7 +77,8 @@ context = room / 22,400 bytes per token, rounded down to a multiple of 16,384, a
 
 If that is less than 65,536 tokens and leaving out the output head of the draft model (`bdraft2_k8.shead`, 1.3 GiB) gives more, the head
 is not loaded (`YSKN_BDR_SHEAD=0`; on the RTX 5090 each pass took about 3% longer and the output stayed the same). If not even 16,384 tokens
-fit, the command stops before loading and says so; `--max-ctx` tries a given length anyway. On the RTX 5090, and on any card with 30,000 MiB
+fit, the command stops before loading and says so; `--max-ctx` tries a given length anyway, and leaves out the output head when, by the same
+numbers, it does not fit beside that length (without this the head was loaded whatever the length). On the RTX 5090, and on any card with 30,000 MiB
 or more, nothing changes: the context stays 262,144. The 2,100 and 2,300 MiB were measured on the RTX 5090 under Windows; the rule has not
 been checked on other cards. It is `yasakani.gpu.plan_context`; `Engine` itself does not apply it (pass `max_ctx`).
 

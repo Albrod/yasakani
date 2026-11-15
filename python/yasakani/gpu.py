@@ -315,3 +315,22 @@ def plan_context(pack, det: Detected) -> ContextPlan:
         plan.notes.append("context: %d tokens, chosen from the free GPU memory (%d of %d MiB free); --max-ctx sets it yourself"
                           % (n, g.free_mib, g.total_mib))
     return plan
+
+
+def plan_given_context(pack, det: Detected, max_ctx: int) -> ContextPlan:
+    """The plan for a context given with --max-ctx.  The context stays as given (it is tried even where the rule says it does not fit),
+    but on a card with less than FULL_CONTEXT_MIN_TOTAL_MIB the draft model's output head is left out when it does not fit beside that
+    context.  Without this the head is always loaded: the package names it in YSKN_BDR_SHEAD, and the engine loads a named head without
+    the free-memory check it makes for one it finds by itself.  Unchanged on larger cards and when nvidia-smi gave no answer."""
+    plan = ContextPlan(max_ctx=int(max_ctx))
+    g = det.worst()
+    if g is None or g.total_mib is None or g.free_mib is None or g.total_mib >= FULL_CONTEXT_MIN_TOTAL_MIB:
+        return plan
+    plan.free_mib = g.free_mib
+    sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
+    if fit_tokens(g.free_mib, sum(sizes), overhead_mib(sizes[0])) < plan.max_ctx:
+        plan.env["YSKN_BDR_SHEAD"] = "0"
+        plan.notes.append("note: the output head of the draft model (%s, %.1f GiB) is not loaded: it does not fit beside %d tokens of "
+                          "context in the free GPU memory (%d of %d MiB free); each pass takes %s longer (measured on the RTX 5090)"
+                          % (pack.draft_head.name, sizes[2] / (1 << 30), plan.max_ctx, g.free_mib, g.total_mib, HEAD_SLOWER))
+    return plan
