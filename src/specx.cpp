@@ -44,7 +44,7 @@ template <class Eng> void SpecxT<Eng>::index_upto(int end) {
     for (int n = c_.d0_nmin; n <= c_.d0_nmax; ++n) if (indexed_ - n + 1 >= 0) ng_[n][gram_hash(indexed_, n)] = indexed_;
 }
 template <class Eng> int SpecxT<Eng>::d0_lookup(int F, std::vector<int32_t>& chain, int gmax) {
-  chain.clear(); if (!c_.use_d0 || gmax <= 0) return 0;
+  chain.clear(); lk_src_ = -1; if (!c_.use_d0 || gmax <= 0) return 0;
   index_upto(F);                                         
   for (int n = c_.d0_nmax; n >= c_.d0_nmin; --n) {
     if (F - n + 1 < 0) continue;
@@ -53,9 +53,31 @@ template <class Eng> int SpecxT<Eng>::d0_lookup(int F, std::vector<int32_t>& cha
     for (int k = 0; k < n && same; ++k) same = S_[p - k] == S_[F - k];
     if (!same) continue;
     for (int q = p + 1; q <= F && (int)chain.size() < gmax; ++q) chain.push_back(S_[q]);
+    if (!chain.empty()) lk_src_ = p + 1;
     return n;
   }
   return 0;
+}
+// Copy lookup with the copy cursor (copy_index = 1): continue where the last copy left off when the frontier still follows it, else
+// ask the 4-token chain index (nearest place after the point where the copy stopped, or the longest backward match).  Returns the
+// match length capped at 8 (the scale of d0_lookup) and fills up to gmax tokens; lk_src_ = the S_ index of the first one.
+template <class Eng> int SpecxT<Eng>::copy_lookup(int F, std::vector<int32_t>& chain, int gmax) {
+  chain.clear(); lk_src_ = -1; if (!c_.use_d0 || gmax <= 0) return 0;
+  int p = -1, len = 0;
+  if (cur_ > 0 && cur_ <= F && S_[cur_ - 1] == S_[F]) {
+    const int q = cur_ - 1; int l = 0; while (l < 64 && q - l >= 0 && S_[q - l] == S_[F - l]) ++l;
+    if (l >= CopyIndex::N) { p = q; len = l; stats.cursor_hits++; }
+  }
+  if (p < 0) {
+    ci_.index_upto(S_.data(), F);
+    const int after = (last_src_ >= 0 && F - last_src_at_ <= 256) ? last_src_ : -1;
+    p = ci_.find(S_.data(), F, after, 256, 64, &len);
+  }
+  if (p < 0 || len < CopyIndex::N) return 0;
+  for (int q = p + 1; q <= F && (int)chain.size() < gmax; ++q) chain.push_back(S_[q]);
+  if (chain.empty()) return 0;
+  lk_src_ = p + 1;
+  return std::min(len, 8);
 }
 template <class Eng> int32_t SpecxT<Eng>::next_tok(int32_t p2, int32_t prev, int32_t cur) const {
   if (c_.d1_trigram && p2 >= 0 && prev >= 0) { auto it = T3_.find(tkey(p2, prev, cur)); if (it != T3_.end()) return it->second; }
@@ -92,41 +114,83 @@ template <class Eng> void SpecxT<Eng>::record(int32_t p2, int32_t prev, int32_t 
   if (c_.d1_trigram && p2 >= 0 && prev >= 0) T3_[tkey(p2, prev, cur)] = top8[0];
 }
 template <class Eng> int SpecxT<Eng>::prefill(const int32_t* ids, int n) {
-  
-  int start = 0, P = -1, mode = 0;
+  // With snapshots (snap = 1): continue the live state when it is a prefix of the prompt (mode 1); otherwise restore the saved slot
+  // with the largest position inside the common prefix with what the engine holds (mode 2); otherwise read from the start (mode 0).
+  // Slots are taken right after the last chat start of the prompt and, for long prompts, on the absolute prefill grid near its end
+  // and every snap_sparse ids.  The prompt is read in passes cut at absolute multiples of the prefill chunk, so a read resumed from a
+  // slot on that grid runs the same passes as a fresh read.
+  using clk = std::chrono::steady_clock;
+  int start = 0, mode = 0, lcp = 0, saved = 0, nslots = 0; double ms_snap = 0;
+  std::vector<int> cuts;
+  int chunk = 0;
   if constexpr (std::is_same_v<Eng, Engine35>) {
     if (c_.snap) {
-      auto ext = [&](const std::vector<int32_t>& v) { return !v.empty() && (int)v.size() < n && std::equal(v.begin(), v.end(), ids); };
-      if (e_.snap_live_ok() && ext(e_.snap_live())) { start = (int)e_.snap_live().size(); mode = 1; }
-      else if (e_.snap_pos() > 0 && ext(e_.snap_ids())) { e_.snap_load(); start = e_.snap_pos(); mode = 2; }
-      else e_.reset();
+      chunk = e_.prefill_chunk();
+      const std::vector<int32_t>& live = e_.snap_live(); const bool live_ok = e_.snap_live_ok();
+      if (live_ok && !live.empty() && (int)live.size() < n && std::equal(live.begin(), live.end(), ids)) { start = (int)live.size(); mode = 1; lcp = start; }
+      else {
+        const std::vector<int32_t>& ref = live_ok ? live : e_.snap_seq();
+        const int m = std::min((int)ref.size(), n - 1);
+        int L = 0; while (L < m && ref[(size_t)L] == ids[L]) ++L;
+        lcp = L;
+        e_.snap_trim(L);
+        const int i = e_.snap_best(L);
+        if (i >= 0) { const auto t0 = clk::now(); e_.snap_load_slot(i); ms_snap += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+                      start = e_.snap_slot_pos(i); mode = 2; }
+        else e_.reset();
+      }
+      e_.snap_set_seq(ids, n);
       int q = -1;
       if (c_.snap_tok >= 0) for (int p = n - 1; p >= start; --p) if (ids[p] == c_.snap_tok) { q = p + 1; break; }
-      if (q < 0) q = n - 1;
-      if (q > start && q < n) P = q;
+      if (q < 0 && mode == 0) q = n - 1;                           // a continued read without a new chat start keeps the slots it has
+      if (!(q > start && q < n)) q = -1;
+      // keep the restored slot when there are others to use; with a single slot, overwrite it (as 0.1.3 did)
+      const int cap = e_.snap_slots_max() > 1 ? e_.snap_slots_max() - (mode == 2 ? 1 : 0) : std::max(0, e_.snap_slots_max());
+      std::vector<int> pick;
+      if (q > 0 && cap > 0) pick.push_back(q);
+      if (n >= e_.snap_min() && cap > 1) {
+        const int st = e_.snap_step(), U = q > 0 ? q : n;
+        int nt = 0;
+        for (int c = ((U - 1) / st) * st; c > start && c >= n - e_.snap_tail() && nt < 4 && (int)pick.size() < cap; c -= st, ++nt) pick.push_back(c);
+        if (e_.snap_sparse() > 0) {
+          std::vector<int> sp; for (int c = e_.snap_sparse(); c < n; c += e_.snap_sparse()) if (c > start) sp.push_back(c);
+          for (auto it = sp.rbegin(); it != sp.rend() && (int)pick.size() < cap; ++it) if (std::find(pick.begin(), pick.end(), *it) == pick.end()) pick.push_back(*it);
+        }
+      }
+      std::sort(pick.begin(), pick.end()); pick.erase(std::unique(pick.begin(), pick.end()), pick.end());
+      cuts = pick;
     }
   }
   std::vector<int32_t> am(n), ti((size_t)n * 8); std::vector<float> tv((size_t)n * 8);
-  auto run = [&](int a, int b) -> int {                         
-    if (c_.prefill_head) return e_.prefill_rows(ids + a, b - a, am.data() + a, ti.data() + (size_t)a * 8, tv.data() + (size_t)a * 8);
-    return e_.prefill(ids + a, b - a);                           
+  auto run = [&](int a, int b) -> int {
+    if (!c_.prefill_head) return e_.prefill(ids + a, b - a);
+    if (chunk <= 0) return e_.prefill_rows(ids + a, b - a, am.data() + a, ti.data() + (size_t)a * 8, tv.data() + (size_t)a * 8);
+    int r = 0;
+    for (int x = a; x < b;) {                                    // one pass per piece of the absolute grid
+      const int y = std::min(b, (x / chunk + 1) * chunk);
+      r = e_.prefill_rows(ids + x, y - x, am.data() + x, ti.data() + (size_t)x * 8, tv.data() + (size_t)x * 8); x = y;
+    }
+    return r;
   };
-  int first = 0;
-  if (P > 0) {
-    run(start, P);
-    if constexpr (std::is_same_v<Eng, Engine35>) e_.snap_save(ids, P);
-    first = run(P, n);
-  } else first = run(start, n);
+  int a = start;
+  for (int c : cuts) {
+    run(a, c); a = c;
+    if constexpr (std::is_same_v<Eng, Engine35>) {
+      const auto t0 = clk::now(); saved += e_.snap_save_at(c) ? 1 : 0; ms_snap += std::chrono::duration<double, std::milli>(clk::now() - t0).count(); }
+  }
+  const int first = run(a, n);
+  if constexpr (std::is_same_v<Eng, Engine35>) nslots = e_.snap_count();
   S_.assign(ids, ids + n); S_.push_back(first);
-  T2_.clear(); T2m_.clear(); T3_.clear(); draft_done_ = n;       
+  T2_.clear(); T2m_.clear(); T3_.clear(); draft_done_ = n;
   if (c_.prefill_head)
     for (int p = start; p < n; ++p) record(p > 1 ? ids[p - 2] : -1, p > 0 ? ids[p - 1] : -1, ids[p], ti.data() + (size_t)p * 8, tv.data() + (size_t)p * 8);
   indexed_ = 0; for (auto& m : ng_) m.clear(); recent_.clear(); stats = SpecxStats{};
-  stats.sh_mode = mode; stats.sh_start = start;
+  stats.sh_mode = mode; stats.sh_start = start; stats.sh_lcp = lcp; stats.sh_slots = nslots; stats.sh_saved = saved; stats.ms_snap = ms_snap;
   return first;
 }
 template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
-  std::vector<int32_t> chain, ids, am(16), ti(16 * 8), dev_ids(16); std::vector<int8_t> src; std::vector<float> tv(16 * 8);
+  constexpr int VR = Engine35::kVerifyMax;                         // rows of the widest pass (copy passes; others stay <= 16)
+  std::vector<int32_t> chain, ids, am(VR), ti(VR * 8), dev_ids(VR); std::vector<int8_t> src; std::vector<float> tv(VR * 8);
   int produced = 0, gamma = c_.gamma, prev_a = -1;                 
   bool full_prev = false;                                          
   const bool d3 = c_.use_d3 && e_.has_draft() && !c_.d3_lazy;     
@@ -176,6 +240,16 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
     }
   }
   dema_[0] = dema_[1] = 3.0; dpend_.clear(); dprobe_ = 0;
+  bool wide_on = false;                                            // copy passes wider than 16 rows
+  if constexpr (std::is_same_v<Eng, Engine35>) wide_on = bdr && c_.copy_rows > 16 && e_.wide_ok() && !e_.has_draft();   // not with the built-in draft head loaded (16 rows)
+  if (c_.copy_index && bdr) ci_.reset((int)S_.size() + std::max(0, n_tokens) + 64);
+  cur_ = -1; last_src_ = -1; last_src_at_ = -1; wide_need_ = 2; wide_run_ = 0; wst_tok_ = 0; wst_ms_ = 0;
+  bool xw32 = false;                                               // 32-row copy passes: only with the exact-sum wide GEMV (cheap)
+  if constexpr (std::is_same_v<Eng, Engine35>) xw32 = e_.xw_rows() >= 32;
+  // drafter context of the rows committed by the last pass (more than 16 after a wide pass)
+  auto feed_ctx = [&](int& n_ctx, int pos_ctx) {
+    if constexpr (std::is_same_v<Eng, Engine35>) { if (n_ctx > 16) { e_.bdraft_ctx(0, n_ctx, pos_ctx); n_ctx = 0; } }
+    else { (void)n_ctx; (void)pos_ctx; } };
   b16_ema = 0.0; b8_ema = 4.0; b16_since = 0; b16_probe_cur = b16_probe; full8_ema = 0.0; b16_n = 0;   
   int dctx_n = 0, dctx_pos = 0;                                    
   for (auto& r : reach_) for (double& x : r) x = 0; for (auto& r : acc_) for (double& x : r) x = 0; for (int& x : skipped_) x = 0;
@@ -213,7 +287,10 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
     const int g_short = std::max(0, std::min(gamma, room)), g_all = std::max(0, std::min(std::max(gamma, c_.gamma_long), room));
     
     chain.clear(); src.clear(); bool on_device = false; nleaf = 0;
-    std::vector<int32_t> c0; const int n0 = g_all > 0 ? d0_lookup(F, c0, g_all) : 0;
+    std::vector<int32_t> c0; int n0 = 0; lk_src_ = -1;
+    if (g_all > 0) { const auto t_ix = clk::now(); n0 = (c_.copy_index && bdr) ? copy_lookup(F, c0, g_all) : d0_lookup(F, c0, g_all); stats.ms_index += ms_since(t_ix); }
+    const int exp_src = lk_src_;                                    // the copy source the frontier follows (checked after the pass)
+    int wideW = 0;                                                  // rows of this pass when it is a wide copy pass
     bool hb_pass = false;
     
     const int g_eff0 = (c_.gamma_long > gamma && ((full_prev && n0 >= c_.long_n) || (c_.long_d0 > 0 && n0 >= c_.long_d0))) ? g_all : g_short;
@@ -254,11 +331,18 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
         if (hb) e_.hcap_pass(hb_pass ? 1 : 0);
         const auto t_d = clk::now();
         if (run) e_.set_verify_tokens(&xF, 0, 1);
+        feed_ctx(dctx_n, dctx_pos);
         e_.bdraft_step(dctx_n, dctx_pos, run ? (b16_pass ? 2 : 1) : 0, c_.use_graph); dctx_n = 0;   
         stats.ms_draft += ms_since(t_d);
         if (bdr_d0) {
-          if ((int)c0.size() > c_.bdr_d0_len) c0.resize(c_.bdr_d0_len);
-          take_d0(); stats.bdr_d0++;
+          if (wide_on && wide_run_ >= wide_need_ && exp_src >= 0) {   // a long run of fully accepted copy passes: copy W - 1 at once
+            const int avail = F + 1 - exp_src;
+            const int lim = std::min({avail, room, e_.max_ctx() - e_.position() - 1, c_.copy_rows - 1});
+            wideW = (lim >= 63 && c_.copy_rows >= 64) ? 64 : ((lim >= 47 && c_.copy_rows >= 48) ? 48 : ((lim >= 31 && c_.copy_rows >= 32 && xw32) ? 32 : 0));
+          }
+          if (wideW) { chain.assign(S_.begin() + exp_src, S_.begin() + exp_src + (wideW - 1)); src.assign(chain.size(), 0); }
+          else { if ((int)c0.size() > c_.bdr_d0_len) c0.resize(c_.bdr_d0_len); take_d0(); }
+          stats.bdr_d0++;
           if (probe) { int32_t dr[BDR_J]; e_.bdraft_out(dr); dpend_.push_back(BdrPend{F, 0, std::vector<int32_t>(dr, dr + kdfl)}); stats.bdr_probes++; }
         } else {
           const int k = kdfl; chain.assign(k, 0); src.assign(k, 2); on_device = true; bdr_dev = true; stats.bdr_rounds++;
@@ -267,7 +351,7 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
       }
     }
     if constexpr (std::is_same_v<Eng, Engine35>) {                
-      if (bdr && dctx_n) { const auto t_x = clk::now(); e_.bdraft_step(dctx_n, dctx_pos, 0, c_.use_graph); dctx_n = 0; stats.ms_ctx += ms_since(t_x); } }
+      if (bdr && dctx_n) { const auto t_x = clk::now(); feed_ctx(dctx_n, dctx_pos); e_.bdraft_step(dctx_n, dctx_pos, 0, c_.use_graph); dctx_n = 0; stats.ms_ctx += ms_since(t_x); } }
     const bool mtp_spot = !bdr && d3l && g_eff > 0 && n0 < c_.d0_priority_n;   
     if (mtp_spot) {
       bool call = true;
@@ -381,7 +465,7 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
     }
     if (bdr_dev) { ++b16_all; if (b16_pass) ++b16_passes; }
     const int a_all = a;                                          
-    if (bdr_longm) { const int w = bdr_d0 ? 1 : 0; dema_[w] += (a_all - dema_[w]) / 16.0; }   
+    if (bdr_longm) { const int w = bdr_d0 ? 1 : 0; dema_[w] += (std::min(a_all, BDR_J) - dema_[w]) / 16.0; }   
     if constexpr (std::is_same_v<Eng, Engine35>) {
       if (dump && lazy_dev && on_device) {                         
         const int k = (int)chain.size(), n = e_.mtp_log_read(lg_ids.data(), lg_vals.data(), 16);
@@ -438,6 +522,33 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
     for (int j = 0; j < a; ++j) { S_.push_back(chain[j]); if (produced < n_tokens) out[produced] = chain[j]; ++produced; }
     S_.push_back(am[a]); if (produced < n_tokens) out[produced] = am[a]; ++produced;   
     if (hit_row >= 0) { S_.push_back(am[hit_row]); if (produced < n_tokens) out[produced] = am[hit_row]; ++produced; if (is_eos(am[hit_row])) stop = true; }
+    {                                                               // the copy cursor follows the source while the output does
+      const int ne = (int)S_.size() - (F + 1);
+      if (exp_src >= 0) {
+        int k = 0; while (k < ne && exp_src + k < (int)S_.size() && S_[(size_t)(exp_src + k)] == S_[(size_t)(F + 1 + k)]) ++k;
+        if (k == ne) cur_ = exp_src + ne;
+        else { cur_ = -1; last_src_ = exp_src + k; last_src_at_ = F + 1 + k; }
+      } else cur_ = -1;
+      if (bdr_d0) {                                                 // copy passes: when to go wide, when to come back
+        stats.copy_passes++; stats.copy_tok += a;
+        const bool full = a == (int)chain.size();
+        const double t_pass = ms_since(t_iter);
+        if (wideW) {
+          double& tw = wideW == 64 ? t64_ : (wideW == 48 ? t48_ : t32_);
+          tw += (std::min(t_pass, 2.0 * tw) - tw) / 8.0;
+          stats.wide_passes++; stats.wide_tok += a + 1; if (full) stats.wide_full++;
+          wst_tok_ += a + 1; wst_ms_ += tw;
+          if (!full) {                                              // the run of wide passes ended: was it faster than 16 rows?
+            if (wst_tok_ * std::max(1.0, t16_) >= 16.0 * wst_ms_) wide_need_ = 2; else wide_need_ = std::min(16, wide_need_ * 2);
+            wst_tok_ = 0; wst_ms_ = 0; wide_run_ = 0;
+          }
+        } else {
+          if (M == 16) t16_ += (std::min(t_pass, 2.0 * t16_) - t16_) / 8.0;
+          if (full && (int)chain.size() >= BDR_J) ++wide_run_; else wide_run_ = 0;
+        }
+      } else wide_run_ = 0;
+      stats.max_rows = std::max<int64_t>(stats.max_rows, M);
+    }
     for (size_t i = 0; i < dpend_.size();) {                      
       const BdrPend& p = dpend_[i]; int k = 0; bool done = false;
       for (; k < (int)p.ch.size(); ++k) { const int q = p.F + 1 + k; if (q >= (int)S_.size()) break; if (S_[q] != p.ch[k]) { done = true; break; } }
@@ -461,7 +572,7 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
       if (ema_n_ >= 8) tok_us_ = ema_us_ / ema_tok_;
     }
   }
-  if constexpr (std::is_same_v<Eng, Engine35>) { if (bdr && dctx_n) e_.bdraft_step(dctx_n, dctx_pos, 0, c_.use_graph); }   
+  if constexpr (std::is_same_v<Eng, Engine35>) { if (bdr && dctx_n) { feed_ctx(dctx_n, dctx_pos); if (dctx_n) e_.bdraft_step(dctx_n, dctx_pos, 0, c_.use_graph); } }   
   stats.ms_total = ms_since(t_loop); stats.produced = std::min(produced, n_tokens); stats.eos = stop ? 1 : 0;
   if (blk_mode) { static const bool lg = std::getenv("YSKN_BLK16_LOG") != nullptr;
     if (lg) std::fprintf(stderr, "[blk16] mode %d: passes %lld, BDR_J-row passes %lld (cum), ema16 %.2f ema8 %.2f probe %d full8 %.2f\n", blk_mode, b16_all, b16_passes, b16_ema, b8_ema, b16_probe_cur, full8_ema); }

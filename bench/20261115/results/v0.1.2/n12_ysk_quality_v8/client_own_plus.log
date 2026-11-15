@@ -1,0 +1,4 @@
+[15:17:08] warm-up done ysk_quality_v8 qwen3.8-27b
+[15:17:16] edit_jsonl_long  r0:  1094.9 tok/s,  6493 tokens (prompt 6576) in   5.93 s, stop, sim 1.0000 exact True difflines 0
+[15:17:23] edit_jsonl_long  r1:  1096.9 tok/s,  6493 tokens (prompt 6576) in   5.92 s, stop, sim 1.0000 exact True difflines 0
+[15:17:23] done

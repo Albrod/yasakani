@@ -31,6 +31,10 @@ DEFAULT_IMAGE_TOKENS = 1024         # per image, default of --vision-max-image-t
 IMAGE_TOKENS_RANGE = (64, 4096)     # the values --vision-max-image-tokens accepts
 MAX_IMAGE_TOKENS = 4096             # per image, hard ceiling (the projector's own limit): an image above it is refused (400)
 REQUEST_IMAGE_TOKENS_FACTOR = 8     # per request, default of --vision-max-request-image-tokens: 8 x the per-image limit (8,192)
+# With the projector on the GPU (Linux, YASAKANI_VISION_GPU=1, flash attention off) the memory of an encode grows with the square of
+# the image tokens: about 4 GiB at 2,048 and 17 GiB at 4,096, which did not fit next to the model (measured by the contributor of #8).
+# An encode that runs out of GPU memory can end the whole server, so the per-image limit is checked at start.
+GPU_IMAGE_TOKENS = 2048
 # Features take 10 KiB per image token (5,120 bfloat16 values): 10 MiB for an image of 1,024 tokens, 40 MiB for 4,096.  A client
 # sends the whole conversation again with every turn, so every image of a chat comes back each turn; the memory cache must hold
 # them all or each turn encodes them again (64 MiB held only one or two large photos).  512 MiB holds about 50 images at the default
@@ -315,6 +319,12 @@ class VisionProcessor:
         if not self.max_image_tokens <= self.max_request_image_tokens <= MAX_IMAGES * MAX_IMAGE_TOKENS:
             raise ValueError("--vision-max-request-image-tokens must be between the per-image limit (%d) and %d"
                              % (self.max_image_tokens, MAX_IMAGES * MAX_IMAGE_TOKENS))
+        from . import _mtmd
+        self.gpu = _mtmd.use_gpu()                           # read once: the cache key and the encoder use the same choice
+        if self.gpu and self.max_image_tokens > GPU_IMAGE_TOKENS:
+            raise ValueError("with the projector on the GPU (YASAKANI_VISION_GPU=1) --vision-max-image-tokens can be at most %d "
+                             "(its memory grows with the square of the image tokens: about 4 GiB at 2,048, 17 GiB at 4,096)"
+                             % GPU_IMAGE_TOKENS)
         if allow_local_files not in (False, None, True):
             allow_local_files = str(_absolute(allow_local_files))
         self.allow_local_files = allow_local_files or False  # False, True (any path) or the folder local files must be in
@@ -363,20 +373,21 @@ class VisionProcessor:
 
     def summary(self) -> str:
         """One line for the server's start-up message."""
+        where = ("the projector on the GPU (YASAKANI_VISION_GPU=1, experimental)" if self.gpu else "%d CPU threads" % self.threads)
         return ("image input: at most %d image tokens per image (larger images are downsized), %d per request, %d images per request; "
-                "%d CPU threads.  While an image is encoded, other requests wait" % (self.max_image_tokens, self.max_request_image_tokens,
-                                                                                     MAX_IMAGES, self.threads))
+                "%s.  While an image is encoded, other requests wait" % (self.max_image_tokens, self.max_request_image_tokens,
+                                                                         MAX_IMAGES, where))
 
     def _fingerprint(self):
         # Replacing a projector/model/backend invalidates cached features, including after a server restart.  The per-image limit
         # changes the features (the image is downsized differently).  The thread count did not change them in our tests (1 to 32
         # threads, bit for bit), but it stays in the key: a cache entry is only reused under exactly the settings that made it.
         # The projector on the GPU gives slightly different features, so that choice is part of the key too.
-        from ._mtmd import lib_name, use_gpu
+        from ._mtmd import lib_name
         paths = [self.mmproj, self.model, self.llama_dir / lib_name("llama"), self.llama_dir / lib_name("mtmd")]
         paths += sorted(self.llama_dir.glob(lib_name("ggml*")))
         files = [(str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns) for p in paths]
-        return json.dumps(["b10488-cpu-bf16-rne-v2", self.threads, self.max_image_tokens, files] + (["gpu"] if use_gpu() else [])).encode()
+        return json.dumps(["b10488-cpu-bf16-rne-v2", self.threads, self.max_image_tokens, files] + (["gpu"] if self.gpu else [])).encode()
 
     def _cached(self, key):
         """Features from the memory or the disk cache, or None.  A damaged or unreadable disk entry counts as missing."""
@@ -459,7 +470,7 @@ class VisionProcessor:
                         if self._encoder is None:
                             from ._mtmd import MtmdEncoder
                             self._encoder = MtmdEncoder(self.llama_dir, self.mmproj, self.model, threads=self.threads,
-                                                        max_image_tokens=self.max_image_tokens)
+                                                        max_image_tokens=self.max_image_tokens, gpu=self.gpu)
                         job = self._encoder.tokenize(image)
                         pending.append((i, key, job))
                         n = job.n

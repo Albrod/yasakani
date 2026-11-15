@@ -1,4 +1,4 @@
-﻿YASAKANI quickstart 0.1.3
+﻿YASAKANI quickstart 0.1.4
 =========================
 
 日本語
@@ -11,7 +11,7 @@ Windows 11 と NVIDIA の RTX 1 枚のパソコンで、YASAKANI をすぐに試
   3. 画面の質問に番号で答えます（モデルは「品質モデル」か「最速モデル」）。
 
 START.cmd がすること
-  - このパソコンの確認（Python 3.10 以上、GPU、空き容量）
+  - このパソコンの確認（Python 3.10 以上、GPU、NVIDIA のドライバー、空き容量）
   - エンジンの zip を公開ページからダウンロードして、SHA-256 を確かめる
   - このフォルダーの中に Python の環境を作って、パッケージを入れる
   - モデル（約 13〜15 GB）を Hugging Face からダウンロードする
@@ -21,8 +21,10 @@ START.cmd がすること
 知っておくこと
   - Python 3.10 以上が要ります（https://www.python.org/downloads/windows/）。
   - 空き容量は 20 GB ほど要ります。
+  - NVIDIA のドライバーは 580 以上が要ります（エンジンが CUDA 13 で作ってあるため）。古いときは、ダウンロードの前に
+    止まって案内します（https://www.nvidia.com/ja-jp/drivers/）。
   - GPU：確かめたのは RTX 5090 だけです。0.1.3 から、RTX 30・40・50 シリーズで GPU のメモリが 16 GB 以上のカードでも
-    動きます。ただし最適化も動作の確認もしていません。24 GB 未満のカードでは最速モデルだけを使い、文脈の長さは空きメモリから
+    動くように作ってあります。ただし最適化も動作の確認もしていません。24 GB 未満のカードでは最速モデルだけを使い、文脈の長さは空きメモリから
     決めます。AMD・Intel の GPU と Mac には対応していません。
   - 「先読みあり・なしを比べる」（lookahead_check.py）は、同じ 4 つの課題を、先読みなしと出荷時の設定で書かせます。
     1 回の計算の時間、1 回で確定したトークン数、速さ、書かれた文章が同じかどうかを表示します。
@@ -44,7 +46,7 @@ How to use
   3. Answer the questions with a number (the model is the "quality model" or the "fastest model").
 
 What START.cmd does
-  - checks this computer (Python 3.10 or newer, the GPU, free disk space)
+  - checks this computer (Python 3.10 or newer, the GPU, the NVIDIA driver, free disk space)
   - downloads the engine zip from the release page and checks its SHA-256
   - makes a Python environment inside this folder and installs the package
   - downloads the model (about 13 to 15 GB) from Hugging Face
@@ -54,8 +56,10 @@ What START.cmd does
 Good to know
   - Python 3.10 or newer is needed (https://www.python.org/downloads/windows/).
   - About 20 GB of free disk space is needed.
-  - GPU: only the RTX 5090 has been tested. Since 0.1.3 YASAKANI also runs on RTX 30, 40 and 50 series cards with 16 GB
-    or more, but it is not optimized or tested on them. On cards with less than 24 GB only the fastest model is used, and
+  - NVIDIA driver 580 or newer is needed (the engine is built with CUDA 13). With an older driver START.cmd stops before
+    the downloads and says so (https://www.nvidia.com/en-us/drivers/).
+  - GPU: only the RTX 5090 has been tested. Since 0.1.3 YASAKANI is also built to run on RTX 30, 40 and 50 series cards with
+    16 GB or more, but it is not optimized or tested on them. On cards with less than 24 GB only the fastest model is used, and
     the context length is chosen from the free GPU memory. AMD and Intel GPUs and Macs are not supported.
   - "Compare look-ahead on and off" (lookahead_check.py) writes the same four tasks without look-ahead and with the
     shipping settings. It prints the time of one pass, the tokens confirmed per pass, the speed, and whether the text is

@@ -7,6 +7,7 @@
 
 
 
+#include <algorithm>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -123,14 +124,32 @@ public:
   
   
   
-  void snap_save(const int32_t* ids, int n);        
-  void snap_load();                                  
-  int  snap_pos() const { return sh_pos_; }
-  const std::vector<int32_t>& snap_ids() const { return sh_ids_; }
+  // Prompt snapshots: up to YSKN_SNAP_SLOTS saved states (pinned host memory), all prefixes of snap_seq(), whose KV rows stay on the
+  // GPU.  A slot holds the linear-attention state, the conv history and the drafter ring at one position.
+  void snap_set_seq(const int32_t* ids, int n) { sh_seq_.assign(ids, ids + n); }
+  const std::vector<int32_t>& snap_seq() const { return sh_seq_; }
+  bool snap_save_at(int n);                          // take a slot at the current position n (<= snap_seq().size())
+  void snap_load_slot(int i);                        // restore slot i (position = its position)
+  int  snap_best(int L) const;                       // the slot with the largest position <= L, or -1
+  int  snap_slot_pos(int i) const { return sh_slots_[(size_t)i].pos; }
+  void snap_trim(int L);                             // forget the slots after position L
+  int  snap_count() const { int c = 0; for (const SnapSlot& s : sh_slots_) c += s.pos > 0; return c; }
+  int  snap_pos() const { int p = -1; for (const SnapSlot& s : sh_slots_) p = std::max(p, s.pos); return p; }
   void snap_note(const int32_t* ids, int n) { sh_cur_.assign(ids, ids + n); sh_note_ = sh_epoch_; }   
   bool snap_live_ok() const { return sh_note_ == sh_epoch_ && (int)sh_cur_.size() == pos_ && pos_ > 0; }
   const std::vector<int32_t>& snap_live() const { return sh_cur_; }
-  void snap_drop() { sh_pos_ = -1; sh_ids_.clear(); }
+  void snap_drop() { for (SnapSlot& s : sh_slots_) s.pos = -1; sh_seq_.clear(); sh_last_ = -1; }
+  int  snap_slots_max() const { return sh_max_; }
+  int  snap_step() const { return sh_step_; }
+  int  snap_tail() const { return sh_tail_; }
+  int  snap_sparse() const { return sh_sparse_; }
+  int  snap_min() const { return sh_min_; }
+  int  prefill_chunk() const { return PM_; }
+  // Copy passes wider than 16 rows (verify of host tokens only).
+  static constexpr int kVerifyMax = 64;
+  bool wide_ok() const { return wide_ok_; }
+  int xw_rows() const { return xw_rows_; }           // passes up to this many rows use the exact-sum GEMV (16 = none wider)
+  void prepare_wide(int max_rows);                   // build the graphs of the wide passes and their commits (nothing runs)
   
   
   
@@ -250,9 +269,25 @@ private:
   bool xsmc_ = false;    
   float *us_ = nullptr, *S_ = nullptr, *mtp_part_ = nullptr;   
   float* ybuf_ = nullptr;  
-  float* pt(const DevTensor& t, int M) const { return (xsmc_ && M > 16) ? ybuf_ + (t.part - part_) : t.part; }
+  float* pt(const DevTensor& t, int M) const { return (xsmc_ && M > xw_rows_) ? ybuf_ + (t.part - part_) : t.part; }
   int xsm_part_ = 0;     
-  int nmode(int M, bool normed = false) const { return M > 16 ? (normed ? 3 : 1) : (xsm_part_ ? 2 : 0); }   
+  int nmode(int M, bool normed = false) const { return M > xw_rows_ ? (normed ? 3 : 1) : (xsm_part_ ? 2 : 0); }   
+  // Exact-sum passes of 17..xw_rows_ rows (compute capability 12.x): the same int64 sums as the 16-row path, read by the same consumer
+  // kernels (mode 0).  16 = off (17..64 rows use the prefill GEMM and float outputs, as before).
+  int xw_rows_ = 16, xw_arch_ = 0;
+  int xw_v32_ = 1, xw_v64_ = 0;      // kernel for 17..32 / 33..64 rows: 0 = staged-input GEMM with a K split, 1 = 32-row GEMV
+  int xw_wpc_ = 8, xw_nws_ = 0;      // warps per CTA of the staged-input kernel; K split: 0 = chosen per launch shape (xw_pick),
+                                     // > 0 = the 16-row split x xw_nws_ / rows
+  int xw_gamma_ = 200;               // xw_pick: cost of one more wave of CTAs, in hundredths of the time of one 512-column group
+  std::map<std::vector<int>, int> xw_pick_cache_;
+  int xw_pick(const GemvLaunch& P, int cols_per_cta, int slots);
+  int xw_head_ = 1;                  // the output layer in one exact-sum GEMV for passes of up to xw_rows_ rows
+  int xw_nw(const DevTensor& t, int M) const;
+  void gemv_xw(GemvLaunch& P);
+  void head_wide(int M, bool topk, bool nll);
+public:
+  int test_xsum(const std::string& name, int M, unsigned seed, int variant, long long* out4);   // compare with 16-row launches
+private:
   void gemv(std::initializer_list<DevTensor*> ts, int M, bool normed, const GemvLaunch* fin = nullptr);   
   
   
@@ -367,8 +402,14 @@ private:
   bool specx_scope_ = false;  
   bool pre_committed_ = false;   
   
-  float* sh_S_ = nullptr; uint16_t* sh_hist_ = nullptr; uint16_t* sh_ring_ = nullptr; uint16_t* sh_pend_ = nullptr;
-  int sh_pos_ = -1; std::vector<int32_t> sh_ids_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0;
+  struct SnapSlot { float* S = nullptr; uint16_t* hist = nullptr; uint16_t* ring = nullptr; uint16_t* pend = nullptr; int pos = -1; unsigned long long tick = 0; };
+  std::vector<SnapSlot> sh_slots_; int sh_max_ = 1, sh_step_ = 1024, sh_tail_ = 4096, sh_sparse_ = 65536, sh_min_ = 8192, sh_last_ = -1;
+  unsigned long long sh_tick_ = 0; bool sh_warned_ = false;
+  std::vector<int32_t> sh_seq_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0;
+  bool snap_alloc(SnapSlot& s);
+  void snap_free();
+  int last_keep_ = 1;          // the last verify pass kept the conv outputs for the commit replay (rows <= 16)
+  bool wide_ok_ = false;       // wide copy passes allowed on this GPU
   
   
   

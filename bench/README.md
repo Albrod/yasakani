@@ -8,6 +8,7 @@ GeForce RTX 5090. The speed tables and the quality table of this release ([`READ
 
 | Folder | Date | What |
 |---|---|---|
+| [`20261115/`](20261115/) | November 15, 2026 | **YASAKANI 0.1.2, 0.1.3 and 0.1.4 measured again** with the clients of `20261108/`, thinking off: the YASAKANI rows of the thinking-off table since 0.1.4. The client records and the answer of every run, and one extra task (`prompts/cases_plus.json`). The table is made by [`tools/speed/tables_0114.py`](../tools/speed/tables_0114.py). |
 | [`20261108/`](20261108/) | November 6 and 8, 2026 | **The speed tables of this release**: the two released models (fastest and quality) against MegaCapybara 1.39, mkyt v0.3.2, ignis v0.9.6, NInfer, vLLM 0.31.0, SGLang 0.5.22, llama.cpp b11700 and TensorFold 0.6.6 on 15 tasks, thinking off and on. Launch commands, the scripts as run, the record and the answer of every run, server logs, and `scripts/tables.py`, which makes the tables again from the records. MegaCapybara's runs with thinking off are the ones of `20261103/`; the launch scripts of SGLang, vLLM and llama.cpp are the ones of `20261101/`. Also the records of the quality table (`quality/`), of KV5 at long context (`long_context/`) and the evidence package of the recorded demonstration (`demo/`). |
 | [`20261110/`](20261110/) | November 10, 2026 | **Checks on the files of this release** (the `yskn.dll`, the Python package and the two model folders that are distributed): `yasakani verify`, `selfcheck` and `bench`, output with the speed-up on and off, the same request repeated, and a check of the GPU itself. |
 | [`20261101/`](20261101/) | November 1, 2026 | An earlier comparison. YASAKANI (public build) against SGLang 0.5.22, vLLM 0.31.0 and llama.cpp b11700, ten tests. Launch commands, prompts, the measurement scripts and the record of every run. Also the YASAKANI-only checks of the same day (quality against the original model, AIME 2025 summary, long context, output with and without the speed-up, self-check). |
@@ -45,6 +46,31 @@ in-process runs, the number of generated tokens).
   first to the last generated token, through the Python API without a server. See "Known limits".
 * November 6 and 8 (`20261108/`): every run of every engine is a streamed server run; the time runs from the first to the last streamed
   chunk, and with thinking on the reasoning chunks count like the answer chunks.
+
+## 20261115/: YASAKANI 0.1.2, 0.1.3 and 0.1.4 measured again (thinking off)
+
+The thinking-off measurement of `20261108/` repeated on November 15, 2026 for three versions of YASAKANI, one after the other, both models, on the same PC with the
+same model files: `20261108/scripts/oai_bench_client.py` (the 12 published prompts, 4,096 tokens) and `20261108/scripts/custom_bench.py` with
+`20261103/prompts/cases.json` (the 3 tasks of our own) and with `20261115/prompts/cases_plus.json` (one extra task: an edit of 160 JSONL records,
+at most 12,000 tokens), 2 runs each, greedy. Before the clients: `yasakani serve --max-tokens-cap 16384` with its default settings, 5 s, and two
+warm-up requests (`20261101/scripts/capture_stream.py`), as on November 8.
+
+| Folder | Python package | `yskn.dll` (SHA-256) |
+|---|---|---|
+| `results/v0.1.2/` | 0.1.2 (commit 7255e9b) | `0f5d973b791c8d66034d87bdfc7f2c018718dc0e851b9a6ee6dc1eb275150bbb` |
+| `results/v0.1.3/` | 0.1.3 (commit 274d709) | `6f8c20644dfa39ed0dea396133a882ecc4451ec19f7926dd737a90540e08e838` |
+| `results/v0.1.4/` | 0.1.4 (the files of this release, measured before the version number was set) | `bae77ae6e73369dee5d33490b1ff2093f88ab57c02efa06912db6246efffaa09` |
+
+Each holds `n12_ysk_speed_v8/` (fastest model) and `n12_ysk_quality_v8/` (quality model), laid out as the YASAKANI folders of `20261108/results/`:
+`n12/` and `own/` as there, `own_plus/` for the extra task, and the client logs. The folder names are those of `20261108/`, so that its scripts
+read them unchanged.
+
+Order and times (Japan time): fastest model 0.1.2 14:51, 0.1.3 14:55, 0.1.4 14:59 to 15:03; quality model 0.1.4 15:03, 0.1.3 15:08, 0.1.2
+15:12 to 15:17. Before each server the GPU was checked to be idle (nvidia-smi: 1,190 to 1,200 MiB used by the desktop, 1%). The clients ran with
+Python 3.14.4 on Windows; the server ran in the Python environment of an installation of 0.1.1 with the package of each version.
+
+[`tools/speed/tables_0114.py`](../tools/speed/tables_0114.py) makes the README table from these records and the other engines' records of
+`20261108/`. Left out for publication: the server logs, the warm-up records and a file with the start times, which hold local paths.
 
 ## 20261108/: the speed tables of this release
 

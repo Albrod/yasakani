@@ -254,6 +254,70 @@ class ToolRunTests(unittest.TestCase):
         choice = json.loads(raw)["choices"][0]
         self.assertEqual((choice["finish_reason"], choice["message"]["content"]), ("stop", CALL))
 
+    def record_prompts(self):
+        """The text of every prompt the runner gives the engine (the stub does not keep it)."""
+        seen = []
+        generate = self.engine.generate
+
+        def recording(prompt, *a, **k):
+            seen.append(self.fmt.decode([int(t) for t in prompt]))
+            return generate(prompt, *a, **k)
+
+        self.engine.generate = recording
+        self.addCleanup(lambda: self.engine.__dict__.pop("generate", None))
+        return seen
+
+    def test_server_required_returns_the_call(self):
+        self.stub.push([self.fmt.think_end] + self.ids("\n\n" + CALL) + [EOS])
+        status, raw = self.post({"messages": USER, "tools": TOOLS, "tool_choice": "required"})
+        self.assertEqual(status, 200, raw)
+        choice = json.loads(raw)["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertEqual([(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in choice["message"]["tool_calls"]],
+                         [("get_weather", {"city": "Osaka", "days": 3})])
+
+    def test_server_required_is_not_enforced(self):
+        # no constrained decoding: when the model answers without a call, the text comes back with finish_reason "stop"
+        self.stub.push([self.fmt.think_end] + self.ids("\n\nIt is sunny in Osaka.") + [EOS])
+        status, raw = self.post({"messages": USER, "tools": TOOLS, "tool_choice": "required"})
+        self.assertEqual(status, 200, raw)
+        choice = json.loads(raw)["choices"][0]
+        self.assertEqual((choice["finish_reason"], choice["message"]["content"]), ("stop", "It is sunny in Osaka."))
+        self.assertNotIn("tool_calls", choice["message"])
+
+    def test_server_required_gives_the_same_prompt_as_auto(self):
+        seen = self.record_prompts()
+        for choice in ("auto", "required"):
+            self.stub.push([self.fmt.think_end] + self.ids("\n\n" + CALL) + [EOS])
+            status, raw = self.post({"messages": USER, "tools": TOOLS, "tool_choice": choice})
+            self.assertEqual(status, 200, raw)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0], seen[1])
+        self.assertIn('"name": "write_file"', seen[0])
+
+    def test_server_named_function_offers_only_that_function(self):
+        seen = self.record_prompts()
+        self.stub.push([self.fmt.think_end] + self.ids("\n\n" + CALL) + [EOS])
+        status, raw = self.post({"messages": USER, "tools": TOOLS,
+                                 "tool_choice": {"type": "function", "function": {"name": "get_weather"}}})
+        self.assertEqual(status, 200, raw)
+        choice = json.loads(raw)["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertEqual([c["function"]["name"] for c in choice["message"]["tool_calls"]], ["get_weather"])
+        self.assertEqual(len(seen), 1)
+        self.assertIn('"name": "get_weather"', seen[0])
+        self.assertNotIn('"name": "write_file"', seen[0])               # only the named function is in the prompt
+
+    def test_server_required_stream_sends_the_call(self):
+        self.stub.push([self.fmt.think_end] + self.ids("\n\n" + CALL) + [EOS])
+        status, raw = self.post({"messages": USER, "tools": TOOLS, "tool_choice": "required", "stream": True})
+        self.assertEqual(status, 200, raw)
+        objs = [json.loads(e[len("data: "):]) for e in raw.split("\n\n") if e.startswith("data: ") and not e.endswith("[DONE]")]
+        deltas = [o["choices"][0]["delta"] for o in objs if o.get("choices")]
+        calls = [c for d in deltas for c in d.get("tool_calls") or []]
+        self.assertEqual([(c["index"], c["function"]["name"]) for c in calls], [(0, "get_weather")])
+        self.assertEqual([o["choices"][0]["finish_reason"] for o in objs if o.get("choices")][-1], "tool_calls")
+
     def test_server_refuses_an_unknown_tool_choice(self):
         for extra, word in (({"tool_choice": "always"}, "tool_choice"), ({"functions": [{"name": "f"}]}, "functions")):
             status, raw = self.post(dict({"messages": USER, "tools": TOOLS}, **extra))

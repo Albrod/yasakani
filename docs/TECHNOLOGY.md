@@ -3,8 +3,9 @@
 Technical notes by the author, written as a map for people who read the source code in this repository.
 日本語: [TECHNOLOGY.ja.md](TECHNOLOGY.ja.md)
 
-* Scope: versions 0.1.0 to 0.1.3. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
-  one missing synchronization (chapter 7). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
+* Scope: versions 0.1.0 to 0.1.4. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
+  one missing synchronization (chapter 7); 0.1.4 adds kernels for passes of 17 to 64 rows on compute capability 12.x and changes host
+  code (5.4 and chapter 8). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).
@@ -180,9 +181,10 @@ More rows cost little more because the weights are decoded only once.
 ### 5.1 The loop
 
 1. Prepare candidates for what comes next (drafts).
-2. The main model checks "the last token + the drafts" together in one pass (8 or 16 rows in all).
+2. The main model checks "the last token + the drafts" together in one pass (8 or 16 rows in all; since 0.1.4 up to 64 rows when the draft
+   is copied from the input, see 5.4).
 3. The tokens the main model chose are compared with the drafts from the front, and everything up to the first difference is confirmed.
-   At the position of the difference the main model's token is taken. So one pass confirms at most 8 or 16 tokens.
+   At the position of the difference the main model's token is taken. So one pass confirms at most 8 or 16 tokens (64 in a wide copy pass).
 4. The state of the model is advanced to the confirmed position.
 
 A draft is only a proposal; only tokens the main model agrees with are kept. The control code is in `src/specx.cpp`.
@@ -192,7 +194,7 @@ A draft is only a proposal; only tokens the main model agrees with are kept. The
 | source | what it does | source file |
 |---|---|---|
 | draft model | takes intermediate values of five layers of the main model as input and produces 8 rows (or 16 rows) of continuation **in one shot** | `src/q35_bdraft.cu` |
-| copy from the input | if the last few tokens occurred before, what followed them is used as the draft | |
+| copy from the input | if the last few tokens occurred before (in the prompt or in the answer so far), what followed them is used as the draft; since 0.1.4 an index of 4-token sequences finds the place, and a cursor keeps copying from it while the answer follows it (5.4) | `src/specx.cpp`, `src/copy_index.hpp` |
 | next-token table | remembers which tokens the main model chose before | |
 
 In the tasks of the table above almost all confirmed tokens came from the draft model.
@@ -221,6 +223,36 @@ In the tasks of the table above almost all confirmed tokens came from the draft 
 * **The state-carrying layers.** The checking pass is provisional. At confirmation the state is advanced again, but intermediate results
   of the checking pass are kept, and the re-advance runs on a second stream, overlapping with the next draft. The state (about 0.15 GB) is
   read once per checking pass; it is not copied for every candidate row.
+
+### 5.4 Wide copy passes (0.1.4)
+
+When an answer copies its input (an edit that returns most of a file, records returned with a few changes), most drafts are right, but up
+to 0.1.3 one pass confirmed at most 16 tokens. 0.1.4 lets a copy go further:
+
+* **Finding the place.** An index of the 4-token sequences of the prompt and of the answer so far points to earlier places with the same
+  tokens; building it and one lookup take about 1 ms after a 229,000-token prompt. A cursor remembers where the copy is: while the answer
+  follows the source, the next draft continues from there. When the answer leaves the source, the nearest match after the point where it
+  left is preferred, so that look-alike lines (JSONL records, for example) are not mixed up (`src/copy_index.hpp`, `src/specx.cpp`).
+* **Wider passes.** After two full 16-row copy passes in a row, the next copy pass checks 63, 47 or 31 tokens of the source at once: 64, 48
+  or 32 rows. On compute capability 12.x these passes have matrix kernels of their own: the weights are read once for all rows, and each
+  kernel adds the same integer sums as the 16-row kernels, so the results are the same bit for bit (`src/pfa.cu`, `src/lnord.cu`; the
+  output layer of such a pass is one matrix product as well). A 64-row pass takes about 2.3 times as long as a 16-row pass (24.9 against
+  11.0 ms with the fastest model and a 4K context on the RTX 5090; a 32-row pass 15.2 ms), so it pays only when most of it is accepted. If a run of wide passes took longer than 16-row passes would have, measured by time, the engine waits for twice as
+  many fully accepted 16-row passes before it widens again (from 2 up to 16; current defaults, not tuned).
+* **Confirming.** For passes of up to 16 rows the provisional results of the state-carrying layers are kept (5.3). A wider pass does not
+  keep them; at confirmation the state is computed again from the inputs of the pass (`src/engine35.cpp`).
+* **Where.** Wide passes are used on compute capability 12.x (RTX 50 series) only; other GPUs copy with passes of up to 16 rows. Only the
+  RTX 5090 has been measured.
+
+The answers do not change: only tokens the main model chose are kept, and a pass of 17 to 64 rows gives bit for bit the same choices and
+values as passes of 16 rows (chapter 7). Thinking off, measured one after the other against 0.1.2: code edit 1.67 times (fastest model) and
+1.78 times (quality model), JSONL edit 2.04 and 1.96 times, a longer JSONL edit 1.84 and 1.88 times. The other tasks ran at 0.96 to 1.01 times
+(against 0.1.3 in the same sitting: 0.99 to 1.00 times; thinking off, greedy; [MEASUREMENTS.md](MEASUREMENTS.md)). The code edit of the fastest model needed 110 passes with 0.1.4 and 335 with the
+copy lookup of 0.1.3 (one run each). The following were measured with the first build of 0.1.4, before the kernels of the wide passes, and
+not again: with a fixed sampling seed one structured task (CSV) was about 7% slower than with 0.1.3 (both runs; as fast as 0.1.3 with the
+new copy lookup switched off; the cause in detail is not known); with thinking on, the thinking copies little and is not faster (the first
+1,536 tokens of the edit tasks: 0.99 to 1.02 times; the answer part was not measured); with passes of 16 rows only, the index and the
+cursor alone made the edit tasks 1.07 to 1.18 times as fast (one run each).
 
 ## 6. KV5 (the cache for long contexts)
 
@@ -291,6 +323,24 @@ apply the position rotation to queries and keys; the rotation reads values of ot
 builds that have it, the change did not appear again ([MEASUREMENTS.md](MEASUREMENTS.md)). We still do not promise output that is
 identical to the last character in every condition.
 
+0.1.4 adds wide copy passes, kernels of their own for them on compute capability 12.x, and saved prompt states (5.4 and chapter 8). They
+were checked against plain decoding on the RTX 5090. The new kernels add the same integer sums as the 16-row kernels, in the same order, and
+their sums were the same bit for bit for every kind of matrix of both models (1,944 of 1,944 per model, and 7,200 of 7,200 in a second
+check). A single pass of 17 to 64 rows gave the same chosen tokens, NLL bits and confirmed state as passes of 16 rows, also after
+confirming 0 to 63 tokens of a 64-row pass, for the last part of a prompt and with a fixed sampling seed (90 of 90 checks per model;
+contexts of 2K, 16K and 40K). In real generations 297 of 297 runs with copying (58 of them with wide passes) gave the same tokens as decoding
+one token per pass (fastest model: 21 tasks, greedy and with a fixed seed, the settings of 0.1.4 twice, the new kernels switched off,
+16-row copying, the copy lookup of 0.1.3, and an earlier build without the new kernels; quality model: 15 tasks, greedy). A prompt
+continued from a saved state gave the same output and the same state hash as the same prompt read from the start (37 of 37 cases with the
+first build, documents of 5K, 51K and 229K tokens; 34 of 34 with the final build). Wide passes after a long prompt also gave the same tokens
+as decoding one token per pass with the final build (fastest model, a code edit; about 60,000 tokens, greedy and with a fixed seed, and
+about 177,000 tokens, greedy: 3 of 3). The self-check of every GPU repeats a small version of this check (python/README.md).
+
+0.1.4 also makes the point where `thinking_budget` or the loop guard cuts the thinking depend only on the generated tokens
+(`python/yasakani/loopguard.py`). Up to 0.1.3 the cut could move by the tokens confirmed before it was noticed, so the answer could depend on
+the look-ahead. Three requests cut by the thinking budget and one whose thinking ended before it gave the same answers with the settings of
+0.1.4 (twice), with 16-row copying and with one token per pass (greedy and with a fixed seed).
+
 KV5 rounds the cached values, so it changes the numbers. The released engine has no unrounded cache to switch to: with `YSKN_TB_CAP=0`
 it keeps the KV5-rounded values unpacked in 8-bit form and reads them with another attention kernel, and that can give a different text too.
 
@@ -309,6 +359,18 @@ The time of one pass with one part switched off (shipping: prose 9.70 to 9.90 ms
 
 When a long prompt is read (17 or more rows together), the weights of one matrix at a
 time are expanded to int8 and reused (`src/q35_g6.cu`). A request that starts with the same text as the previous one reads only the new part.
+
+**Saved prompt states (0.1.4).** The engine keeps up to 8 saved states along the prompt of one conversation in pinned host memory (187 MiB
+each, about 1.5 GiB in all; no more GPU memory; 8, 8,192 and 4,096 are current defaults, not tuned): one after the last `<|im_start|>` of a prompt, and for prompts of 8,192 tokens or more also at multiples of 1,024
+in the 4,096 tokens before it and at multiples of 65,536. All of them are prefixes of one sequence. A new request continues from the live
+state if that is a prefix of it, otherwise from the latest saved state inside the part it shares with the previous prompt, otherwise it is
+read from the start. The prompt is read in pieces that end at multiples of 1,024, so a request restored from a saved state is computed in
+the same pieces as when it is read from the start. The same 229,376-token document with a new question is therefore read again only from
+the last multiple of 1,024 before the question: 0.37 s to the first token instead of 115.6 s. A prompt is read from the start when an
+unrelated request came in between (it replaces the sequence), when thinking is switched on or off, after a request with an image, and when
+a prompt shorter than 8,192 tokens differs part-way. If pinned memory cannot be allocated, the engine goes on with the states it has. An older package that does not pass the number of states
+gets one, which works as in 0.1.3. The
+settings are the `YSKN_SNAP_*` entries of `DEFAULT_ENV` in `python/yasakani/runtime.py`; the code is in `src/engine35.cpp` and `src/specx.cpp`.
 
 ## 9. Research this builds on
 
@@ -330,5 +392,11 @@ time are expanded to int8 and reused (`src/q35_g6.cu`). A request that starts wi
 * AMD GPUs and Macs are not supported: the kernels are CUDA.
 * The converter ([`tools/convert/`](../tools/convert/)) knows the layers of Qwen3.8-27B only; another model needs changes to it and to
   the engine.
+* Wide copy passes (5.4) are used on compute capability 12.x only, and were measured on the RTX 5090 only. Their kernels have not run on
+  another RTX 50 card; there, `yasakani selfcheck` compares passes of 64 rows with passes of 16 ([python/README.md](../python/README.md#the-self-check)). Their answers were checked
+  against single passes up to a context of 40,000 tokens, and in generations after a prompt of about 177,000 tokens. Their speed after a long
+  prompt (more than about 40,000 tokens) has not been measured. A stop string is acted on after a pass, so up to 64 tokens (16 up to 0.1.3)
+  can be generated past it; the text is cut at the stop string, but those tokens count in `usage.completion_tokens`.
+* The saved prompt states take up to about 1.5 GiB of pinned host memory.
 * One request is generated at a time.
 * The numbers here come from one computer. They change with the task, the context length and what else is using the GPU.

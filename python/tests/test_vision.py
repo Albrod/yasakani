@@ -343,10 +343,11 @@ class ImageFileTests(unittest.TestCase):
 
 class LibraryTests(unittest.TestCase):
     def test_missing_function(self):
-        with self.assertRaises(RuntimeError) as cm:
-            _mtmd._bind(object(), "mtmd_no_such_function", [], None)
-        self.assertIn("mtmd_no_such_function", str(cm.exception))
-        self.assertIn(_mtmd.LLAMA_ZIP, str(cm.exception))
+        for windows, need in ((True, _mtmd.LLAMA_ZIP), (False, _mtmd.LINUX_BUILD)):
+            with mock.patch.object(_mtmd, "_WINDOWS", windows), self.assertRaises(RuntimeError) as cm:
+                _mtmd._bind(object(), "mtmd_no_such_function", [], None)
+            self.assertIn("mtmd_no_such_function", str(cm.exception))
+            self.assertIn(need, str(cm.exception))                       # the build of this platform
 
     def test_encoder_refuses_a_library_without_a_function(self):
         class Fn:
@@ -401,13 +402,28 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(err.getvalue(), "warning\nwarning, continued\nerror\n")
 
     def test_llama_dir_check_outside_windows(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(_mtmd, "_WINDOWS", False):
+        build = {"ggml_version": b"0.20.2", "ggml_commit": b"9d77fa1"}
+        loaded = []
+
+        class Base:                                                      # libggml-base.so of a build from source
+            def __init__(self, path):
+                loaded.append(Path(path).name)
+
+            def __getattr__(self, name):
+                return lambda: build[name]
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(_mtmd, "_WINDOWS", False), \
+                mock.patch.object(_mtmd.C, "CDLL", Base):
             d = Path(d)
             with self.assertRaises(FileNotFoundError):
                 _mtmd.check_llama_dir(d)                                 # empty folder
             for stem in ("llama", "mtmd", "ggml", "ggml-base"):
                 (d / _mtmd.lib_name(stem)).write_bytes(b"built from source")
-            _mtmd.check_llama_dir(d)                                     # present: accepted without a checksum
+            _mtmd.check_llama_dir(d)                                     # present and b10488: accepted without a checksum
+            self.assertEqual(loaded, ["libggml-base.so"])                # only this library is loaded at start
+            build["ggml_commit"] = b"unknown"
+            with self.assertRaises(RuntimeError):
+                _mtmd.check_llama_dir(d)                                 # a build without git: refused at start
 
     def test_llama_dir_check(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(_mtmd, "_WINDOWS", True):
@@ -550,7 +566,7 @@ class OptionTests(ProcessorCase):
     def test_limit_and_threads_reach_the_encoder(self):
         self.prepare(self.processor(max_image_tokens=512, threads=3), [png_uri((8, 8))])
         (args, kw), = FakeEncoder.opened
-        self.assertEqual(kw, dict(threads=3, max_image_tokens=512))
+        self.assertEqual(kw, dict(threads=3, max_image_tokens=512, gpu=False))
 
     def test_cache_key_holds_the_limit(self):
         uri = png_uri((9, 4))
@@ -567,6 +583,25 @@ class OptionTests(ProcessorCase):
         with mock.patch.object(_mtmd, "use_gpu", return_value=True):
             self.prepare(self.processor(cache=self.t / "cache"), [uri])                     # projector on the GPU: encoded again
         self.assertEqual(len(FakeEncoder.encoded), 2)
+
+    def test_gpu_projector_limits_the_image_tokens(self):
+        with mock.patch.object(_mtmd, "use_gpu", return_value=True):
+            with self.assertRaises(ValueError) as cm:
+                self.processor(max_image_tokens=4096)
+            self.assertIn("YASAKANI_VISION_GPU", str(cm.exception))
+            vp = self.processor(max_image_tokens=2048)
+            self.assertTrue(vp.gpu)
+            self.assertIn("the projector on the GPU", vp.summary())
+            self.assertNotIn("CPU threads", vp.summary())
+        vp = self.processor(max_image_tokens=4096)                       # on the CPU the projector's own limit stays
+        self.assertFalse(vp.gpu)
+        self.assertIn("CPU threads", vp.summary())
+
+    def test_the_encoder_gets_the_choice_of_the_processor(self):
+        with mock.patch.object(_mtmd, "use_gpu", return_value=True):
+            vp = self.processor(cache=self.t / "cache")
+        self.prepare(vp, [png_uri((9, 4))])                              # the variable is no longer read here
+        self.assertEqual(FakeEncoder.opened[-1][1]["gpu"], True)
 
     def test_gpu_projector_is_opt_in_and_not_for_windows(self):
         for windows, value, want in ((False, None, False), (False, "0", False), (False, "1", True), (True, "1", False)):
@@ -674,6 +709,126 @@ class EncoderCloseTests(unittest.TestCase):
         enc.close()
         enc.close()
         handle2.close.assert_called_once()
+
+
+class EncoderOpenTests(unittest.TestCase):
+    """The encoder with recorders in place of ctypes.CDLL and os.add_dll_directory: nothing of llama.cpp is loaded."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.d = Path(tmp.name)
+        for f in ("mmproj.gguf", "text.gguf"):
+            (self.d / f).write_bytes(b"GGUF")
+        self.calls, self.ctx = [], None
+        self.version, self.commit, self.defaults = b"0.20.2", b"9d77fa172", (4, -1, -1, 1024)
+
+    def library(self, path):
+        test, lib = self, Path(path).name
+
+        class Lib:
+            def __getattr__(self, name):
+                def fn(*a):
+                    test.calls.append((lib, name))
+                    if name == "ggml_version":
+                        return test.version
+                    if name == "ggml_commit":
+                        return test.commit
+                    if name == "ggml_backend_load_all_from_path":
+                        test.calls.append(("PATH", os.environ.get("PATH", "").split(os.pathsep)[0]))
+                    if name == "mtmd_context_params_default":
+                        cp = _mtmd._ContextParams()
+                        cp.n_threads, cp.image_min_tokens, cp.image_max_tokens, cp.batch_max_tokens = test.defaults
+                        cp.flash_attn_type = -1                          # LLAMA_FLASH_ATTN_TYPE_AUTO, the default of b10488
+                        return cp
+                    if name == "llama_model_default_params":
+                        return _mtmd._ModelParams()
+                    if name == "llama_model_load_from_file":
+                        return 1
+                    if name == "llama_model_n_embd_inp":
+                        return 5120
+                    if name == "mtmd_init_from_file":
+                        test.ctx = _mtmd._ContextParams.from_buffer_copy(bytes(a[2]))
+                        return 2
+                    return None
+                return fn
+        return Lib()
+
+    def open(self, windows, gpu=None):
+        def cdll(path, *a, **k):
+            self.calls.append(("CDLL", Path(path).name))
+            return self.library(path)
+
+        def add_dll_directory(path):
+            self.calls.append(("add_dll_directory", Path(path).name))
+            return mock.Mock()
+
+        path_before = os.environ.get("PATH")
+        with mock.patch.object(_mtmd, "_WINDOWS", windows), mock.patch.object(_mtmd, "check_llama_dir"), \
+                mock.patch.object(_mtmd.C, "CDLL", cdll), \
+                mock.patch.object(_mtmd.os, "add_dll_directory", add_dll_directory, create=True):
+            try:
+                enc = _REAL_ENCODER(self.d, self.d / "mmproj.gguf", self.d / "text.gguf", threads=6, gpu=gpu)
+                enc.close()
+            finally:
+                self.assertEqual(os.environ.get("PATH"), path_before)
+        return enc
+
+    def names(self, kind):
+        return [c[1] for c in self.calls if c[0] == kind]
+
+    def test_linux_checks_the_build_first(self):
+        self.open(False)
+        self.assertEqual(self.calls[:3], [("CDLL", "libggml-base.so"), ("libggml-base.so", "ggml_version"),
+                                          ("libggml-base.so", "ggml_commit")])
+        self.assertEqual(self.names("CDLL"), ["libggml-base.so", "libllama.so", "libmtmd.so", "libggml.so"])
+        self.assertEqual(self.names("add_dll_directory"), [])
+        self.assertNotIn(str(self.d), self.names("PATH"))                # PATH is left alone on Linux
+
+    def test_linux_refuses_another_build(self):
+        for version, commit in ((b"0.20.1", b"9d77fa172"), (b"0.20.2", b"unknown"), (b"0.20.2", b"9d77fa172-dirty"),
+                                (b"0.20.2", b"9d77fa1-dirty"), (b"0.20.2", b"1234567"), (b"0.20.2", b"9d77fa"), (b"", b"")):
+            with self.subTest(version=version, commit=commit):
+                self.calls[:] = []
+                self.version, self.commit = version, commit
+                with self.assertRaises(RuntimeError) as cm:
+                    self.open(False)
+                self.assertIn("b10488", str(cm.exception))
+                self.assertEqual(self.names("CDLL"), ["libggml-base.so"])   # nothing else loaded
+
+    def test_linux_accepts_short_and_long_commit_ids(self):
+        for commit in (b"9d77fa1", b"9d77fa17", b"9d77fa172", b"9d77fa172e"):
+            with self.subTest(commit=commit):
+                self.calls[:] = []
+                self.commit = commit
+                self.open(False)
+                self.assertEqual(self.names("CDLL")[-1], "libggml.so")
+
+    def test_layout_is_checked_before_the_text_model_opens(self):
+        for windows in (True, False):
+            with self.subTest(windows=windows):
+                self.calls[:] = []
+                self.defaults = (8, -1, -1, 1024)
+                with self.assertRaises(RuntimeError) as cm:
+                    self.open(windows)
+                self.assertIn("structure layout", str(cm.exception))
+                self.assertNotIn("llama_model_load_from_file", [c[1] for c in self.calls])
+
+    def test_projector_settings(self):
+        for windows, gpu, want in ((False, True, (True, 0)), (False, False, (False, -1)), (True, True, (False, -1)),
+                                   (True, False, (False, -1))):
+            with self.subTest(windows=windows, gpu=gpu):
+                self.calls[:] = []
+                enc = self.open(windows, gpu=gpu)
+                self.assertEqual(enc.gpu, want[0])
+                self.assertEqual((self.ctx.use_gpu, self.ctx.flash_attn_type, self.ctx.n_threads), want + (6,))
+                self.assertEqual((self.ctx.warmup, self.ctx.print_timings), (False, False))
+
+    def test_windows_loads_as_before(self):
+        self.open(True, gpu=True)
+        self.assertEqual(self.names("add_dll_directory"), [self.d.name])
+        self.assertEqual(self.names("CDLL"), ["llama.dll", "mtmd.dll", "ggml.dll"])   # no version check: the SHA-256 is checked
+        self.assertEqual(self.names("PATH"), [str(self.d)])                # the folder leads PATH while the backends load
 
 
 class ProjectorCheckTests(ProcessorCase):

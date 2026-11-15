@@ -321,6 +321,160 @@ __global__ void __launch_bounds__(pfa_maxt<LB>(), pfa_minb<LB>()) pfa_kernel(Gem
 }
 
 
+// Exact sums for passes of 17..64 rows (compute capability 12.x; a kernel of its own, the kernels above are unchanged).  A CTA (y =
+// a block of WPC 16-column tiles, z = worker) sums the 512-column groups worker, worker + nw, ... and adds the int64 sums into part
+// (one int64 per row and column, read and cleared by the consumer kernels).  The group sums (int32) and the scaled products (int64)
+// are the same integers as in the 16-row path, so the totals do not depend on the split, the tiling or the order of the additions.
+// The fragments of m-step ms + 1 are fetched while the mma of ms run; the group scales are loaded before the mma loop.
+template <int K, int LNF, int LB>
+__global__ void __launch_bounds__(pfa_maxt<LB>(), pfa_minb<LB>()) pfa_xw_kernel(GemvLaunch P) {
+  constexpr int NF = 1 << LNF, NU = K / 2, T = 12 - K, TS = 3 * K - 12;
+  constexpr int SS = NF > 4 ? 4 : 8, NST = 8 / SS;
+  constexpr unsigned PM = (1u << (2 * K)) - 1u, TM = (1u << T) - 1u;
+  __shared__ __align__(16) uint16_t s_lut[4096];
+  __shared__ __align__(16) uint4 s_x[2][SS][NF][32];
+  __shared__ float s_rm[16 * NF];
+  int seg = 0; while (seg + 1 < P.n_seg && (int)blockIdx.y >= P.seg[seg + 1].cta_begin) ++seg;
+  const GemvSeg& Sg = P.seg[seg]; const TensorDev& t = Sg.t;
+  const int WPC = blockDim.x >> 5, warp = threadIdx.x >> 5, lane = threadIdx.x & 31, gi = lane >> 2, tig = lane & 3;
+  const int N = t.N, Kc = t.Kc, G = Kc / 512, nw = t.n_workers, M = P.M;
+  const int worker = (int)blockIdx.z;
+  if (worker >= nw) { pdl_wait(); return; }
+  const int tile = ((int)blockIdx.y - Sg.cta_begin) * WPC + warp;
+  const bool active = tile < N / 16;
+  const int tok0 = (int)blockIdx.x * (16 * NF);
+  const int nfr0 = (M - tok0 + 15) >> 4, nfr = nfr0 < NF ? nfr0 : NF;
+  const int nblk = 2 * ((G - worker + nw - 1) / nw);
+  const uint4* sp = t.lno + (size_t)(active ? tile : 0) * G * 2 * NU * 32 + lane;
+  auto boff = [&](int g, int blk) { return (size_t)(g * 2 + blk) * (NU * 32); };
+  const int st_tok = (lane >> 3) + 8 * (lane & 1);
+  const int8_t* st_src = reinterpret_cast<const int8_t*>(P.qx) + (size_t)(tok0 + st_tok) * Kc + 64 * ((lane >> 1) & 3);
+  auto stage = [&](int s, int g, int blk, int h) {
+    const int8_t* xb = st_src + (size_t)g * 512 + blk * 256 + 8 * SS * h;
+    char* db = reinterpret_cast<char*>(&s_x[s][0][0][0]) + 8 * lane;
+    for (int pr = warp; pr < 2 * NF; pr += WPC) {
+      const int trow = 16 * (pr >> 1) + 4 * (pr & 1);
+      if (tok0 + st_tok + trow < M) {
+        const int8_t* sx = xb + (size_t)trow * Kc; char* dx = db + 256 * pr;
+        #pragma unroll
+        for (int m = 0; m < SS; ++m) pfa_cp8(dx + 512 * NF * m, sx + 8 * m);
+      }
+    }
+    pfa_cp_commit();
+  };
+  int d[NF][2][4]; long long acc64[NF][2][4];
+  #pragma unroll
+  for (int j = 0; j < NF; ++j) {
+    #pragma unroll
+    for (int r = 0; r < 2; ++r) {
+      #pragma unroll
+      for (int c = 0; c < 4; ++c) { d[j][r][c] = 0; acc64[j][r][c] = 0; }
+    }
+  }
+  uint4 nx[NU];
+  #pragma unroll
+  for (int u = 0; u < NU; ++u) nx[u] = make_uint4(0u, 0u, 0u, 0u);
+  if (active && nblk) {
+    #pragma unroll
+    for (int u = 0; u < NU; ++u) nx[u] = __ldg(sp + boff(worker, 0) + 32 * u);
+  }
+  for (int i = threadIdx.x; i < 512; i += blockDim.x) reinterpret_cast<uint4*>(s_lut)[i] = __ldg(reinterpret_cast<const uint4*>(t.lut8) + i);
+  pdl_wait(); pdl_trigger();
+  for (int i = threadIdx.x; i < 16 * NF; i += blockDim.x) {               // the row scales of the 16-row path (max over the groups)
+    const int tk = tok0 + i; float m = 0.f;
+    if (tk < M) for (int k = 0; k < G; ++k) m = fmaxf(m, __ldg(P.alpha + (size_t)tk * G + k));
+    s_rm[i] = m > 0.f ? __fdiv_rn(16777216.f, m) : 0.f;
+    if (blockIdx.y == 0 && blockIdx.z == 0 && tk < M) P.us_out[tk] = ldexpf(m, -24);
+  }
+  __syncthreads();
+  if (nblk) stage(0, worker, 0, 0);
+  const int src = (lane & ~3) | ((tig + 3) & 3);
+  auto pair_b = [&](unsigned p, unsigned q) -> unsigned {
+    const unsigned W = q | (p << T); return unsigned(s_lut[W & 0xFFFu]) | (unsigned(s_lut[(W >> K) & 0xFFFu]) << 16); };
+  for (int bi = 0; bi < nblk; ++bi) {
+    const int blk = bi & 1; const bool more = bi + 1 < nblk;
+    unsigned w[4 * NU];
+    #pragma unroll
+    for (int u = 0; u < NU; ++u) { w[4 * u] = nx[u].x; w[4 * u + 1] = nx[u].y; w[4 * u + 2] = nx[u].z; w[4 * u + 3] = nx[u].w; }
+    const int g = worker + (bi >> 1) * nw, g_next = worker + ((bi + 1) >> 1) * nw;
+    if (more && active) {
+      #pragma unroll
+      for (int u = 0; u < NU; ++u) nx[u] = __ldg(sp + boff(g_next, blk ^ 1) + 32 * u);
+    }
+    unsigned q0 = 0u, q1 = 0u;
+    if (active) {
+      const unsigned e = (w[K - 1] >> (32 - T)) | ((w[2 * K - 1] >> (32 - T)) << T);
+      const unsigned nbv = __shfl_sync(0xffffffffu, e, src);
+      q0 = tig ? (nbv & TM) : 0u; q1 = tig ? (nbv >> T) : 0u;
+    }
+    float aA[NF], aB[NF];
+    #pragma unroll
+    for (int j = 0; j < NF; ++j) { const int tA = tok0 + 16 * j + gi, tB = tA + 8;
+      aA[j] = (active && blk == 1 && tA < M) ? __ldg(P.alpha + (size_t)tA * G + g) : 0.f;
+      aB[j] = (active && blk == 1 && tB < M) ? __ldg(P.alpha + (size_t)tB * G + g) : 0.f; }
+    #pragma unroll
+    for (int h = 0; h < NST; ++h) {
+      const int sidx = (bi * NST + h) & 1;
+      pfa_cp_wait(); __syncthreads();
+      if (h + 1 < NST) stage(sidx ^ 1, g, blk, h + 1); else if (more) stage(sidx ^ 1, g_next, blk ^ 1, 0);
+      if (active) {
+        auto dec = [&](int m, uint2& b0, uint2& b1) {
+          const unsigned f0 = pfa_field<K>(w, m), f1 = pfa_field<K>(w + K, m);
+          const unsigned p10 = f0 & PM, p20 = f0 >> (2 * K), p11 = f1 & PM, p21 = f1 >> (2 * K);
+          b0 = make_uint2(pair_b(p10, q0), pair_b(p20, p10 >> TS)); b1 = make_uint2(pair_b(p11, q1), pair_b(p21, p11 >> TS));
+          q0 = p20 >> TS; q1 = p21 >> TS; };
+        uint2 b0, b1; uint4 xa[NF];
+        dec(h * SS, b0, b1);
+        #pragma unroll
+        for (int j = 0; j < NF; ++j) xa[j] = s_x[sidx][0][j][lane];
+        #pragma unroll
+        for (int ms = 0; ms < SS; ++ms) {
+          const uint2 c0 = b0, c1 = b1; uint4 xc[NF];
+          #pragma unroll
+          for (int j = 0; j < NF; ++j) xc[j] = xa[j];
+          if (ms + 1 < SS) {
+            dec(h * SS + ms + 1, b0, b1);
+            #pragma unroll
+            for (int j = 0; j < NF; ++j) xa[j] = s_x[sidx][ms + 1][j][lane];
+          }
+          #pragma unroll
+          for (int j = 0; j < NF; ++j) { unsigned a[4] = {xc[j].x, xc[j].z, xc[j].y, xc[j].w}; pfa_mma(d[j][0], a, c0); pfa_mma(d[j][1], a, c1); }
+        }
+      }
+    }
+    if (active && blk == 1) {                                               // a 512-column group done: int64 += scale x group sum
+      #pragma unroll
+      for (int j = 0; j < NF; ++j) {
+        if (j < nfr) {
+          const int tA = tok0 + 16 * j + gi, tB = tA + 8;
+          const int AA = tA < M ? __float2int_rn(__fmul_rn(aA[j], s_rm[tA - tok0])) : 0;
+          const int AB = tB < M ? __float2int_rn(__fmul_rn(aB[j], s_rm[tB - tok0])) : 0;
+          #pragma unroll
+          for (int r = 0; r < 2; ++r) {
+            #pragma unroll
+            for (int c = 0; c < 4; ++c) { pfa_mad_wide(acc64[j][r][c], c < 2 ? AA : AB, d[j][r][c]); d[j][r][c] = 0; }
+          }
+        }
+      }
+    }
+  }
+  if (!active || nblk == 0) return;
+  unsigned long long* const p64 = reinterpret_cast<unsigned long long*>(Sg.part);
+  #pragma unroll
+  for (int j = 0; j < NF; ++j) {
+    if (j < nfr) {
+      const int tA = tok0 + 16 * j + gi, tB = tA + 8;
+      #pragma unroll
+      for (int r = 0; r < 2; ++r) {
+        const int n = tile * 16 + 8 * r + 2 * tig;
+        if (tA < M) { atomicAdd(p64 + (size_t)tA * N + n, (unsigned long long)acc64[j][r][0]); atomicAdd(p64 + (size_t)tA * N + n + 1, (unsigned long long)acc64[j][r][1]); }
+        if (tB < M) { atomicAdd(p64 + (size_t)tB * N + n, (unsigned long long)acc64[j][r][2]); atomicAdd(p64 + (size_t)tB * N + n + 1, (unsigned long long)acc64[j][r][3]); }
+      }
+    }
+  }
+}
+
+
 static int pfa_k(const GemvLaunch& P, bool xsm = false) {           
   if (P.draft || P.e_fuse || (P.xsum && !xsm) || P.M < 1 || P.n_seg < 1) return 0;
   const int K = P.seg[0].t.k_default; if (K != 4 && K != 6 && K != 8) return 0;
@@ -351,6 +505,24 @@ static int pfa_auto_wpc(const GemvLaunch& P, int tile_tokens, int cap) {
   long long tasks = 0; for (int s = 0; s < P.n_seg; ++s) tasks += (long long)(P.seg[s].t.N / 16) * ((P.M + tile_tokens - 1) / tile_tokens);   
   const long long w = (tasks + 2 * sms - 1) / (2 * sms);              
   return (int)(w < 1 ? 1 : w > cap ? cap : w);
+}
+// Exact-sum passes of 17..64 rows (compute capability 12.x): K split by the segment worker counts, int64 sums added into part.
+template <int K, int LNF> static void launch_pfa_xw_k(const GemvLaunch& P0, int wpc, cudaStream_t st) {
+  GemvLaunch P = P0; int ctas = 0;
+  for (int s = 0; s < P.n_seg; ++s) { P.seg[s].cta_begin = ctas; ctas += (P.seg[s].t.N / 16 + wpc - 1) / wpc; }
+  const dim3 grid((P.M + (16 << LNF) - 1) / (16 << LNF), ctas, P.max_workers), block(wpc * 32);
+  if (wpc <= 4) launch_k(pfa_xw_kernel<K, LNF, 3>, grid, block, 0, st, P); else launch_k(pfa_xw_kernel<K, LNF, 2>, grid, block, 0, st, P);
+}
+void launch_pfa_xw(const GemvLaunch& P, int wpc, cudaStream_t st) {
+  const int K = pfa_k(P, true);
+  if (!K || !P.us_out || P.xsm_S || P.xsm_part || P.M < 17 || P.M > 64) throw std::runtime_error("launch_pfa_xw: launch not eligible");
+  wpc = wpc < 1 ? 1 : (wpc > 8 ? 8 : wpc);
+  const bool w32 = P.M <= 32;
+  switch (K) {
+    case 4: if (w32) launch_pfa_xw_k<4, 1>(P, wpc, st); else launch_pfa_xw_k<4, 2>(P, wpc, st); break;
+    case 6: if (w32) launch_pfa_xw_k<6, 1>(P, wpc, st); else launch_pfa_xw_k<6, 2>(P, wpc, st); break;
+    default: if (w32) launch_pfa_xw_k<8, 1>(P, wpc, st); else launch_pfa_xw_k<8, 2>(P, wpc, st); break;
+  }
 }
 void launch_pfa(const GemvLaunch& P, int mode, int wpc, cudaStream_t st) {
   if (P.xsum) {                                                      

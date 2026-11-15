@@ -169,12 +169,24 @@ def usage_json(u: Usage) -> dict:
 
 
 def timings_json(u: Usage) -> dict:
-    """The engine's own timing of the request, in the layout of llama.cpp's ``timings`` object (read by benchmark tools)."""
+    """The engine's own timing of the request, in the layout of the ``timings`` object of the llama.cpp server (read by benchmark
+    tools).  As there, ``prompt_ms`` runs until the first generated token and ``predicted_ms`` from it to the last one; when a request
+    runs in two or three stages (thinking budget, loop guard), the later readings of the prompt count as generation time.
+    ``draft_n`` / ``draft_n_accepted`` (only when the look-ahead proposed tokens): the tokens it proposed and those the model's own pass
+    confirmed.  These times are measured inside the engine, not by the client as for the published speed tables."""
     prompt_n = max(u.prompt_tokens - u.cached_tokens, 0)
+    prompt_ms = u.prompt_ms
+    predicted_ms = u.gen_ms + max(u.prefill_ms - u.prompt_ms, 0.0)
     per_s = lambda n, ms: n * 1000.0 / ms if ms > 0 else 0.0   # noqa: E731
-    return dict(cache_n=u.cached_tokens, prompt_n=prompt_n, prompt_ms=u.prefill_ms, prompt_per_second=per_s(prompt_n, u.prefill_ms),
-                predicted_n=u.completion_tokens, predicted_ms=u.gen_ms, predicted_per_second=per_s(u.completion_tokens, u.gen_ms),
-                passes=u.passes, draft_n_accepted=max(u.completion_tokens - u.passes, 0))
+    per_tok = lambda n, ms: ms / n if n > 0 else 0.0           # noqa: E731
+    d = dict(cache_n=u.cached_tokens,
+             prompt_n=prompt_n, prompt_ms=prompt_ms, prompt_per_token_ms=per_tok(prompt_n, prompt_ms),
+             prompt_per_second=per_s(prompt_n, prompt_ms),
+             predicted_n=u.completion_tokens, predicted_ms=predicted_ms, predicted_per_token_ms=per_tok(u.completion_tokens, predicted_ms),
+             predicted_per_second=per_s(u.completion_tokens, predicted_ms))
+    if u.draft_n > 0:
+        d.update(draft_n=u.draft_n, draft_n_accepted=u.draft_n_accepted)
+    return d
 
 
 def make_handler(state: ApiState):
@@ -346,9 +358,13 @@ def make_handler(state: ApiState):
                                 chunk(delta={"reasoning_content" if kind == "reasoning" else "content": item})
 
                         u = runner.run(params, emit, prepared)
-                        chunk(delta={}, finish=u.finish)
+                        # the timings go with the last chunk, as with the llama.cpp server: the usage chunk when it is asked for,
+                        # else the chunk with the finish reason
                         if (body.get("stream_options") or {}).get("include_usage"):
+                            chunk(delta={}, finish=u.finish)
                             chunk(usage=usage_json(u), timings=timings_json(u))
+                        else:
+                            chunk(delta={}, finish=u.finish, timings=timings_json(u))
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
                         self.close_connection = True

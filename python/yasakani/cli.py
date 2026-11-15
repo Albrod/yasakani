@@ -22,6 +22,8 @@ from . import __version__
 from . import gpu as gpus
 from ._native import YasakaniError, find_library
 from .runtime import ModelPack, RuntimeProfile
+from .selfcheck import FORMAT as SELFCHECK_FORMAT
+from .selfcheck import cases as _selfcheck_cases, ids_sha as _ids_sha, run as _selfcheck_run    # noqa: F401  (names of 0.1.3: bench scripts use them)
 
 DEFAULT_PORT = 8765
 
@@ -107,7 +109,8 @@ def _add_vision_args(sp: argparse.ArgumentParser) -> None:
     g.add_argument("--mmproj", default=os.environ.get("YASAKANI_MMPROJ"),
                    help="projector of Qwen3.8-27B (mmproj-Qwen3.8-27B-BF16.gguf); with --llama-dir and --vision-model it turns on image input")
     g.add_argument("--llama-dir", default=os.environ.get("YASAKANI_LLAMA_DIR"),
-                   help="folder with the unpacked llama-b10488-bin-win-cpu-x64.zip (llama.cpp b10488, CPU build for Windows)")
+                   help="folder with the unpacked llama-b10488-bin-win-cpu-x64.zip (llama.cpp b10488, CPU build for Windows); "
+                        "on Linux, with the shared libraries of llama.cpp b10488 built from source (see BUILDING.md)")
     g.add_argument("--vision-model", default=os.environ.get("YASAKANI_VISION_MODEL"),
                    help="a Qwen3.8-27B GGUF (tested: Qwen3.8-27B-Q4_K_M.gguf of bartowski/Qwen3.8-27B-GGUF); only its settings and "
                         "vocabulary are read, never its weights")
@@ -465,86 +468,109 @@ def cmd_bench(args) -> int:
 
 
 # ---- selfcheck --------------------------------------------------------------------------------------------------------------------
-SELFCHECK_FORMAT = 1
+SELFCHECK_OTHER_GPU = ("the output differs from the reference for %d case(s).  The reference was made on an RTX 5090, and this GPU is not one: "
+                       "on other GPUs tiny differences in the computation can make the output take another word part-way through.  So this "
+                       "GPU now reads the reference output (nothing is generated), and its predictions are compared with the RTX 5090's at "
+                       "the same positions:")
+SELFCHECK_OTHER_SAME = ("this GPU is not an RTX 5090, on which the reference was made.  So its predictions are also compared with the RTX "
+                        "5090's: it reads the reference output (nothing is generated) and they are compared at the same positions:")
+SELFCHECK_PASSED = "self-check passed: this installation reproduces the reference output."
+SELFCHECK_CLOSE_PASS = ("self-check passed within the tolerances: this GPU makes the same predictions as the RTX 5090, up to small "
+                        "differences in the computation.  Exit code 3: only the generated output differs.")
+SELFCHECK_CLOSE_FAIL = ("This is more than small differences in the computation explain.  Check the model files with yasakani verify.  When "
+                        "they are fine, the engine probably does not compute correctly on this GPU: please report it on GitHub Issues with "
+                        "the output of yasakani info and of this self-check.")
+SELFCHECK_CONSISTENCY = ("self-consistency (every GPU, no reference): the answer of a prompt that copies its input is generated and then read "
+                         "again by this GPU; generated and predicted ids must be the same, and passes of 64 positions must give the same "
+                         "predictions as passes of 16, bit for bit:")
+SELFCHECK_CONSISTENCY_FAIL = ("The engine computes these passes with the same sums in the same order, so they must agree exactly on any card.  "
+                              "Check the model files with yasakani verify.  When they are fine, the engine probably does not compute "
+                              "correctly on this GPU: please report it on GitHub Issues with the output of yasakani info and of this "
+                              "self-check.")
+SELFCHECK_WRITE_OTHER = ("note: this GPU is not known to be an RTX 5090.  The file will hold this GPU's output and predictions, and the "
+                         "self-check on other GPUs will compare theirs with them as if they were the RTX 5090's.")
 
 
-def _selfcheck_cases():
-    return [
-        dict(name="short-answer", kind="chat", messages=[{"role": "user", "content": "Say hello in one short sentence."}],
-             template_kwargs={"enable_thinking": False}, max_new=48),
-        dict(name="thinking", kind="chat", messages=[{"role": "user", "content": "What is 17 times 23? Think it through step by step."}],
-             template_kwargs={}, max_new=160),
-        dict(name="plain-text", kind="raw", text="The capital of France is", max_new=32),
-    ]
-
-
-def _ids_sha(ids) -> str:
-    import numpy as np
-    return hashlib.sha256(np.asarray(ids, "<i4").tobytes()).hexdigest()
-
-
-def _selfcheck_run(eng, fmt):
-    """Greedy runs of the fixed cases -> one record per case (prompt hash, output hash, first ids)."""
-    from .engine import Sampling
-    eng.set_sampling(Sampling(temperature=0.0))
-    out = []
-    for c in _selfcheck_cases():
-        prompt = fmt.encode(c["text"]) if c["kind"] == "raw" else fmt.prompt(c["messages"], **c["template_kwargs"])[0]
-        eng.reset()
-        r = eng.generate(prompt, c["max_new"])
-        out.append(dict(name=c["name"], prompt_tokens=int(len(prompt)), prompt_sha256=_ids_sha(prompt), tokens=len(r.ids),
-                        sha256=_ids_sha(r.ids), head=[int(x) for x in r.ids[:12]]))
-    eng.reset()
-    return out
+def _selfcheck_consistency(eng, fmt, rc: int) -> int:
+    """0.1.4: the self-consistency check of every GPU (yasakani/selfcheck.py), after the comparison with the reference passed with
+    exit code ``rc`` (0 or 3)."""
+    from . import selfcheck as sc
+    if not eng.supports_forced:
+        print("note: the engine library cannot read a given text (no yskn_verify_nll export), so the self-consistency check is skipped.")
+        return rc
+    print(SELFCHECK_CONSISTENCY)
+    res = sc.consistency(eng, fmt)
+    for line in sc.consistency_lines(res):
+        print(line)
+    fails = res.failures()
+    if fails:
+        print("self-check FAILED: %s." % "; ".join(fails))
+        print(SELFCHECK_CONSISTENCY_FAIL)
+        return 1
+    print("self-consistency passed.")
+    return rc
 
 
 def cmd_selfcheck(args) -> int:
+    from . import selfcheck as sc
     pack, eng, fmt, runner = _open_stack(args, warm=True)
     try:
-        got = _selfcheck_run(eng, fmt)
+        got = sc.run(eng, fmt)
+        if args.write:
+            det = getattr(args, "gpu_detected", None)
+            if det is None or not det.tested:
+                print(SELFCHECK_WRITE_OTHER)
+            rec = sc.reference_record(eng, got, pack.model_id, __version__, gpu=det.gpu.name if det is not None and det.gpu else None)
+            Path(args.write).write_text(sc.dumps(rec) + "\n", encoding="utf-8")
+            print("wrote %d reference record(s) to %s" % (len(got), args.write))
+            return 0
+        ref_path = Path(args.reference) if args.reference else pack.root / "selfcheck.json"
+        if not ref_path.is_file():
+            print("no reference file (%s).  Download selfcheck.json next to the model files, or pass --reference FILE." % ref_path)
+            return 2
+        ref = json.loads(ref_path.read_text(encoding="utf-8"))
+        if ref.get("format") != SELFCHECK_FORMAT:
+            print("the reference file has an unknown format (%r)" % ref.get("format"))
+            return 2
+        det = getattr(args, "gpu_detected", None)
+        other = det is not None and det.untested           # a GPU that is known and is not the RTX 5090
+        want = {c["name"]: c for c in ref.get("cases", [])}
+        bad = differs = 0
+        for g in got:
+            w = want.get(g["name"])
+            if w is None:
+                print("  %-14s not in the reference file" % g["name"])
+                bad += 1
+            elif w["prompt_sha256"] != g["prompt_sha256"]:
+                print("  %-14s FAIL  the prompt ids differ (tokenizer or chat template files are not the reference ones)" % g["name"])
+                bad += 1
+            elif w["sha256"] != g["sha256"] or w["tokens"] != g["tokens"]:
+                n = next((i for i, (a, b) in enumerate(zip(w["head"], g["head"])) if a != b), None)
+                print("  %-14s %s  the output differs%s" % (g["name"], "DIFF" if other else "FAIL",
+                                                            "" if n is None else " (first different token: #%d)" % (n + 1)))
+                differs += 1
+            else:
+                print("  %-14s PASS  (%d tokens)" % (g["name"], g["tokens"]))
+        if bad or (differs and not other):
+            print("self-check FAILED for %d case(s)." % (bad + differs))
+            return 1
+        if not other or (not differs and (len(sc.full_data(ref)) < len(got) or not eng.supports_forced)):
+            print(SELFCHECK_PASSED)                         # the RTX 5090 (or an unknown GPU): the same output; as before 0.1.4
+            return _selfcheck_consistency(eng, fmt, 0)
+        # 0.1.4: on a GPU other than the RTX 5090 the predictions on the reference output decide (teacher forcing, yasakani/selfcheck.py)
+        print(SELFCHECK_OTHER_GPU % differs if differs else SELFCHECK_OTHER_SAME)
+        res = sc.close_check(eng, got, ref)
+        for line in sc.close_lines(res):
+            print(line)
+        fails = res.failures()
+        if not fails:
+            print(SELFCHECK_CLOSE_PASS if differs else SELFCHECK_PASSED)
+            return _selfcheck_consistency(eng, fmt, 3 if differs else 0)
+        print("self-check FAILED: %s." % "; ".join(fails))
+        print(SELFCHECK_CLOSE_FAIL)
+        return 1
     finally:
         eng.close()
-    if args.write:
-        Path(args.write).write_text(json.dumps(dict(format=SELFCHECK_FORMAT, model_id=pack.model_id, yasakani=__version__, cases=got), indent=1) + "\n",
-                                    encoding="utf-8")
-        print("wrote %d reference record(s) to %s" % (len(got), args.write))
-        return 0
-    ref_path = Path(args.reference) if args.reference else pack.root / "selfcheck.json"
-    if not ref_path.is_file():
-        print("no reference file (%s).  Download selfcheck.json next to the model files, or pass --reference FILE." % ref_path)
-        return 2
-    ref = json.loads(ref_path.read_text(encoding="utf-8"))
-    if ref.get("format") != SELFCHECK_FORMAT:
-        print("the reference file has an unknown format (%r)" % ref.get("format"))
-        return 2
-    want = {c["name"]: c for c in ref.get("cases", [])}
-    bad = differs = 0
-    for g in got:
-        w = want.get(g["name"])
-        if w is None:
-            print("  %-14s not in the reference file" % g["name"])
-            bad += 1
-        elif w["prompt_sha256"] != g["prompt_sha256"]:
-            print("  %-14s FAIL  the prompt ids differ (tokenizer or chat template files are not the reference ones)" % g["name"])
-            bad += 1
-        elif w["sha256"] != g["sha256"] or w["tokens"] != g["tokens"]:
-            n = next((i for i, (a, b) in enumerate(zip(w["head"], g["head"])) if a != b), None)
-            print("  %-14s FAIL  the output differs%s" % (g["name"], "" if n is None else " (first different token: #%d)" % (n + 1)))
-            differs += 1
-        else:
-            print("  %-14s PASS  (%d tokens)" % (g["name"], g["tokens"]))
-    if not bad and not differs:
-        print("self-check passed: this installation reproduces the reference output.")
-        return 0
-    print("self-check FAILED for %d case(s)." % (bad + differs))
-    det = getattr(args, "gpu_detected", None)
-    if not bad and det is not None and det.untested:
-        # 0.1.3: the reference was made on an RTX 5090.  On another card the work can be split differently, and the greedy output
-        # can then part from the reference after some tokens.  Exit code 3 tells this case apart (the quickstart goes on with it).
-        print("note: the reference output was made on an RTX 5090, and this GPU is not one.  On other GPUs the output can differ from "
-              "it, and we have not checked this GPU.  Exit code 3: only the output differs.")
-        return 3
-    return 1
 
 
 # ---- entry point ------------------------------------------------------------------------------------------------------------------
@@ -589,7 +615,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_chat)
 
     sp = sub.add_parser("selfcheck", help="run a few fixed greedy prompts and compare the output with the reference file "
-                                          "(exit code 0 same, 1 different, 2 no reference, 3 only the output differs on a GPU other than the RTX 5090)")
+                                          "(exit code 0 same, 1 different, 2 no reference, 3 on a GPU other than the RTX 5090: the output "
+                                          "differs, but the GPU's predictions on the reference output are within the tolerances; on "
+                                          "such a GPU these predictions are checked also when the output is the same).  Every GPU then "
+                                          "also checks that its own predictions agree with what it generated (exit code 1 if not)")
     _add_engine_args(sp)
     sp.add_argument("--reference", help="reference file (default: selfcheck.json in the model folder)")
     sp.add_argument("--write", metavar="FILE", help="write a new reference file instead of checking (for people who publish a model folder)")

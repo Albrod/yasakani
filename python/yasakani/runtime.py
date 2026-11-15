@@ -40,30 +40,42 @@ DEFAULT_ENV: Dict[str, str] = {
     "YSKN_ATX_PK3_PLUT": "1",
     "YSKN_ATX_PKV": "3",
     "YSKN_ATX_VSP": "7",
+    # prompt snapshots (0.1.4): up to 8 saved states in pinned host memory (about 187 MiB each); for prompts of 8,192 ids or more
+    # also on the 1,024-id grid in the last 4,096 ids before the last chat start and every 65,536 ids
+    "YSKN_SNAP_SLOTS": "8",
+    "YSKN_SNAP_STEP": "1024",
+    "YSKN_SNAP_TAIL": "4096",
+    "YSKN_SNAP_SPARSE": "65536",
+    "YSKN_SNAP_MIN": "8192",
 }
 PATH_ENV = ("YSKN_BDR_SHEAD", "YSKN_TB_PROFILE")
 
-# ---- speculation settings: the 44 integers of the generation call, in the order the engine reads them ----------------------------
+# ---- speculation settings: the 46 integers of the generation call, in the order the engine reads them ----------------------------
 SPEC_FIELDS = ("gamma", "use_d0", "use_d1", "d0_nmin", "d0_nmax", "d0_priority_n", "extend", "d1_rejected", "auto_gamma", "use_graph",
                "use_d3", "d3_steps", "d1_bigram", "d1_static", "d3_extend", "d3_lazy", "d3_gate", "gamma_long", "long_n", "d1_trigram",
                "eos1", "eos2", "long_d0", "sel", "cost_tok_us", "cost_row_us", "cost_nd_us", "nd_auto", "prmode", "cost_row2_us",
                "lfrow", "lfrow_q_pm", "mark_tok", "cost_tok_k", "cost_row2_k", "cost_nd_k", "bdraft", "bdr_long_n", "bdr_adapt",
-               "bdr_probe", "bdr_d0_len", "prefill_head", "snap", "snap_tok")
-assert len(SPEC_FIELDS) == 44
+               "bdr_probe", "bdr_d0_len", "prefill_head", "snap", "snap_tok", "copy_rows", "copy_index")
+assert len(SPEC_FIELDS) == 46
 
 DEFAULT_SPEC: Dict[str, int] = dict(
     gamma=7, use_d0=1, use_d1=1, d0_nmin=2, d0_nmax=8, d0_priority_n=3, extend=1, d1_rejected=1, auto_gamma=0, use_graph=1,
     use_d3=0, d3_steps=0, d1_bigram=1, d1_static=0, d3_extend=0, d3_lazy=0, d3_gate=0, gamma_long=15, long_n=6, d1_trigram=1,
     eos1=EOS_IDS[0], eos2=EOS_IDS[1], long_d0=8, sel=0, cost_tok_us=0, cost_row_us=0, cost_nd_us=0, nd_auto=0, prmode=0,
     cost_row2_us=0, lfrow=0, lfrow_q_pm=300, mark_tok=-1, cost_tok_k=0, cost_row2_k=0, cost_nd_k=0, bdraft=1, bdr_long_n=4,
-    bdr_adapt=1, bdr_probe=4, bdr_d0_len=15, prefill_head=1, snap=1, snap_tok=IM_START)
+    bdr_adapt=1, bdr_probe=4, bdr_d0_len=15, prefill_head=1, snap=1, snap_tok=IM_START,
+    copy_rows=64, copy_index=1)            # 0.1.4: copy passes up to 64 rows, copy index with cursor (copy_rows=16, copy_index=0 = 0.1.3)
 assert tuple(DEFAULT_SPEC) == SPEC_FIELDS
 
 # settings that decide how the engine keeps its state between calls; not tunable per request
 STATE_FIELDS = ("prefill_head", "snap", "snap_tok")
 
-# statistics returned by the generation call (index in the 48 doubles)
-STAT_INDEX = dict(passes=0, tokens=1, produced=30, eos=31, snap_mode=41, cached_tokens=42, bdr_rounds=37, bdr_d0=38)
+# statistics returned by the generation call (index in the 64 doubles; 43 and later need an engine library of 0.1.4 or newer)
+N_STATS = 64
+STAT_INDEX = dict(passes=0, tokens=1, drafted_0=3, accepted_0=4, drafted_1=5, accepted_1=6, drafted_2=23, accepted_2=24,
+                  produced=30, eos=31, snap_mode=41, cached_tokens=42, bdr_rounds=37, bdr_d0=38,
+                  copy_passes=43, wide_passes=44, copy_tokens=45, index_ms=46, max_rows=47, common_prefix=48, snap_slots=49,
+                  snap_saved=50, snap_ms=51, passes_48=52, passes_64=53, wide_tokens=54, cursor_hits=55, wide_full=56)
 
 
 def spec_array(spec: Dict[str, int]):

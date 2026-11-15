@@ -62,8 +62,11 @@ class Usage:
     cached_tokens: int = 0
     finish: str = "stop"
     passes: int = 0
-    prefill_ms: float = 0.0
+    prefill_ms: float = 0.0                       # every reading of a prompt (the first one, and those of a second or third stage)
     gen_ms: float = 0.0
+    prompt_ms: float = 0.0                        # the first reading only: the request's prompt, up to its first generated token
+    draft_n: int = 0                              # tokens proposed by the look-ahead, all stages
+    draft_n_accepted: int = 0
     snap_mode: int = 0
     loop_guard: Optional[dict] = None
     tool_calls: int = 0
@@ -314,29 +317,53 @@ class ChatRunner:
                  if (guard_on or budget) else None)
         state: Dict[str, object] = {"hit": None}
 
-        def on_tokens(ids):
-            deliver(stream.feed(ids))
-            if watch is not None and state["hit"] is None:
+        def look(ids):
+            if watch is not None and state["hit"] is None and not stopf.hit:
                 hit = watch.check(ids)
                 if hit is not None:
                     state["hit"] = hit
                     eng.cancel()
 
-        r1 = eng.generate(prompt, max_new, stop_ids=stops, on_tokens=on_tokens)
-        # the engine's final ids may include ones committed after the last poll: feed the complete array once more, then flush
+        def on_tokens(ids):
+            # look before showing: a cut by the loop guard or the thinking budget keeps exactly ``hit.at`` ids, a count that depends
+            # only on the ids (not on how many the engine commits per pass), and nothing after it is shown
+            look(ids)
+            h = state["hit"]
+            deliver(stream.feed(ids[:h.at] if h is not None else ids))
+
+        # with a thinking budget, stage 1 asks for at most ``budget`` ids, so a cut at the budget never has ids after it that the
+        # engine would have to forget; when the thinking ends inside the budget, the answer goes on from where the engine stopped
+        n1 = min(max_new, budget) if budget else max_new
+        r1 = eng.generate(prompt, n1, stop_ids=stops, on_tokens=on_tokens)
         out_ids = np.asarray(r1.ids, np.int32)
-        deliver(stream.feed(out_ids, final=True))
+        look(out_ids)                                   # the engine's final ids may include ones committed after the last poll
+        finish = r1.finish
         usage.cached_tokens, usage.snap_mode = r1.cached_tokens, r1.snap_mode
         usage.passes, usage.prefill_ms, usage.gen_ms = r1.passes, r1.prefill_ms, r1.gen_ms
+        usage.prompt_ms, usage.draft_n, usage.draft_n_accepted = r1.prefill_ms, r1.draft_n, r1.draft_n_accepted
+        if (n1 < max_new and state["hit"] is None and not stopf.hit and finish == "length" and len(out_ids) == n1
+                and len(prompt) + n1 < eng.max_ctx - CONTEXT_MARGIN):
+            head = out_ids
+            r1b = eng.generate(np.concatenate([prompt, head]).astype(np.int32), max_new - n1, stop_ids=stops,
+                               on_tokens=lambda ids: on_tokens(np.concatenate([head, ids])))
+            out_ids = np.concatenate([head, np.asarray(r1b.ids, np.int32)])
+            look(out_ids)
+            finish = r1b.finish
+            usage.passes, usage.prefill_ms, usage.gen_ms = usage.passes + r1b.passes, usage.prefill_ms + r1b.prefill_ms, usage.gen_ms + r1b.gen_ms
+            usage.draft_n, usage.draft_n_accepted = usage.draft_n + r1b.draft_n, usage.draft_n_accepted + r1b.draft_n_accepted
+        hit = state["hit"]
+        produced = len(out_ids)
+        if hit is not None:
+            out_ids = out_ids[:hit.at]
+        deliver(stream.feed(out_ids, final=True))      # feed the complete array once more, then flush
         n_out = len(out_ids)
         reasoning_end = stream.think_end_at
         usage.reasoning_tokens = (reasoning_end if reasoning_end is not None else (n_out if stream.in_reasoning else 0))
-        finish = r1.finish
-        hit = state["hit"]
         if hit is not None:
             info = dict(where=hit.where, kind=hit.kind, period=hit.period, run=hit.run, at=hit.at, tokens_before=n_out)
             usage.loop_guard = info
-            if hit.where == "reasoning" and r1.finish != "stop" and not stopf.hit:
+            ended = finish == "stop" and n_out == produced          # the model's own end of text is among the ids kept
+            if hit.where == "reasoning" and not ended and not stopf.hit:
                 finish = self._finish_after_loop(p, prompt, out_ids, usage, stops, stopf, emit, deliver, info, max_new)
             else:
                 finish = "length" if not stopf.hit else "stop"
@@ -369,21 +396,31 @@ class ChatRunner:
         watch = loopguard.LoopWatch(self.fmt.think_end, self.fmt.digit_ids, False, loops=p.loop_guard and not p.ignore_eos)
         hit2: Dict[str, object] = {"hit": None}
 
-        def on_tokens(ids):
-            deliver(stream.feed(ids))
-            if hit2["hit"] is None:
+        def look(ids):
+            if hit2["hit"] is None and not stopf.hit:
                 h = watch.check(ids)
                 if h is not None:
                     hit2["hit"] = h
                     eng.cancel()
 
+        def on_tokens(ids):
+            look(ids)
+            h = hit2["hit"]
+            deliver(stream.feed(ids[:h.at] if h is not None else ids))
+
         r2 = eng.generate(seq, n2 + 1, stop_ids=stops, on_tokens=on_tokens)
         ids2 = np.asarray(r2.ids, np.int32)
+        look(ids2)
+        if hit2["hit"] is not None:
+            ids2 = ids2[:hit2["hit"].at]
         deliver(stream.feed(ids2, final=True))
         info.update(answer_tokens=len(ids2), answer_cached=r2.cached_tokens, extra_tokens=len(self.bridge) + len(ids2))
         usage.passes += r2.passes
         usage.prefill_ms += r2.prefill_ms
         usage.gen_ms += r2.gen_ms
+        usage.draft_n += r2.draft_n
+        usage.draft_n_accepted += r2.draft_n_accepted
         if hit2["hit"] is not None:
             info["answer_loop"] = dict(kind=hit2["hit"].kind, period=hit2["hit"].period, at=hit2["hit"].at)
+            return "length"
         return r2.finish

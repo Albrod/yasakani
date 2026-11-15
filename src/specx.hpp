@@ -19,6 +19,7 @@
 #include <vector>
 #include "engine.hpp"
 #include "engine35.hpp"
+#include "copy_index.hpp"
 namespace yskn {
 struct SpecxConfig {
   std::atomic<int>* cancel = nullptr;
@@ -66,10 +67,12 @@ struct SpecxConfig {
   int prefill_head = 1;     
                             
   int snap = 0;           
+  int copy_rows = 16;       // most rows of a copy-from-input pass (16 = as before; up to 64 where wide passes are on)
+  int copy_index = 0;       // 0 = the n-gram tables, 1 = the 4-token chain index with the copy cursor (with the block drafter)
   int snap_tok = -1;      
 };
 struct SpecxStats {
-  int64_t passes = 0, tokens = 0, rows_hist[17] = {};
+  int64_t passes = 0, tokens = 0, rows_hist[65] = {};
   int64_t drafted[3] = {}, accepted[3] = {};   
   int64_t chain_none = 0;                      
   double ms_verify = 0, ms_draft = 0, ms_total = 0;   
@@ -79,6 +82,8 @@ struct SpecxStats {
   double ms_mark = -1; int64_t mark_at = -1;   
   int64_t bdr_rounds = 0, bdr_d0 = 0, bdr_probes = 0;   
   double ms_ctx = 0;                                     
+  int64_t sh_lcp = 0, sh_slots = 0, sh_saved = 0; double ms_snap = 0;   // prompt snapshots
+  int64_t copy_passes = 0, wide_passes = 0, copy_tok = 0, wide_tok = 0, max_rows = 0, cursor_hits = 0, wide_full = 0; double ms_index = 0;
   int sh_mode = 0; int64_t sh_start = 0;                 
 };
 
@@ -115,6 +120,16 @@ private:
   struct BdrPend { int F; int which; std::vector<int32_t> ch; };
   std::vector<BdrPend> dpend_;                    
   int dprobe_ = 0;
+  // copy-from-input drafting (copy_index = 1) and wide copy passes (copy_rows > 16)
+  CopyIndex ci_;
+  int lk_src_ = -1;                 // S_ index of the first token of the copy chain found by the last lookup
+  int cur_ = -1;                    // copy cursor: S_ index of the token expected next if copying goes on
+  int last_src_ = -1, last_src_at_ = -1;   // where the last copy stopped (S_ index) and the frontier then
+  int copy_lookup(int F, std::vector<int32_t>& chain, int gmax);
+  int wide_need_ = 2, wide_run_ = 0;   // full 16-row copy passes needed before going wide, and the current run of them
+  double wst_tok_ = 0, wst_ms_ = 0;    // tokens and time of the current run of wide passes
+  double t16_ = 10.12, t32_ = 15.5, t48_ = 21.0, t64_ = 23.5;   // ms per copy pass by rows (initial values measured on the RTX 5090:
+                                                               // the exact-sum wide passes of 0.1.4, fastest model, 4K context)
   double row_us(int rows) const { return rows > 8 ? (c_.cost_row2_us > 0 ? c_.cost_row2_us : c_.cost_row_us) + c_.cost_row2_k * dk_ : c_.cost_row_us; }   
   double dk_ = 0;            
   double tok_val() const { return (c_.prmode && tok_us_ > 0) ? tok_us_ : c_.cost_tok_us + c_.cost_tok_k * dk_; }   

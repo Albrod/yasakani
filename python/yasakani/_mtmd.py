@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 the YASAKANI authors
-"""ctypes bindings to the multimodal library of llama.cpp (``mtmd.dll``), checked against the b10488 release for Windows.
+"""ctypes bindings to the multimodal library of llama.cpp (``mtmd.dll``; ``libmtmd.so`` on Linux), checked against its release b10488.
 
 The projector (mmproj) turns an image into features of 5120 values per image token.  The library also needs the text model of
 llama.cpp, for its settings and vocabulary only: the model is opened with ``no_alloc``, so its weights are never read and any
-Qwen3.8-27B GGUF works.  The images are encoded on the CPU: on the GPU the features differ slightly, and in the image test of the
-contributor of this code (pull request #4) the score fell (87.8 on the CPU against 79.6 and 81.6 in two GPU runs).
+Qwen3.8-27B GGUF works.  The images are encoded on the CPU by default: on the GPU the features differ slightly, and in the image test of
+the contributor of this code (pull request #4) the score fell (87.8 on the CPU against 79.6 and 81.6 in two GPU runs).
 
 On Windows only the CPU build ``llama-b10488-bin-win-cpu-x64.zip`` is accepted: the structures below are declared for exactly this
 build, so its libraries are compared by SHA-256 before any of them is loaded.  On Linux there is no release to compare with: the
-folder holds the shared libraries of the same release built from source (``libmtmd.so`` and the others, see BUILDING.md), and
-YASAKANI_VISION_GPU=1 can move the projector to the GPU there (see ``use_gpu``).
+folder holds the shared libraries of the same release built from source (``libmtmd.so`` and the others, see BUILDING.md; pull request
+#8), and YASAKANI_VISION_GPU=1 can move the projector to the GPU there (see ``use_gpu``).  There ``libggml-base.so`` is loaded first and
+must report the version and the commit of b10488 (``check_build``), at start and again before the other libraries are loaded.
 """
 from __future__ import annotations
 
@@ -27,6 +28,11 @@ import numpy as np
 P, I, S, B = C.c_void_p, C.c_int32, C.c_size_t, C.c_bool
 
 LLAMA_ZIP = "llama-b10488-bin-win-cpu-x64.zip"
+LINUX_BUILD = "llama.cpp b10488 built from source as shared libraries (see BUILDING.md)"
+# what ggml_version() and ggml_commit() of release b10488 return (read from ggml-base.dll of LLAMA_ZIP, 2026-11-15).  The commit is the
+# short id of the llama.cpp commit the libraries were built from; its length depends on the clone (7 in a shallow clone).
+B10488_GGML_VERSION = "0.20.2"
+B10488_COMMIT = "9d77fa172"
 # sha256 of the libraries of LLAMA_ZIP (release b10488 of ggml-org/llama.cpp) that are bound here or that they import
 B10488_CPU_X64 = {
     "llama.dll": "1050f5ddc24e12ce136cb02fda3eee3bb2aa589275b2559b397dea340a3469f6",
@@ -64,7 +70,8 @@ def _bind(lib, name, args, result):
     try:
         fn = getattr(lib, name)
     except AttributeError:
-        raise RuntimeError("vision: the llama.cpp library has no function %s; image input needs %s" % (name, LLAMA_ZIP)) from None
+        raise RuntimeError("vision: the llama.cpp library has no function %s; image input needs %s"
+                           % (name, LLAMA_ZIP if _WINDOWS else LINUX_BUILD)) from None
     fn.argtypes, fn.restype = args, result
     return fn
 
@@ -86,12 +93,28 @@ def use_gpu() -> bool:
     return not _WINDOWS and os.environ.get("YASAKANI_VISION_GPU") == "1"
 
 
+def check_build(ggml_base) -> None:
+    """Outside Windows: the libraries built from source must be release b10488, for which the structures above are declared.
+    ``libggml-base.so`` reports the version of ggml and the short id of the llama.cpp commit it was built from (``unknown`` without git,
+    with ``-dirty`` after a change of the ggml sources).  This tells another release apart, not every change of the source."""
+    version = (_bind(ggml_base, "ggml_version", [], C.c_char_p)() or b"").decode("ascii", "replace")
+    commit = (_bind(ggml_base, "ggml_commit", [], C.c_char_p)() or b"").decode("ascii", "replace")
+    n = min(len(commit), len(B10488_COMMIT))
+    if (version != B10488_GGML_VERSION or n < 7 or any(c not in "0123456789abcdef" for c in commit)
+            or commit[:n] != B10488_COMMIT[:n]):
+        raise RuntimeError("vision: the llama.cpp libraries were built from ggml %s, commit %s; image input needs release b10488 "
+                           "(ggml %s, commit %s), built unchanged from a git clone of the tag b10488 (see BUILDING.md)"
+                           % (version or "?", commit or "?", B10488_GGML_VERSION, B10488_COMMIT))
+
+
 def check_llama_dir(llama_dir) -> None:
     """Windows: the folder must hold the libraries of LLAMA_ZIP (compared by SHA-256) and no GPU backend of ggml.
 
     Outside Windows there is no release to compare with: the folder holds the libraries of the same release (b10488) built from
-    source, so only their presence is checked here; the structure layout is still checked when the encoder opens.  GPU backends
-    of ggml are allowed there (YASAKANI_VISION_GPU uses them, see ``use_gpu``)."""
+    source.  Their presence is checked, and the version and the commit that ``libggml-base.so`` reports (``check_build``; this loads
+    that one library, which needs only the C and C++ runtime); when the encoder opens, the build is checked again before anything
+    else is loaded, then the structure layout.  GPU backends of ggml are allowed there (YASAKANI_VISION_GPU uses them, see
+    ``use_gpu``)."""
     d = Path(llama_dir)
     if not d.is_dir():
         raise FileNotFoundError("vision: the llama.cpp folder %s does not exist" % d)
@@ -99,6 +122,7 @@ def check_llama_dir(llama_dir) -> None:
         for stem in ("llama", "mtmd", "ggml", "ggml-base"):
             if not (d / lib_name(stem)).is_file():
                 raise FileNotFoundError("vision: missing %s (build llama.cpp b10488 with shared libraries)" % (d / lib_name(stem)))
+        check_build(C.CDLL(str(d / lib_name("ggml-base"))))
         return
     for name, want in B10488_CPU_X64.items():
         p = d / name
@@ -116,14 +140,23 @@ def _load_libraries(llama_dir: Path):
     """llama.dll and mtmd.dll of the folder (libllama.so and libmtmd.so on Linux), with the backends of ggml that the folder holds
     loaded.  Returns (llama, mtmd, add_dll_directory handle).
     The folder must be an absolute path: os.add_dll_directory refuses a relative one (WinError 87)."""
-    dll_dir = os.add_dll_directory(str(llama_dir)) if _WINDOWS else None
+    if not _WINDOWS:
+        # Linux: no checksum to compare with, so the build is checked first, on the library at the bottom of the others (it needs
+        # only the C and C++ runtime); the others then use this loaded copy.  PATH plays no part (the libraries find each other
+        # through their RUNPATH), and the folder may hold GPU backends.
+        check_build(C.CDLL(str(llama_dir / lib_name("ggml-base"))))
+        llama = C.CDLL(str(llama_dir / lib_name("llama")))
+        mtmd = C.CDLL(str(llama_dir / lib_name("mtmd")))
+        ggml = C.CDLL(str(llama_dir / lib_name("ggml")))
+        _bind(ggml, "ggml_backend_load_all_from_path", [C.c_char_p], None)(str(llama_dir).encode())
+        return llama, mtmd, None
+    dll_dir = os.add_dll_directory(str(llama_dir))
     llama = C.CDLL(str(llama_dir / lib_name("llama")))
     mtmd = C.CDLL(str(llama_dir / lib_name("mtmd")))
     ggml = C.CDLL(str(llama_dir / lib_name("ggml")))
-    # Windows: ggml_backend_load_all_from_path loads the backends with a plain LoadLibrary: without the folder on PATH their
-    # dependencies are not found and the backends are skipped without an error.  The backends and everything they import are
-    # loaded during this call (none of these libraries delay-loads another), so PATH is restored right after it.
-    # Linux: PATH plays no part (the libraries find each other through their RUNPATH), and the folder may hold GPU backends.
+    # ggml_backend_load_all_from_path loads the backends with a plain LoadLibrary: without the folder on PATH their dependencies are
+    # not found and the backends are skipped without an error.  The backends and everything they import are loaded during this call
+    # (none of these libraries delay-loads another), so PATH is restored right after it.
     old = os.environ.get("PATH")
     os.environ["PATH"] = str(llama_dir) + os.pathsep + (old or "")
     try:
@@ -194,9 +227,10 @@ class Tokenized:
 class MtmdEncoder:
     HIDDEN = 5120
 
-    def __init__(self, llama_dir, mmproj, model, *, threads: int = 8, max_image_tokens=None):
+    def __init__(self, llama_dir, mmproj, model, *, threads: int = 8, max_image_tokens=None, gpu=None):
         """``max_image_tokens``: larger images are downsized by llama.cpp to at most this many image tokens (None: the
-        projector's own limit, 4,096 for this one)."""
+        projector's own limit, 4,096 for this one).  ``gpu``: the projector on the GPU (None: ``use_gpu()``; never on Windows)."""
+        self.gpu = (use_gpu() if gpu is None else bool(gpu)) and not _WINDOWS
         llama_dir, mmproj, model = (Path(os.path.abspath(os.fspath(p))) for p in (llama_dir, mmproj, model))
         check_llama_dir(llama_dir)
         for p in (mmproj, model):
@@ -229,6 +263,10 @@ class MtmdEncoder:
         self._model_free = _bind(self.llama, "llama_model_free", [P], None)
         _set_logs(self.llama, self.lib, True)
         self._logs_set = True
+        # the default settings first: a library with another layout is refused before the text model (17 GB or more) is opened
+        cp = self.f["mtmd_context_params_default"]()
+        if (cp.n_threads, cp.image_min_tokens, cp.image_max_tokens, cp.batch_max_tokens) != (4, -1, -1, 1024):
+            raise RuntimeError("vision: the mtmd library is not the expected llama.cpp release (b10488): structure layout differs")
         _bind(self.llama, "llama_backend_init", [], None)()
         mp = _bind(self.llama, "llama_model_default_params", [], _ModelParams)()
         mp.no_alloc, mp.n_gpu_layers, mp.load_mode = True, 0, 0     # settings and vocabulary only; no_alloc cannot memory-map
@@ -238,10 +276,7 @@ class MtmdEncoder:
         hidden = _bind(self.llama, "llama_model_n_embd_inp", [P], I)(self.model)
         if hidden != self.HIDDEN:
             raise RuntimeError("vision: the text model has %d input dimensions, expected %d (Qwen3.8-27B)" % (hidden, self.HIDDEN))
-        cp = self.f["mtmd_context_params_default"]()
-        if (cp.n_threads, cp.image_min_tokens, cp.image_max_tokens, cp.batch_max_tokens) != (4, -1, -1, 1024):
-            raise RuntimeError("vision: the mtmd library is not the expected llama.cpp release (b10488): structure layout differs")
-        cp.use_gpu, cp.warmup, cp.print_timings, cp.n_threads = use_gpu(), False, False, threads
+        cp.use_gpu, cp.warmup, cp.print_timings, cp.n_threads = self.gpu, False, False, threads
         if cp.use_gpu:
             cp.flash_attn_type = 0                           # LLAMA_FLASH_ATTN_TYPE_DISABLED, see use_gpu()
         if max_image_tokens is not None:                     # the projector then shrinks a larger image (keeping its aspect ratio)

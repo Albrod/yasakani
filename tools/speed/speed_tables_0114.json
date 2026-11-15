@@ -1,0 +1,789 @@
+{
+ "columns": [
+  "Code",
+  "Story",
+  "Translation",
+  "Structured",
+  "Code edit",
+  "JSONL edit",
+  "Long JSONL"
+ ],
+ "engines_strict": {
+  "MegaCapybara 1.39 Tiny": [
+   465.086,
+   164.41666666666666,
+   268.405,
+   598.5816666666667,
+   441.15,
+   658.5,
+   666.3
+  ],
+  "mkyt v0.3.2": [
+   395.3775,
+   180.542,
+   373.59166666666664,
+   554.92,
+   422.70000000000005,
+   634.05,
+   638.8
+  ],
+  "ignis v0.9.6": [
+   330.3575,
+   167.13833333333332,
+   298.11,
+   439.18,
+   331.04999999999995,
+   510.1,
+   513.95
+  ],
+  "NInfer (November 2 build)": [
+   263.6675,
+   123.17333333333333,
+   256.645,
+   385.765,
+   294.70000000000005,
+   442.95,
+   438.4
+  ],
+  "vLLM 0.31.0": [
+   290.085,
+   147.5275,
+   261.29,
+   354.46333333333337,
+   241.0,
+   425.85,
+   431.45
+  ],
+  "SGLang 0.5.22": [
+   251.82,
+   129.12,
+   245.61333333333334,
+   370.7083333333333,
+   430.20000000000005,
+   465.8,
+   450.8
+  ],
+  "llama.cpp b11700": [
+   241.80833333333334,
+   133.46,
+   232.225,
+   336.66499999999996,
+   243.6,
+   360.2,
+   361.8
+  ],
+  "TensorFold 0.6.6": [
+   180.86,
+   104.28333333333333,
+   172.42000000000002,
+   405.23333333333335,
+   382.95,
+   408.15,
+   261.4
+  ]
+ },
+ "engines_all_runs": {
+  "MegaCapybara 1.39 Tiny": [
+   465.086,
+   164.41666666666666,
+   268.405,
+   598.5816666666667,
+   441.15,
+   658.5,
+   666.3
+  ],
+  "mkyt v0.3.2": [
+   437.95166666666665,
+   204.42333333333332,
+   373.59166666666664,
+   554.92,
+   422.70000000000005,
+   634.05,
+   638.8
+  ],
+  "ignis v0.9.6": [
+   330.3575,
+   167.13833333333332,
+   298.11,
+   439.18,
+   331.04999999999995,
+   510.1,
+   513.95
+  ],
+  "NInfer (November 2 build)": [
+   282.43333333333334,
+   123.17333333333333,
+   256.645,
+   385.765,
+   294.70000000000005,
+   442.95,
+   438.4
+  ],
+  "vLLM 0.31.0": [
+   311.5733333333333,
+   150.44833333333332,
+   261.29,
+   354.46333333333337,
+   241.0,
+   425.85,
+   431.45
+  ],
+  "SGLang 0.5.22": [
+   269.54,
+   129.12,
+   245.61333333333334,
+   370.7083333333333,
+   430.20000000000005,
+   465.8,
+   450.8
+  ],
+  "llama.cpp b11700": [
+   241.80833333333334,
+   143.27666666666667,
+   232.225,
+   336.66499999999996,
+   243.6,
+   360.2,
+   361.8
+  ],
+  "TensorFold 0.6.6": [
+   180.86,
+   104.28333333333333,
+   172.42000000000002,
+   405.23333333333335,
+   382.95,
+   408.15,
+   261.4
+  ]
+ },
+ "yasakani": {
+  "YASAKANI fastest model": {
+   "v0.1.2": {
+    "mean": [
+     882.6316666666667,
+     276.43333333333334,
+     498.565,
+     911.4266666666666,
+     1210.35,
+     1124.7,
+     1217.95
+    ],
+    "best": [
+     887.5233333333333,
+     277.8233333333333,
+     499.5933333333333,
+     912.6666666666666,
+     1223.4,
+     1124.7,
+     1218.5
+    ],
+    "mean_clean": [
+     515.4200000000001,
+     194.6275,
+     498.565,
+     911.4266666666666,
+     1210.35,
+     1124.7,
+     1217.95
+    ],
+    "best_clean": [
+     515.83,
+     195.28,
+     499.5933333333333,
+     912.6666666666666,
+     1223.4,
+     1124.7,
+     1218.5
+    ],
+    "runs": 30,
+    "left_out": {
+     "scenario_code_cuda r0": "L",
+     "scenario_code_cuda r1": "L",
+     "scenario_code_typescript r0": "T",
+     "scenario_code_typescript r1": "T",
+     "scenario_story_en_mystery r0": "L",
+     "scenario_story_en_mystery r1": "L"
+    },
+    "long_jsonl_edit": 1140.55,
+    "exact": {
+     "edit_code r0": true,
+     "edit_code r1": true,
+     "edit_jsonl r0": true,
+     "edit_jsonl r1": true,
+     "edit_jsonl_long r0": true,
+     "edit_jsonl_long r1": true
+    },
+    "prompts": {
+     "scenario_code_cuda": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_code_python": {
+      "mean": 515.4200000000001,
+      "flags": ".."
+     },
+     "scenario_code_typescript": {
+      "mean": null,
+      "flags": "TT"
+     },
+     "scenario_story_en_mystery": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_story_zh_dialogue": {
+      "mean": 185.345,
+      "flags": ".."
+     },
+     "scenario_story_zh_scifi": {
+      "mean": 203.91,
+      "flags": ".."
+     },
+     "scenario_structured_csv": {
+      "mean": 816.925,
+      "flags": ".."
+     },
+     "scenario_structured_jsonl": {
+      "mean": 1218.27,
+      "flags": ".."
+     },
+     "scenario_structured_sql": {
+      "mean": 699.085,
+      "flags": ".."
+     },
+     "scenario_translation_en_zh": {
+      "mean": 508.505,
+      "flags": ".."
+     },
+     "scenario_translation_markdown": {
+      "mean": 375.15,
+      "flags": ".."
+     },
+     "scenario_translation_zh_en": {
+      "mean": 612.04,
+      "flags": ".."
+     }
+    }
+   },
+   "v0.1.3": {
+    "mean": [
+     874.135,
+     277.1716666666667,
+     479.00166666666667,
+     877.5816666666667,
+     1188.25,
+     1124.5,
+     1220.6999999999998
+    ],
+    "best": [
+     879.81,
+     277.34000000000003,
+     481.0566666666667,
+     879.9366666666666,
+     1189.1,
+     1126.4,
+     1223.3
+    ],
+    "mean_clean": [
+     514.425,
+     194.785,
+     479.00166666666667,
+     877.5816666666667,
+     1188.25,
+     1124.5,
+     1220.6999999999998
+    ],
+    "best_clean": [
+     515.44,
+     194.96,
+     481.0566666666667,
+     879.9366666666666,
+     1189.1,
+     1126.4,
+     1223.3
+    ],
+    "runs": 30,
+    "left_out": {
+     "scenario_code_cuda r0": "L",
+     "scenario_code_cuda r1": "L",
+     "scenario_code_typescript r0": "T",
+     "scenario_code_typescript r1": "T",
+     "scenario_story_en_mystery r0": "L",
+     "scenario_story_en_mystery r1": "L"
+    },
+    "long_jsonl_edit": 1136.65,
+    "exact": {
+     "edit_code r0": true,
+     "edit_code r1": true,
+     "edit_jsonl r0": true,
+     "edit_jsonl r1": true,
+     "edit_jsonl_long r0": true,
+     "edit_jsonl_long r1": true
+    },
+    "prompts": {
+     "scenario_code_cuda": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_code_python": {
+      "mean": 514.425,
+      "flags": ".."
+     },
+     "scenario_code_typescript": {
+      "mean": null,
+      "flags": "TT"
+     },
+     "scenario_story_en_mystery": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_story_zh_dialogue": {
+      "mean": 185.91,
+      "flags": ".."
+     },
+     "scenario_story_zh_scifi": {
+      "mean": 203.66000000000003,
+      "flags": ".."
+     },
+     "scenario_structured_csv": {
+      "mean": 788.79,
+      "flags": ".."
+     },
+     "scenario_structured_jsonl": {
+      "mean": 1169.935,
+      "flags": ".."
+     },
+     "scenario_structured_sql": {
+      "mean": 674.02,
+      "flags": ".."
+     },
+     "scenario_translation_en_zh": {
+      "mean": 486.64,
+      "flags": ".."
+     },
+     "scenario_translation_markdown": {
+      "mean": 363.07000000000005,
+      "flags": ".."
+     },
+     "scenario_translation_zh_en": {
+      "mean": 587.2950000000001,
+      "flags": ".."
+     }
+    }
+   },
+   "v0.1.4": {
+    "mean": [
+     1088.5216666666668,
+     280.91333333333336,
+     479.19666666666666,
+     881.77,
+     2025.0,
+     2297.55,
+     1214.5
+    ],
+    "best": [
+     1092.5833333333333,
+     281.17333333333335,
+     480.11333333333334,
+     883.2366666666667,
+     2029.4,
+     2330.7,
+     1216.1
+    ],
+    "mean_clean": [
+     512.26,
+     194.88,
+     479.19666666666666,
+     881.77,
+     2025.0,
+     2297.55,
+     1214.5
+    ],
+    "best_clean": [
+     513.98,
+     195.015,
+     480.11333333333334,
+     883.2366666666667,
+     2029.4,
+     2330.7,
+     1216.1
+    ],
+    "runs": 30,
+    "left_out": {
+     "scenario_code_cuda r0": "L",
+     "scenario_code_cuda r1": "L",
+     "scenario_code_typescript r0": "T",
+     "scenario_code_typescript r1": "T",
+     "scenario_story_en_mystery r0": "L",
+     "scenario_story_en_mystery r1": "L"
+    },
+    "long_jsonl_edit": 2098.55,
+    "exact": {
+     "edit_code r0": true,
+     "edit_code r1": true,
+     "edit_jsonl r0": true,
+     "edit_jsonl r1": true,
+     "edit_jsonl_long r0": true,
+     "edit_jsonl_long r1": true
+    },
+    "prompts": {
+     "scenario_code_cuda": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_code_python": {
+      "mean": 512.26,
+      "flags": ".."
+     },
+     "scenario_code_typescript": {
+      "mean": null,
+      "flags": "TT"
+     },
+     "scenario_story_en_mystery": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_story_zh_dialogue": {
+      "mean": 185.99,
+      "flags": ".."
+     },
+     "scenario_story_zh_scifi": {
+      "mean": 203.76999999999998,
+      "flags": ".."
+     },
+     "scenario_structured_csv": {
+      "mean": 788.31,
+      "flags": ".."
+     },
+     "scenario_structured_jsonl": {
+      "mean": 1181.8249999999998,
+      "flags": ".."
+     },
+     "scenario_structured_sql": {
+      "mean": 675.175,
+      "flags": ".."
+     },
+     "scenario_translation_en_zh": {
+      "mean": 487.255,
+      "flags": ".."
+     },
+     "scenario_translation_markdown": {
+      "mean": 359.755,
+      "flags": ".."
+     },
+     "scenario_translation_zh_en": {
+      "mean": 590.58,
+      "flags": ".."
+     }
+    }
+   }
+  },
+  "YASAKANI quality model": {
+   "v0.1.2": {
+    "mean": [
+     464.25166666666667,
+     256.995,
+     478.15333333333336,
+     902.0333333333333,
+     1127.85,
+     1145.85,
+     1155.05
+    ],
+    "best": [
+     468.26666666666665,
+     257.77,
+     478.48333333333335,
+     905.3133333333334,
+     1132.4,
+     1148.8,
+     1156.1
+    ],
+    "mean_clean": [
+     464.25166666666667,
+     175.1875,
+     478.15333333333336,
+     902.0333333333333,
+     1127.85,
+     1145.85,
+     1155.05
+    ],
+    "best_clean": [
+     468.26666666666665,
+     175.415,
+     478.48333333333335,
+     905.3133333333334,
+     1132.4,
+     1148.8,
+     1156.1
+    ],
+    "runs": 30,
+    "left_out": {
+     "scenario_story_en_mystery r0": "L",
+     "scenario_story_en_mystery r1": "L"
+    },
+    "long_jsonl_edit": 1095.9,
+    "exact": {
+     "edit_code r0": false,
+     "edit_code r1": false,
+     "edit_jsonl r0": true,
+     "edit_jsonl r1": true,
+     "edit_jsonl_long r0": true,
+     "edit_jsonl_long r1": true
+    },
+    "prompts": {
+     "scenario_code_cuda": {
+      "mean": 456.58000000000004,
+      "flags": ".."
+     },
+     "scenario_code_python": {
+      "mean": 481.21,
+      "flags": ".."
+     },
+     "scenario_code_typescript": {
+      "mean": 454.96500000000003,
+      "flags": ".."
+     },
+     "scenario_story_en_mystery": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_story_zh_dialogue": {
+      "mean": 171.795,
+      "flags": ".."
+     },
+     "scenario_story_zh_scifi": {
+      "mean": 178.57999999999998,
+      "flags": ".."
+     },
+     "scenario_structured_csv": {
+      "mean": 914.775,
+      "flags": ".."
+     },
+     "scenario_structured_jsonl": {
+      "mean": 1057.24,
+      "flags": ".."
+     },
+     "scenario_structured_sql": {
+      "mean": 734.085,
+      "flags": ".."
+     },
+     "scenario_translation_en_zh": {
+      "mean": 471.24,
+      "flags": ".."
+     },
+     "scenario_translation_markdown": {
+      "mean": 372.32500000000005,
+      "flags": ".."
+     },
+     "scenario_translation_zh_en": {
+      "mean": 590.895,
+      "flags": ".."
+     }
+    }
+   },
+   "v0.1.3": {
+    "mean": [
+     467.685,
+     253.67166666666665,
+     464.55833333333334,
+     893.4866666666667,
+     1089.05,
+     1103.2,
+     1117.25
+    ],
+    "best": [
+     467.9166666666667,
+     254.10999999999999,
+     467.3833333333333,
+     896.4833333333333,
+     1089.3,
+     1103.5,
+     1117.7
+    ],
+    "mean_clean": [
+     467.685,
+     171.69,
+     464.55833333333334,
+     893.4866666666667,
+     1089.05,
+     1103.2,
+     1117.25
+    ],
+    "best_clean": [
+     467.9166666666667,
+     171.825,
+     467.3833333333333,
+     896.4833333333333,
+     1089.3,
+     1103.5,
+     1117.7
+    ],
+    "runs": 30,
+    "left_out": {
+     "scenario_story_en_mystery r0": "L",
+     "scenario_story_en_mystery r1": "L"
+    },
+    "long_jsonl_edit": 1058.65,
+    "exact": {
+     "edit_code r0": false,
+     "edit_code r1": false,
+     "edit_jsonl r0": true,
+     "edit_jsonl r1": true,
+     "edit_jsonl_long r0": true,
+     "edit_jsonl_long r1": true
+    },
+    "prompts": {
+     "scenario_code_cuda": {
+      "mean": 457.675,
+      "flags": ".."
+     },
+     "scenario_code_python": {
+      "mean": 495.415,
+      "flags": ".."
+     },
+     "scenario_code_typescript": {
+      "mean": 449.96500000000003,
+      "flags": ".."
+     },
+     "scenario_story_en_mystery": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_story_zh_dialogue": {
+      "mean": 169.015,
+      "flags": ".."
+     },
+     "scenario_story_zh_scifi": {
+      "mean": 174.365,
+      "flags": ".."
+     },
+     "scenario_structured_csv": {
+      "mean": 884.8499999999999,
+      "flags": ".."
+     },
+     "scenario_structured_jsonl": {
+      "mean": 1087.315,
+      "flags": ".."
+     },
+     "scenario_structured_sql": {
+      "mean": 708.2950000000001,
+      "flags": ".."
+     },
+     "scenario_translation_en_zh": {
+      "mean": 460.185,
+      "flags": ".."
+     },
+     "scenario_translation_markdown": {
+      "mean": 359.225,
+      "flags": ".."
+     },
+     "scenario_translation_zh_en": {
+      "mean": 574.2650000000001,
+      "flags": ".."
+     }
+    }
+   },
+   "v0.1.4": {
+    "mean": [
+     467.61,
+     261.59833333333336,
+     464.37,
+     891.7149999999999,
+     2008.35,
+     2243.2,
+     1114.9
+    ],
+    "best": [
+     467.91,
+     261.8933333333333,
+     467.5566666666667,
+     896.4833333333333,
+     2015.4,
+     2246.3,
+     1115.4
+    ],
+    "mean_clean": [
+     467.61,
+     171.8275,
+     464.37,
+     891.7149999999999,
+     2008.35,
+     2243.2,
+     1114.9
+    ],
+    "best_clean": [
+     467.91,
+     172.13,
+     467.5566666666667,
+     896.4833333333333,
+     2015.4,
+     2246.3,
+     1115.4
+    ],
+    "runs": 30,
+    "left_out": {
+     "scenario_story_en_mystery r0": "L",
+     "scenario_story_en_mystery r1": "L"
+    },
+    "long_jsonl_edit": 2056.05,
+    "exact": {
+     "edit_code r0": false,
+     "edit_code r1": false,
+     "edit_jsonl r0": true,
+     "edit_jsonl r1": true,
+     "edit_jsonl_long r0": true,
+     "edit_jsonl_long r1": true
+    },
+    "prompts": {
+     "scenario_code_cuda": {
+      "mean": 456.755,
+      "flags": ".."
+     },
+     "scenario_code_python": {
+      "mean": 495.45000000000005,
+      "flags": ".."
+     },
+     "scenario_code_typescript": {
+      "mean": 450.625,
+      "flags": ".."
+     },
+     "scenario_story_en_mystery": {
+      "mean": null,
+      "flags": "LL"
+     },
+     "scenario_story_zh_dialogue": {
+      "mean": 169.20499999999998,
+      "flags": ".."
+     },
+     "scenario_story_zh_scifi": {
+      "mean": 174.45,
+      "flags": ".."
+     },
+     "scenario_structured_csv": {
+      "mean": 885.105,
+      "flags": ".."
+     },
+     "scenario_structured_jsonl": {
+      "mean": 1084.585,
+      "flags": ".."
+     },
+     "scenario_structured_sql": {
+      "mean": 705.4549999999999,
+      "flags": ".."
+     },
+     "scenario_translation_en_zh": {
+      "mean": 459.11,
+      "flags": ".."
+     },
+     "scenario_translation_markdown": {
+      "mean": 363.255,
+      "flags": ".."
+     },
+     "scenario_translation_zh_en": {
+      "mean": 570.745,
+      "flags": ".."
+     }
+    }
+   }
+  }
+ }
+}

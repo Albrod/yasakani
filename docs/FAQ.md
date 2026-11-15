@@ -17,8 +17,9 @@ from the original model. The numbers for both are in the [README](../README.md).
 ## How fast is it, and how was that measured?
 
 On one RTX 5090 with Qwen3.8-27B, YASAKANI's fastest model wrote answers faster than each of the eight other engines we measured on the same PC,
-in all seven task categories, with thinking off and with thinking on. For example, with thinking off it wrote 1,222 tokens per second on the
-code-edit task, against 441 for MegaCapybara 1.39 (about 2.77 times), and 1,260 on long JSONL.
+in all seven task categories, with thinking off and with thinking on. For example, with thinking off it wrote 2,025 tokens per
+second on the code-edit task (0.1.4, November 15), against 441 for MegaCapybara 1.39 measured on November 3 (about 4.6 times), and
+1,214 on long JSONL.
 
 "Speed" is the speed of **writing the answer**: (output tokens - 1) / (time from the first to the last content chunk). The time to read the prompt
 is not included. Each engine ran with its own weights, quantization, key-value cache format and speed-up settings, one request at a time. With
@@ -50,16 +51,30 @@ decoding switched off; 256 tokens each). With nothing else using the GPU, all 24
 synchronization in the kernels that apply the position rotation; 0.1.3 fixes it, and in our tests with the fix it did not appear again.
 We still do not promise bit-identical text in every condition; the details are in [MEASUREMENTS.md](MEASUREMENTS.md).
 
+The copying of 0.1.4 was checked against decoding one token per pass: 255 of 255 generations with copying (28 of them with wide passes of
+up to 64 rows) gave the same tokens ([TECHNOLOGY.md](TECHNOLOGY.md), chapter 7).
+
 ## Which GPUs, which systems?
 
 We test on **Windows 11 and the RTX 5090** (32 GB). Since 0.1.3 the engine is also built to run on other NVIDIA RTX 30, 40 and 50 series cards with
 compute capability 8.6 or higher and 16 GB or more: the RTX 3090, RTX 3090 Ti and RTX 4090 (24 GB; both models) and the
 RTX 4060 Ti 16GB, RTX 4070 Ti SUPER, RTX 4080, RTX 4080 SUPER, RTX 5060 Ti 16GB, RTX 5070 Ti, RTX 5080 (16 GB; the fastest model only, with a shorter context). The engine is
 not optimized for them and we have not tested it on them, so neither its speed nor its operation is guaranteed; they are slower than the
-RTX 5090. The quickstart says so and goes on. Results from these cards are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+RTX 5090. The quickstart says so and goes on. Since 0.1.4, however, its self-check compares the card's predictions with those of the
+RTX 5090, and the quickstart stops when they differ by more than small differences in the computation, or when the card's passes of
+different widths do not agree.
+Results from these cards are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 AMD GPUs, Macs, cards with less than 16 GB and cards older than the RTX 30 series are not supported. On Linux the engine can be built from source (a community contribution, [#3](https://github.com/yasakani-dev/yasakani/pull/3), checked on
 WSL2 / Ubuntu 24.04 with an RTX 5090); a prebuilt Linux release with a launcher is one of the campaign's goals. Testing and tuning on the 24 GB and 16 GB RTX cards first, then AMD and Mac - that is what the
 crowdfunding campaign is for; the order and the conditions are on the [campaign page](https://camp-fire.jp/projects/992233/view).
+
+The NVIDIA driver must be 580 or newer. The engine is built with CUDA 13.2; 580 is the oldest driver NVIDIA lists for programs of the CUDA
+13 toolkits under its minor version compatibility
+([NVIDIA's documentation](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)), with limits: features that
+need a newer driver fail, and so does compiling PTX at load time. The engine carries machine code for each GPU generation it supports, so
+it needs no PTX compilation. We have tested 616.92 only.
+The quickstart checks the driver before it downloads the engine or a model, and if the driver is older it stops and shows where to get a
+new one.
 
 ## How much memory and disk does it need?
 
@@ -88,6 +103,16 @@ thinking, so with a small limit the request ends in the middle of the thinking a
 32,768) or shorten the thinking: `/effort medium`, `/effort low` or `/think off` in `yasakani chat`; `reasoning_effort` (`medium`, `low`) or
 `{"enable_thinking": false}` in `chat_template_kwargs` through the API.
 
+## Is a long prompt reused?
+
+When a request repeats the previous prompt, continues the conversation or sends back a tool result, the standard server reuses what
+it has read and reads only the new part: after a 229,376-token document the first token came after 0.35 to 0.38 s, against 116 s the first
+time (measured with 0.1.1 to 0.1.4). Since 0.1.4 the same document followed by a different question is reused too (0.37 s), when the
+document comes before the question and no other request comes in between. The prompt
+is read from the start after an unrelated request, when thinking is switched on or off, after an image, and when a prompt under 8,192
+tokens changes part-way. `usage.prompt_tokens_details.cached_tokens` shows how many tokens were reused; the details are in
+[MEASUREMENTS.md](MEASUREMENTS.md).
+
 ## How do I connect another app?
 
 Any app that can talk to an OpenAI-compatible server: set the address to `http://127.0.0.1:8765/v1` and the model name to `qwen3.8-27b` (any
@@ -97,8 +122,9 @@ API key will do). If it does not connect:
   with `yasakani serve --host 0.0.0.0 --api-key YOUR_KEY` and give the app that key.
 * Apps that call the server straight from a web page: calls from other pages are refused, for safety.
 * Apps that depend on tool / function calling (coding agents, for example): supported since 0.1.1. The server takes `tools` with
-  `tool_choice` `auto` or `none` and returns the calls as `tool_calls`; `required` or a named function is accepted but not enforced
-  (the model is left to make the call), and the old `functions` field is answered with 400. Version 0.1.0 answered every request with `tools` with 400: if you use 0.1.0, put a newer quickstart (0.1.1 or later) into the same folder
+  `tool_choice` `auto` or `none` and returns the calls as `tool_calls`. Since 0.1.4 it also accepts `required` or a named function, but does
+  not enforce the call: the model decides, and an answer without a call comes back with `finish_reason` `stop`. The old `functions` field is
+  answered with 400. Version 0.1.0 answered every request with `tools` with 400: if you use 0.1.0, put a newer quickstart (0.1.1 or later) into the same folder
   and run `START.cmd` again (the model is not downloaded again). Tool calling is new and has been tested far less than plain chat.
   An agent screen is in the harness (see "Use it as an agent" in the [README](../README.md)).
 
@@ -123,8 +149,10 @@ downloaded with the one on the release page, and run `yasakani verify` on the mo
 
 Yes: it serves the OpenAI chat-completions API on `http://127.0.0.1:8765/v1`. Supported request fields, the way the thinking text is returned and the
 loop guard are described in [python/README.md](../python/README.md). It generates one request at a time; `n` above 1
-and `logprobs` are not supported. Tool / function calling is supported since 0.1.1 (`tools` with `tool_choice` `auto` or `none`).
-Images are accepted since 0.1.2 through the optional image input (a community contribution, [#4](https://github.com/yasakani-dev/yasakani/pull/4); see
+and `logprobs` are not supported. Tool / function calling is supported since 0.1.1 (`tools` with `tool_choice` `auto` or `none`; since 0.1.4 also `required` or a named
+function, accepted but not enforced).
+Images are accepted since 0.1.2 through the optional image input (a community contribution, [#4](https://github.com/yasakani-dev/yasakani/pull/4); on Linux with llama.cpp
+built from source, contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8) and not tried by us; see
 [python/README.md](../python/README.md#image-input-optional)).
 
 ## Can I use it commercially?

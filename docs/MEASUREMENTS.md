@@ -8,9 +8,11 @@ records themselves are in [`bench/`](../bench/).
 
 ## Which builds were measured
 
-* The speed tables are the saved records of the quality model (12.37 GB) and the fastest model (10.31 GB), measured on November 8, 2026, and of
-  the eight other engines. YASAKANI's engine is the `yskn.dll` built on November 7
-  (sha256 `0f5d973b791c8d66034d87bdfc7f2c018718dc0e851b9a6ee6dc1eb275150bbb`), the same file that this release distributes.
+* The speed tables are the saved records of the quality model (12.37 GB), the fastest model (10.31 GB) and the eight other engines.
+  YASAKANI's thinking-off rows were measured on November 15, 2026 with the `yskn.dll` of this release (0.1.4, sha256
+  `bae77ae6e73369dee5d33490b1ff2093f88ab57c02efa06912db6246efffaa09`) and its Python package; its thinking-on rows on November 8 with the
+  `yskn.dll` built on November 7 (sha256 `0f5d973b791c8d66034d87bdfc7f2c018718dc0e851b9a6ee6dc1eb275150bbb`, the engine of 0.1.0 to 0.1.2).
+  The thinking-on table was not measured again with 0.1.4.
 * The quality table evaluates the same two models with an FP16 key-value (KV) cache. That is not the KV condition of the speed tables, which
   use KV5. YASAKANI's two rows of that table were measured with a research build of the engine, which can use an FP16 KV cache and return
   the distribution over the whole vocabulary; the weights are the same data as in the released model files. The `yskn.dll` of this
@@ -28,8 +30,8 @@ tokens.
 
 Thinking off is greedy, 2 runs each. The table in the README is the average after runs with a repetition loop or an unrequested tool call are
 left out by one saved rule shared by all engines. The exclusion can change the number of tasks in a category. For the fastest model's "Code",
-the value is 900 tok/s before the exclusion and 529 tok/s after it. We do not use the former as a representative figure for practical code
-generation. The table before the exclusion is kept below.
+the value is 1,089 tok/s before the exclusion and 512 tok/s after it (0.1.4; in the records of November 8, 900 and 529). We do not use the
+former as a representative figure for practical code generation. The table before the exclusion is kept below.
 
 On November 14, 2026 the rule for repetition was tightened and the table of the README was made again: for story and translation, a run is
 also left out when lines that occur more than once make up 20% or more of its lines, for every engine alike. Only the "Story" column
@@ -37,6 +39,11 @@ changed (fastest model 285 -> 201, mkyt 204 -> 181, vLLM 150 -> 148, llama.cpp 1
 [`tools/speed/tables_strict.py`](../tools/speed/tables_strict.py);
 [`tools/speed/SPEED_TABLES_STRICT.md`](../tools/speed/SPEED_TABLES_STRICT.md) also lists the 12 prompts one by one. The first tally is kept in
 [`bench/20261108/tables/`](../bench/20261108/tables/).
+
+On November 15, 2026 YASAKANI's thinking-off rows were measured again with 0.1.4, with the same clients and rules (records in
+[`bench/20261115/`](../bench/20261115/); the table is the output of [`tools/speed/tables_0114.py`](../tools/speed/tables_0114.py),
+[`tools/speed/SPEED_TABLES_0114.md`](../tools/speed/SPEED_TABLES_0114.md)). The other engines' rows are the records of November 3 and 6, unchanged.
+0.1.2 and 0.1.3 were measured in the same sitting; see the last section.
 
 Thinking on uses temperature 1.0, top-p 0.95, top-k 20, min-p 0. It is a comparison of records: the fastest run of each task is chosen and
 averaged per category. YASAKANI's value is chosen from 5 runs and the other engines' from 2, so the number of tries is not equal. The table
@@ -53,10 +60,12 @@ November 6. This does not rank the latest version of every program, or every use
 
 ## Thinking off: the table of the README (average without repetition loops etc., tok/s)
 
+YASAKANI: 0.1.4, November 15, 2026.
+
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|
-| YASAKANI fastest model | 529 | 201 | 494 | 909 | 1,222 | 1,156 | 1,260 |
-| YASAKANI quality model | 486 | 179 | 483 | 930 | 1,136 | 1,151 | 1,160 |
+| YASAKANI fastest model | 512 | 195 | 479 | 882 | 2,025 | 2,298 | 1,214 |
+| YASAKANI quality model | 468 | 172 | 464 | 892 | 2,008 | 2,243 | 1,115 |
 | MegaCapybara 1.39 Tiny | 465 | 164 | 268 | 599 | 441 | 658 | 666 |
 | mkyt v0.3.2 | 395 | 181 | 374 | 555 | 423 | 634 | 639 |
 | ignis v0.9.6 | 330 | 167 | 298 | 439 | 331 | 510 | 514 |
@@ -68,7 +77,8 @@ November 6. This does not rank the latest version of every program, or every use
 
 ## Thinking on: the table of the README (fastest run of each task, tok/s)
 
-YASAKANI's values are chosen from 5 runs, the others' from 2.
+YASAKANI's values are chosen from 5 runs, the others' from 2. YASAKANI: November 8, 2026, the engine of 0.1.0 to 0.1.2 (the build of November 7; not
+measured again with 0.1.4).
 
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|
@@ -85,12 +95,12 @@ YASAKANI's values are chosen from 5 runs, the others' from 2.
 
 ## Alternative tally: thinking off, average before the exclusion (tok/s)
 
-These values include the runs with repetition loops and unrequested tool calls.
+These values include the runs with repetition loops and unrequested tool calls. YASAKANI: 0.1.4, November 15, 2026.
 
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|
-| YASAKANI fastest model | 900 | 285 | 494 | 909 | 1,222 | 1,156 | 1,260 |
-| YASAKANI quality model | 486 | 263 | 483 | 930 | 1,136 | 1,151 | 1,160 |
+| YASAKANI fastest model | 1,089 | 281 | 479 | 882 | 2,025 | 2,298 | 1,214 |
+| YASAKANI quality model | 468 | 262 | 464 | 892 | 2,008 | 2,243 | 1,115 |
 | MegaCapybara 1.39 Tiny | 465 | 164 | 268 | 599 | 441 | 658 | 666 |
 | mkyt v0.3.2 | 438 | 204 | 374 | 555 | 423 | 634 | 639 |
 | ignis v0.9.6 | 330 | 167 | 298 | 439 | 331 | 510 | 514 |
@@ -102,7 +112,7 @@ These values include the runs with repetition loops and unrequested tool calls.
 
 ## Alternative tally: thinking on, average of all runs (tok/s)
 
-Here too YASAKANI has 5 runs and the others 2. Both tables are kept so that the table of records and the table of averages are not confused.
+Here too YASAKANI has 5 runs and the others 2 (YASAKANI: November 8, the engine of 0.1.0 to 0.1.2). Both tables are kept so that the table of records and the table of averages are not confused.
 
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|
@@ -178,8 +188,8 @@ the two: less than 0.000001).
 ### The released engine (added November 14, 2026)
 
 The two YASAKANI rows above were measured with a research build and an FP16 KV cache. The released `yskn.dll` always rounds the KV
-cache with KV5 and has no FP16 cache, and the published source builds only this configuration, so those rows cannot be repeated with the
-released engine. On the
+cache with KV5 and has no FP16 cache, so those rows cannot be repeated with the released engine; a measurement build of the source with an
+FP16 cache repeats them (below). On the
 same 20 windows and against the same reference, the engine of release 0.1.1 gives:
 
 | Model | KV cache | KL on thinking text↓ | Top-1 agreement↑ |
@@ -197,8 +207,9 @@ Against a reference made from the original model with Hugging Face transformers 
 are 0.0126 / 95.35% and 0.0309 / 92.98%. How to repeat this: [`tools/quality/README.md`](../tools/quality/README.md).
 
 **For comparison: a plain 8-bit and an FP16 cache (added November 15, 2026).** The released `yskn.dll` cannot run either of them. We
-measured them with two measurement builds of the 0.1.2 source: `YSKN_KVX_MODE=2` (a plain rotated 8-bit cache) and `YSKN_KVX_MODE=0`
-(FP16). These two modes also need a three-line change in `src/engine35.cpp` (one `#include` moved out of the block for mode 3), and the
+measured them with two measurement builds: `YSKN_KVX_MODE=2` (a plain rotated 8-bit cache) and `YSKN_KVX_MODE=0` (FP16). Since 0.1.4 the
+published source builds both ([BUILDING.md](../BUILDING.md), "Measurement builds"; up to 0.1.3 they also needed a three-line change in
+`src/engine35.cpp`). Builds of the 0.1.2 source with that change and builds of the 0.1.4 source gave the same values to every digit. The
 builds are not released. Same 20 windows, same reference, a context of 2,048 tokens:
 
 | Model | KV cache | Engine | KL on thinking text↓ | Top-1 agreement↑ |
@@ -244,7 +255,7 @@ Windows may show a warning.
 
 ## The uncut screen recording of November 8 (fastest model)
 
-The same fastest model as in the comparison tables (10.311344128 GB) and the same `yskn.dll` as this release were used. One RTX 5090 at stock
+The same fastest model as in the comparison tables (10.311344128 GB) and the `yskn.dll` built on November 7 (the engine of 0.1.0 to 0.1.2) were used. One RTX 5090 at stock
 600 W, maximum context 262,144, thinking off, temperature 0, output limit 8,192. The target input was sent once to a new process that had
 been warmed up twice with a different short text. The prompt cache was empty.
 
@@ -319,3 +330,109 @@ Checked with the files that are published: the `yskn.dll` above, the Python pack
   In 240 repeated runs of one engine (fastest model, 768 tokens each) neither engine differed this time, so that test shows no
   difference between them. With both models the 0.1.3 engine wrote the same tokens as the engine of 0.1.0 to 0.1.2 (`yasakani
   selfcheck`, 48 runs of the look-ahead check, 12 benchmark texts), and its speed was the same within our measurement noise.
+
+## 0.1.4: wide copy passes and saved prompt states (added for 0.1.4)
+
+Measured on November 15, 2026 on the RTX 5090 of the other measurements, with the same model files: 0.1.2, 0.1.3 and 0.1.4, each with its own
+Python package and `yskn.dll`, `yasakani serve` with its default settings. One server at a time; before each step the GPU was checked to be idle.
+
+### The answers stay the same
+
+* **Passes.** On compute capability 12.x the passes of 17 to 64 rows have matrix kernels of their own in 0.1.4 (the same integer sums as
+  the 16-row kernels, added in the same order). A single pass of 17 to 64 rows (12 sizes) gave the same chosen tokens, the same NLL bits
+  and, after confirming, the same state as passes of 16 rows over the same tokens, with these kernels and with them switched off;
+  confirming 0 to 63 tokens after a 64-row pass, the last part of a prompt read in 17, 40 or 64 rows, and passes of 32, 48 and 64 rows with
+  a fixed sampling seed gave the same too: 90 of 90 checks with each model (contexts of 2K, 16K and 40K). The integer sums of the new
+  kernels were the same as those of the 16-row kernels, bit for bit, for every kind of matrix of both models (27 matrices, 12 sizes, three
+  kernels, two ways of splitting the work: 1,944 of 1,944 per model). A second check with other sizes and splits (7,200 of 7,200 per model)
+  and with prompts read, partly confirmed and sampled in passes of 17 to 64 rows (25 of 25 and 21 of 21) found no difference either.
+* **Generations.** 297 of 297 runs with copying gave the same tokens as decoding one token per pass (58 of them used passes wider than 16
+  rows, up to 64). Fastest model: 21 tasks (the 12 published prompts, the 3 tasks of the tables, a longer JSONL edit and 5 tasks with
+  thinking on), greedy and with a fixed seed, with the 0.1.4 settings twice, with the new kernels switched off, with 16-row copy passes,
+  with the copy lookup of 0.1.3, and with an earlier build of 0.1.4 without the new kernels (252 runs). Quality model: 15 tasks, greedy, with
+  the 0.1.4 settings, with the new kernels switched off and with the earlier build (45 runs).
+* **The speed measurement below.** Its 32 answers per model were the same text with 0.1.3 and 0.1.4 (64 of 64), and 63 of 64 with 0.1.2:
+  the second run of `scenario_code_python` of the quality model with 0.1.2 differs from character 1,348 on (its first run is the same text),
+  the rare change part-way through that 0.1.3 fixed (see the 0.1.3 section).
+* **Saved prompt states.** A prompt continued from a saved state gave the same output and the same state hash as the same prompt read from
+  the start: 37 of 37 cases (documents of 5K, 51K and 229K tokens: the same input three times, a new question, the document in the system
+  message, a continued conversation, an edited last message, an unrelated request in between), with the first build of 0.1.4; with the
+  final build 34 of 34 cases of the 5K and 51K documents.
+* `yasakani selfcheck` 3 of 3 with both models; tool calls through the server 8 of 8 with both models (streaming and not, thinking on and off).
+* **The self-check on other GPUs** (new in 0.1.4). The package was shown a stand-in nvidia-smi that names an RTX 4090; the engine ran
+  on the RTX 5090. Numbers: mean / largest NLL difference at the 195 positions of the reference output, and the share of the 285
+  positions with the same most likely token. Passed: both models as released (exit code 0, no difference); the 8-bit key-value cache
+  instead of KV5 (quality model 0.0056 / 0.081 / 99.6 %, fastest model 0.0051 / 0.060 / 99.3 %; the output was the same, exit code 0);
+  a copy of the quality model with one of its 400 matrices scaled by 1.01, as a stand-in for a small difference in the computation
+  (the output differed from token 29 on; 0.0048 / 0.077 / 99.3 %, exit code 3). Failed (exit code 1): the quality model's weights
+  against the fastest model's reference and the other way round (0.030 / 0.53 / 96.8 % and 0.028 / 0.53 / 97.2 %), a copy whose 64
+  `mlp.down_proj` matrices were scaled by 1.1 (the output was the same; 0.019 / 0.41 / 96.8 %) and a copy with one bit changed in
+  every 64th byte of those matrices (0.028 / 0.91 / 96.8 %). As the RTX 5090 (the real nvidia-smi) the same runs gave exit code 0 when
+  the output was the same and 1 when it differed, as before. The tolerances were chosen on the RTX 5090, and the comparison has not been
+  run on another GPU. It is not sensitive to everything: one matrix scaled by 1.25, all 400 layer matrices scaled by 1.02, and one bit
+  changed in every 4,096th byte of the 64 `mlp.down_proj` matrices passed it.
+* **The self-consistency check of every GPU** (new in 0.1.4, also on the RTX 5090). The self-check then generates the answer of a prompt
+  that copies its input (60 short JSON lines with two values changed) and reads prompt + answer again in passes of 16 rows: every generated
+  token must be the most likely token there, and where wider passes are used, passes of 64 rows must give the same most likely tokens and
+  NLL bits as passes of 16. With both models on the RTX 5090 (also with a stand-in nvidia-smi naming an RTX 4090, and an RTX 5080 for the
+  fastest model): prompt 1,127 tokens, answer 1,080 tokens in 27 passes (15 of them wider than 16 rows, up to 64), every generated token
+  the most likely one, and the same predictions in passes of 64 and 16 at all 2,206 positions; 3.5 s (fastest model) and 3.7 s (quality model).
+* **Requests cut by the thinking budget.** 0.1.4 makes the cut depend only on the generated tokens. Fastest model: three requests with a
+  thinking budget of 64, 200 and 600 tokens and one whose thinking ends before the budget (also compared with no budget), greedy and with a
+  fixed seed, with the settings of 0.1.4 (twice), 16-row copying and one token per pass: the same answers in 8 of 8 groups (42 runs).
+
+### Speed, thinking off
+
+The clients and rules of the speed tables (2 runs per task, greedy, the stricter rule for repetition). The long JSONL edit is an extra task
+(160 records returned with three fields changed, [`bench/20261115/prompts/cases_plus.json`](../bench/20261115/prompts/cases_plus.json)).
+Order: fastest model 0.1.2, 0.1.3, 0.1.4, then quality model 0.1.4, 0.1.3, 0.1.2 (14:51 to 15:17), with the final `yskn.dll` of 0.1.4. tok/s:
+
+| | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL | Long JSONL edit |
+|---|---|---|---|---|---|---|---|---|
+| fastest model, 0.1.2 | 515 | 195 | 499 | 911 | 1,210 | 1,125 | 1,218 | 1,141 |
+| fastest model, 0.1.3 | 514 | 195 | 479 | 878 | 1,188 | 1,124 | 1,221 | 1,137 |
+| fastest model, 0.1.4 | 512 | 195 | 479 | 882 | 2,025 | 2,298 | 1,214 | 2,099 |
+| 0.1.4 / 0.1.2 | 0.99 | 1.00 | 0.96 | 0.97 | 1.67 | 2.04 | 1.00 | 1.84 |
+| quality model, 0.1.2 | 464 | 175 | 478 | 902 | 1,128 | 1,146 | 1,155 | 1,096 |
+| quality model, 0.1.3 | 468 | 172 | 465 | 893 | 1,089 | 1,103 | 1,117 | 1,059 |
+| quality model, 0.1.4 | 468 | 172 | 464 | 892 | 2,008 | 2,243 | 1,115 | 2,056 |
+| 0.1.4 / 0.1.2 | 1.01 | 0.98 | 0.97 | 0.99 | 1.78 | 1.96 | 0.97 | 1.88 |
+
+* One by one, the 9 published prompts of the fastest model's table were 0.958 to 1.003 times as fast with 0.1.4 as with 0.1.2 (mean -2.4%);
+  the 11 prompts of the quality model: 0.961 to 1.030 times (mean -1.3%).
+* In this sitting 0.1.3 was also slower than 0.1.2 on the tasks without copying (0.96 to 1.01 times; translation and structured output most), and
+  0.1.4 ran at 0.99 to 1.00 times the speed of 0.1.3 there. In the morning of the same day (03:42 to 04:07, the same files for 0.1.2 and 0.1.3, the
+  first build of 0.1.4) the three versions were within 1% of each other on these tasks. We do not know the cause; the order of the
+  versions was reversed for the quality model, and 0.1.2 was faster on translation and structured output in both orders.
+* 0.1.4 checks copied text in passes of up to 64 rows with kernels of their own (TECHNOLOGY.md, 5.4). Measured with the first build of
+  0.1.4, which had these passes without the new kernels (thinking off, 03:42 to 04:07 the same day): code edit 1.36 and 1.46 times, JSONL
+  edit 1.55 and 1.56 times as fast as 0.1.2 (fastest and quality model).
+* Measured with the first build of 0.1.4 only, not again: with a fixed sampling seed (temperature 1.0) one structured prompt of the fastest
+  model (CSV) ran at 0.93 times the speed of 0.1.3 (both runs; as fast as 0.1.3 with the new copy lookup switched off; the cause in detail is
+  not known). With thinking on, the first 1,536 tokens of the edit tasks (mostly thinking) ran at 0.99 to 1.02 times; the answer part was
+  not measured.
+* The code edit of the quality model differs from the expected file in one place with all three versions (as on November 8); the other edit
+  answers are the expected files.
+* Not measured: the thinking-on table, the speed of writing after a long prompt, GPUs other than the RTX 5090.
+
+### Reading a prompt again
+
+Through the server, fastest model, thinking off, greedy, 32 tokens per answer. The document is Python source text cut to the given number of
+tokens. Seconds from sending the request to the first token of the answer (that token included); in brackets
+`usage.prompt_tokens_details.cached_tokens`:
+
+| Request after a 229,376-token document | 0.1.1 | 0.1.2 | 0.1.3 | 0.1.4 |
+|---|---|---|---|---|
+| first request | 115.69 (0) | 115.58 (0) | 115.83 (0) | 115.64 (0) |
+| the same request again | 0.35 (229,398) | 0.36 (229,398) | 0.37 (229,398) | 0.35 (229,398) |
+| the conversation continued | 0.38 (229,435) | 0.38 (229,435) | 0.38 (229,435) | 0.36 (229,435) |
+| the same document, a different question | 115.63 (0) | 115.61 (0) | 115.73 (0) | **0.37 (229,376)** |
+| with `tools`, first request | 116.15 (0) | 115.98 (0) | 116.15 (0) | 115.87 (0) |
+| the tool result sent back | 0.38 (229,701) | 0.38 (229,701) | 0.38 (229,701) | 0.38 (229,701) |
+
+With documents of 65,536 and 8,192 tokens it is the same: the first request about 20.0 s and 2.0 s; the same request, the continued
+conversation and the tool result 0.04 to 0.15 s; a different question 20.0 s and 1.96 s with 0.1.1 to 0.1.3, 0.12 s and 0.09 s with 0.1.4.
+The answers of a continued read and of a fresh read were the same. The GPU memory after loading did not change between the versions.
+A different question reuses the document when the document comes before it, the question part is up to about 4,000 tokens and no other
+request comes in between.
+

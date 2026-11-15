@@ -88,6 +88,7 @@ is in the release; you download them yourself.
 | What | Why | License | Tested with |
 |---|---|---|---|
 | llama.cpp, CPU build for Windows x64 (`llama-b10488-bin-win-cpu-x64.zip`, <https://github.com/ggml-org/llama.cpp/releases/tag/b10488>) | its multimodal library (`mtmd.dll`, with `llama.dll` and the `ggml` libraries) turns an image into features | MIT | b10488 |
+| llama.cpp b10488 built from source (Linux only; <https://github.com/ggml-org/llama.cpp/tree/b10488>) | the same libraries as shared libraries (`libmtmd.so`, `libllama.so`, the `ggml` libraries), built by you | MIT | b10488 (by the contributor of #8) |
 | `mmproj-Qwen3.8-27B-BF16.gguf` (<https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF>) | the image encoder of Qwen3.8-27B in the GGUF format | made from Qwen3.8-27B (Apache-2.0); see the model page | the file with SHA-256 `de2a49866988ea272c43dc2a43ee2662c25725a717ca5b9059ea420a97f53fe8` |
 | a Qwen3.8-27B GGUF file | settings and vocabulary for llama.cpp; its weights are not read | made from Qwen3.8-27B (Apache-2.0); see the page you download it from | `Qwen3.8-27B-Q4_K_M.gguf` of <https://huggingface.co/bartowski/Qwen3.8-27B-GGUF> (17,442,399,968 bytes); other files not tried |
 | Pillow | reads the image (`pip install ".[vision]"`) | MIT-CMU | 13.0.0 |

@@ -2,7 +2,7 @@
 """YASAKANI quickstart (Windows + one NVIDIA RTX GPU of the RTX 30, 40 or 50 series with 16 GB or more; tested on the RTX 5090).
 
 Double-click START.cmd.  This script then
-  1. checks this computer (Windows, Python, GPU, free disk space),
+  1. checks this computer (Windows, Python, GPU, NVIDIA driver, free disk space) before anything is downloaded,
   2. lets you pick one of the two models (on a GPU with less than 24 GB only the fastest model fits),
   3. downloads the engine zip from the release page and checks its SHA-256,
   4. makes a private Python environment in this folder and installs the package,
@@ -36,10 +36,10 @@ import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-QS_VERSION = "0.1.3"
-ENGINE_ZIP = "yasakani-0.1.3-win-x64.zip"
-ENGINE_URL = "https://github.com/yasakani-dev/yasakani/releases/download/v0.1.3/" + ENGINE_ZIP
-ENGINE_SHA256 = "d1afd966d033d21864823ee04c7da48d5fd8248482bfe94b2f25874030b53896"
+QS_VERSION = "0.1.4"
+ENGINE_ZIP = "yasakani-0.1.4-win-x64.zip"
+ENGINE_URL = "https://github.com/yasakani-dev/yasakani/releases/download/v0.1.4/" + ENGINE_ZIP
+ENGINE_SHA256 = "e8008e0cf5b825d7b905f7986104c5161d499981c51b43d4098001b13cbde245"
 REPO_URL = "https://github.com/yasakani-dev/yasakani"
 SUPPORT_URL = "https://camp-fire.jp/projects/992233/view"
 ENGINE_PORT, WEB_PORT = 8765, 8766      # `yasakani serve` and the browser chat; the next free ports are used if these are taken
@@ -64,6 +64,14 @@ MODEL_BYTES = {   # weights, draft model, its output head (the published files)
     "speed": (10311344128, 1164969472, 1411010584),
 }
 OVERHEAD_MIB = {"quality": 2300, "speed": 2100}
+
+# ---- the NVIDIA driver (0.1.4).  yskn.dll carries the CUDA 13.2 runtime (linked in, there is no separate runtime DLL).  Under CUDA minor
+# version compatibility a program built with any CUDA 13.x toolkit runs on a driver of the R580 branch or newer, which reports CUDA 13.0
+# or newer (NVIDIA, CUDA Toolkit release notes, "Minimum Required Driver Version for CUDA Minor Version Compatibility": 13.x >= 580;
+# https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).  With an older driver the engine stops at its first
+# CUDA call, which comes after the engine and the model have been downloaded, so the quickstart checks the driver in step 1.
+MIN_DRIVER = 580                  # the first number of nvidia-smi's driver_version: 580.88 or 616.92 (Windows), 580.65.06 (Linux)
+MIN_CUDA_DRIVER_API = 13000       # cuDriverGetVersion() of such a driver: 13000 = CUDA 13.0 (driver 616.92 gives 13040 = CUDA 13.4)
 
 T = {
     "banner": {
@@ -103,30 +111,30 @@ T = {
               "AMD and Intel GPUs and Macs are not supported.",
     },
     "no_gpu": {
-        "ja": "NVIDIA の GPU が見つかりません。YASAKANI は NVIDIA の RTX 30・40・50 シリーズ（GPU のメモリ 16 GB 以上）で動きます。\n"
+        "ja": "NVIDIA の GPU が見つかりません。YASAKANI は NVIDIA の RTX 30・40・50 シリーズ（GPU のメモリ 16 GB 以上）向けに作ってあります（確かめたのは RTX 5090 だけ）。\n"
               "AMD・Intel の GPU と Mac には対応していません。",
-        "en": "No NVIDIA GPU was found. YASAKANI runs on NVIDIA RTX 30, 40 and 50 series cards with 16 GB or more.\n"
+        "en": "No NVIDIA GPU was found. YASAKANI is built for NVIDIA RTX 30, 40 and 50 series cards with 16 GB or more (tested on the RTX 5090 only).\n"
               "AMD and Intel GPUs and Macs are not supported.",
     },
     "gpu_is": {
-        "ja": "GPU: {g}（計算能力 {c}、メモリ {t} MiB、ドライバー {d}）",
-        "en": "GPU: {g} (compute capability {c}, {t} MiB, driver {d})",
+        "ja": "GPU: {g}（計算能力 {c}、メモリ {t} MiB）",
+        "en": "GPU: {g} (compute capability {c}, {t} MiB)",
     },
     "gpu_pick": {"ja": "GPU が {n} 枚あります。使うのは {g} です。", "en": "There are {n} GPUs. Using {g}."},
     "gpu_tested": {"ja": "動作を確かめてある GPU です。", "en": "This is the GPU YASAKANI is tested on."},
     "gpu_other": {
         "ja": "この GPU は動くように作ってありますが、最適化も動作の確認もしていません（確かめたのは RTX 5090 だけです）。\n"
-              "速さは RTX 5090 より遅く、動作も保証しません。",
+              "速さは RTX 5090 より遅くなる見込みで、動作も保証しません。",
         "en": "YASAKANI is made to run on this GPU, but it has not been optimized or tested on it (only the RTX 5090 has been tested).\n"
-              "It is slower than on the RTX 5090, and its operation is not guaranteed.",
+              "It is expected to be slower than on the RTX 5090, and its operation is not guaranteed.",
     },
     "gpu_small": {
         "ja": "この GPU のメモリ（{t} MiB）では足りません。YASAKANI には GPU のメモリが 16 GB 以上要ります。",
         "en": "This GPU's memory ({t} MiB) is too small. YASAKANI needs a GPU with 16 GB or more.",
     },
     "gpu_old": {
-        "ja": "この GPU（計算能力 {c}）では動きません。動くのは RTX 30・40・50 シリーズ（計算能力 8.6 以上）で、メモリが 16 GB 以上のカードです。",
-        "en": "YASAKANI does not run on this GPU (compute capability {c}). It runs on RTX 30, 40 and 50 series cards "
+        "ja": "この GPU（計算能力 {c}）では動きません。動くように作ってあるのは RTX 30・40・50 シリーズ（計算能力 8.6 以上）で、メモリが 16 GB 以上のカードです。",
+        "en": "YASAKANI does not run on this GPU (compute capability {c}). It is built for RTX 30, 40 and 50 series cards "
               "(compute capability 8.6 or higher) with 16 GB or more.",
     },
     "gpu_nocode": {
@@ -134,6 +142,30 @@ T = {
               "（計算能力 8.6・8.9・12.x）です。",
         "en": "The engine of this version has no code for this GPU (compute capability {c}). It runs on RTX 30, 40 and 50 series "
               "cards (compute capability 8.6, 8.9 and 12.x).",
+    },
+    "driver_ok": {
+        "ja": "ドライバー: {d}（580 以上なので使えます）",
+        "en": "Driver: {d} (580 or newer: fine)",
+    },
+    "driver_old": {
+        "ja": "NVIDIA のドライバーが古いので止めました（今は {d}）。エンジンは CUDA 13 で作ってあり、ドライバー 580 以上が要ります。\n"
+              "新しいドライバーを入れてパソコンを再起動してから、もう一度 START.cmd をダブルクリックしてください。\n"
+              "  https://www.nvidia.com/ja-jp/drivers/\n"
+              "（エンジンとモデルのダウンロードの前に確かめています）",
+        "en": "Stopped: the NVIDIA driver is too old ({d}). The engine is built with CUDA 13 and needs driver 580 or newer.\n"
+              "Install a current driver, restart the PC and double-click START.cmd again.\n"
+              "  https://www.nvidia.com/en-us/drivers/\n"
+              "(This is checked before the engine and the model are downloaded.)",
+    },
+    "driver_unknown": {
+        "ja": "ドライバーの版を読み取れませんでした。エンジンにはドライバー 580 以上が要ります。このまま続けます。\n"
+              "後の点検で止まるときは、新しいドライバーを入れてください: https://www.nvidia.com/ja-jp/drivers/",
+        "en": "The driver version could not be read. The engine needs driver 580 or newer. Going on.\n"
+              "If the checks fail later, install a current driver: https://www.nvidia.com/en-us/drivers/",
+    },
+    "driver_skip": {
+        "ja": "ドライバーが 580 より古いようですが（{d}）、--skip-driver-check の指定があるので続けます。エンジンは恐らく起動できません。",
+        "en": "The driver looks older than 580 ({d}), but --skip-driver-check was given, so going on. The engine will most likely not start.",
     },
     "speed_only": {
         "ja": "GPU のメモリが 24 GB 未満なので、使えるのは最速モデルだけです（品質モデルは入りません）。",
@@ -216,13 +248,24 @@ T = {
         "en": "All checks passed. This computer reproduces the published reference output.",
     },
     "checks_other": {
-        "ja": "info と verify は合格です。selfcheck の出力は、RTX 5090 で作った基準と違いました。\n"
-              "ほかの GPU では、計算の細かな違いで途中から別の語になることがあります。この GPU での動作は確かめていません。\n"
-              "おかしな出力が続くときは、yasakani info の結果を添えて GitHub の Issues で知らせてください。このまま続けます。",
-        "en": "info and verify passed. The output of selfcheck differs from the reference, which was made on an RTX 5090.\n"
-              "On other GPUs small differences in the computation can make the output take another word part-way through. "
-              "Its operation on this GPU has not been checked.\n"
-              "If the output looks wrong, please report it on GitHub Issues with the output of yasakani info. Going on.",
+        "ja": "info と verify は合格です。selfcheck の出力は RTX 5090 で作った基準と途中から違いましたが、基準の文章を読ませたときの予測は"
+              "\nRTX 5090 と許容範囲内で一致し、この GPU 自身が生成した文章を読み直した結果も一致しました。"
+              "\nこの GPU 向けの最適化と動作の確認はしていません。おかしな出力が続くときは、yasakani info の結果を添えて"
+              "\nGitHub の Issues で知らせてください。このまま続けます。",
+        "en": "info and verify passed. The output of selfcheck differs part-way from the reference, which was made on an RTX 5090, but when\n"
+              "this GPU reads the reference text its predictions agree with the RTX 5090's within the tolerances, and it also agrees with\n"
+              "itself when it reads its own output again. YASAKANI has not been optimized or tested on this GPU. If the output looks wrong,\n"
+              "please report it on GitHub Issues with the output of yasakani info. Going on.",
+    },
+    "selfcheck_fail_other": {
+        "ja": "selfcheck が不合格でした（終了コード {rc}）。この GPU の予測が、RTX 5090 の基準と許容範囲を超えて違うか、この GPU 自身が"
+              "\n生成した文章と合いません（上の表示）。verify は合格なので、この GPU ではエンジンが正しく計算できていない恐れがあります。"
+              "\nyasakani info と selfcheck の表示を添えて GitHub の Issues で知らせてください: {r}/issues"
+              "\nそれでも使うときは、コマンドプロンプトで START.cmd --skip-checks と打つと点検を飛ばして進みます（出力が正しい保証はありません）。",
+        "en": "selfcheck failed (exit code {rc}). This GPU's predictions differ from the RTX 5090's reference by more than the tolerances, or\n"
+              "they do not agree with what this GPU generated itself (see above). verify passed, so the engine may not compute correctly\n"
+              "on this GPU. Please report it on GitHub Issues with the output of yasakani info and of selfcheck: {r}/issues\n"
+              "To use it anyway, type START.cmd --skip-checks in a command prompt: the checks are skipped (the output may be wrong).",
     },
     "menu": {
         "ja": "\n何をしますか？\n"
@@ -471,6 +514,54 @@ def estimate_context(free_mib, model):
         return with_head, False
     without = ctx(w + d)
     return (without, True) if without > with_head else (with_head, False)
+
+
+def driver_major(text):
+    """616 from nvidia-smi's driver_version "616.92" (580 from "580.65.06"); None when there is no usable value."""
+    m = re.fullmatch(r"\s*(\d+)(?:\.\d+)*\s*", text or "")
+    return int(m.group(1)) if m else None
+
+
+def cuda_driver_version(load=None):
+    """The newest CUDA version the installed driver supports, from cuDriverGetVersion() of nvcuda.dll (13040 = CUDA 13.4); None when it
+    cannot be read.  This only asks the driver library for a number: nothing is started on the GPU.  ``load`` (for the tests) returns
+    the library object."""
+    try:
+        import ctypes
+        if load is None:
+            lib = ctypes.WinDLL(os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "nvcuda.dll"))
+        else:
+            lib = load()
+        v = ctypes.c_int(0)
+        if lib.cuDriverGetVersion(ctypes.byref(v)) != 0 or v.value <= 0:
+            return None
+        return int(v.value)
+    except Exception:  # noqa: BLE001 - no driver library, not Windows, ...: not known
+        return None
+
+
+def driver_label(driver, cuda, lang="en"):
+    """What the messages show: the driver version and the newest CUDA version the driver supports (not the engine's), e.g.
+    "616.92, supports up to CUDA 13.4" / "616.92、CUDA 13.4 まで対応", "616.92", "supports up to CUDA 12.8" or "?"."""
+    parts = [driver] if driver else []
+    if cuda:
+        v = "%d.%d" % (cuda // 1000, (cuda % 1000) // 10)
+        parts.append(("CUDA %s まで対応" if lang == "ja" else "supports up to CUDA %s") % v)
+    return ("、" if lang == "ja" else ", ").join(parts) or "?"
+
+
+def driver_verdict(driver, cuda=None):
+    """"ok", "old" (older than the R580 branch, or a driver for CUDA 12 or older: the engine cannot start on it) or "unknown" (neither
+    nvidia-smi's driver_version nor cuDriverGetVersion() gave a number).  Each number that is known must be new enough."""
+    checks = []
+    major = driver_major(driver)
+    if major is not None:
+        checks.append(major >= MIN_DRIVER)
+    if cuda:
+        checks.append(cuda >= MIN_CUDA_DRIVER_API)
+    if not checks:
+        return "unknown"
+    return "ok" if all(checks) else "old"
 
 
 # ---------------------------------------------------------------------------------------------------------------- browser chat
@@ -806,6 +897,8 @@ def main(argv=None):
     ap.add_argument("--lang", choices=("ja", "en"), help="language of the messages (default: the Windows display language)")
     ap.add_argument("--yes", action="store_true", help="answer yes to questions")
     ap.add_argument("--skip-checks", action="store_true", help="do not run info / verify / selfcheck")
+    ap.add_argument("--skip-driver-check", action="store_true",
+                    help="do not stop when the NVIDIA driver is older than 580 (the engine will most likely not start)")
     a = ap.parse_args(argv)
     if a.web_test:
         a.action = "web"
@@ -849,8 +942,7 @@ def main(argv=None):
         ui.say("no_gpu")
         return 2
     for g in gpus:
-        ui.say("gpu_is", g=g["name"], c="%d.%d" % g["cc"] if g["cc"] else "?", t=g["total"] if g["total"] is not None else "?",
-               d=g["driver"] or "?")
+        ui.say("gpu_is", g=g["name"], c="%d.%d" % g["cc"] if g["cc"] else "?", t=g["total"] if g["total"] is not None else "?")
     gpu, verdict, pin = pick_gpu(gpus)
     if len(gpus) > 1:
         ui.say("gpu_pick", n=len(gpus), g=gpu["name"])
@@ -864,6 +956,17 @@ def main(argv=None):
         ui.say("gpu_small", t=gpu["total"])
         return 2
     ui.say("gpu_tested" if verdict == "tested" else "gpu_other")
+    cuda = cuda_driver_version()
+    dv, dlabel = driver_verdict(gpu["driver"], cuda), driver_label(gpu["driver"], cuda, ui.lang)
+    if dv == "old":                                     # before anything is downloaded: the engine cannot start on this driver
+        if not a.skip_driver_check:
+            ui.say("driver_old", d=dlabel)
+            return 2
+        ui.say("driver_skip", d=dlabel)
+    elif dv == "unknown":
+        ui.say("driver_unknown")
+    else:
+        ui.say("driver_ok", d=dlabel)
     quality_fits = gpu["total"] is None or gpu["total"] >= QUALITY_MIN_TOTAL_MIB
 
     # 2. model
@@ -1007,6 +1110,9 @@ def main(argv=None):
             rc = yk(cmd)
             if rc == 3 and cmd == "selfcheck" and verdict != "tested":
                 differs = True
+            elif rc == 1 and cmd == "selfcheck" and verdict != "tested":   # 0.1.4: the predictions or the self-consistency failed
+                ui.say("selfcheck_fail_other", rc=rc, r=REPO_URL)
+                return 6
             elif rc != 0:
                 ui.say("check_fail", c=cmd, rc=rc, r=REPO_URL)
                 return 6

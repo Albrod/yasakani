@@ -104,8 +104,8 @@ class EngineTests(unittest.TestCase):
         self.stub.push([1, 2, 3])
         self.e.generate([9, 9], 5, stop_ids=(EOS, 248044))
         cfg = self.stub.last_cfg()
-        self.assertEqual(len(cfg), 44)
-        self.assertEqual((cfg[20], cfg[21], cfg[41], cfg[42], cfg[43]), (EOS, 248044, 1, 1, IM_START))
+        self.assertEqual(len(cfg), 46)
+        self.assertEqual((cfg[20], cfg[21], cfg[41], cfg[42], cfg[43], cfg[44], cfg[45]), (EOS, 248044, 1, 1, IM_START, 64, 1))
 
     def test_state_settings_are_not_per_request(self):
         with self.assertRaises(ValueError):

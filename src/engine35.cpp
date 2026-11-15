@@ -25,9 +25,9 @@
 #include <string>
 #include "kvq_fast.hpp"
 #include "kvq_atxpk.hpp"
-#include "q35_atxpk.hpp"
-
-
+#endif
+#include "q35_atxpk.hpp"   // all modes: attn_block names Q35PkArgs and launch_q35_atx_pk
+#if YSKN_KVX_MODE == 3
 
 static std::vector<unsigned char> g_tb_host; static unsigned char* g_tb_rec = nullptr; static int g_tb_kb = 4;
 static bool tb_cap_packable(int ord, int kind) { return yskn::kvqaxpk_packable(g_tb_host.data(), g_tb_host.size(), ord, kind, g_tb_kb); }
@@ -219,6 +219,22 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   { const char* e = std::getenv("YSKN_Q35_XSUM"); if (e && e[0]) xsm_ = std::atoi(e) != 0;
     const char* p = std::getenv("YSKN_Q35_XSM_PART"); if (p && p[0]) xsm_part_ = std::atoi(p) != 0; }
   { const char* e = std::getenv("YSKN_Q35_PM"); if (e && std::atoi(e) > 0) PM_ = std::min(Pmax_, std::atoi(e)); }
+  { auto ienv = [](const char* k, int d) { const char* e = std::getenv(k); return (e && e[0]) ? std::atoi(e) : d; };
+    sh_max_ = std::max(0, std::min(64, ienv("YSKN_SNAP_SLOTS", 1)));
+    sh_step_ = std::max(1, ienv("YSKN_SNAP_STEP", 1024)); if (sh_step_ % PM_) sh_step_ = ((sh_step_ + PM_ - 1) / PM_) * PM_;   // on the prefill grid
+    sh_tail_ = std::max(0, ienv("YSKN_SNAP_TAIL", 4096));
+    sh_sparse_ = ienv("YSKN_SNAP_SPARSE", 65536); if (sh_sparse_ > 0 && sh_sparse_ % sh_step_) sh_sparse_ = ((sh_sparse_ + sh_step_ - 1) / sh_step_) * sh_step_;
+    sh_min_ = std::max(0, ienv("YSKN_SNAP_MIN", 8192));
+    int dev = 0, major = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+    wide_ok_ = major >= 12 || ienv("YSKN_COPY_WIDE_ANYARCH", 0) != 0;   // wide copy passes were only measured on compute capability 12.x
+    if (ienv("YSKN_COPY_WIDE_OFF", 0)) wide_ok_ = false;
+    xw_arch_ = major >= 12 ? 1 : 0;                                   // the exact-sum wide kernels were only checked on 12.x
+    xw_v32_ = ienv("YSKN_Q35_XW_V32", xw_v32_); xw_v64_ = ienv("YSKN_Q35_XW_V64", xw_v64_);
+    xw_wpc_ = std::max(1, std::min(8, ienv("YSKN_Q35_XW_WPC", xw_wpc_))); xw_nws_ = std::max(0, std::min(64, ienv("YSKN_Q35_XW_NWS", xw_nws_)));
+    xw_gamma_ = std::max(0, ienv("YSKN_Q35_XW_GAMMA", xw_gamma_));
+    xw_head_ = ienv("YSKN_Q35_XW_HEAD", xw_head_) != 0;
+    if (!xsm_ || xsm_part_) xw_arch_ = 0;                             // exact sums with atomic int64 partials only
+    xw_rows_ = (xw_arch_ && ienv("YSKN_Q35_XW", 1) != 0) ? 64 : 16; }
   m_.c.open(path); m_.cfg = m_.c.model; const ModelDesc& c = m_.cfg;
   if (c.arch != "qwen3_5") throw std::runtime_error("Engine35: arch " + c.arch);
   if (c.hidden != Q35_H || c.heads != Q35_NH || c.kv_heads != Q35_KVH || c.head_dim != Q35_HD || c.ffn % 512)
@@ -391,6 +407,7 @@ Engine35::~Engine35() {
   for (auto& kv : rgraph_) cudaGraphExecDestroy(kv.second);
   if (h_pin_) cudaFreeHost(h_pin_);
   if (h_pinf_) cudaFreeHost(h_pinf_);
+  snap_free();
   if(nb_st_){cudaStreamSynchronize(nb_st_);cudaStreamDestroy(nb_st_);}
   for(int i=0;i<2;++i){if(nb_e1_[i])cudaEventDestroy(nb_e1_[i]);if(nb_e2_[i])cudaEventDestroy(nb_e2_[i]);}
   devmem_release(this);                                                 
@@ -411,17 +428,20 @@ void Engine35::reset() {
 void Engine35::gemv(std::initializer_list<DevTensor*> ts, int M) { gemv(ts, M, false); }
 void Engine35::gemv(std::initializer_list<DevTensor*> ts, int M, bool normed, const GemvLaunch* fin) {
   GemvLaunch P{}; P.M = M; P.stage_bytes = 0;
+  const bool xw = xsmc_ && !xsm_part_ && M > 16 && M <= xw_rows_;   // exact-sum pass of 17..64 rows (int64 partials, mode 0)
   for (DevTensor* t : ts) { const int ctas = (t->dev.N / 64 + GEMV_WARPS - 1) / GEMV_WARPS;
     P.seg[P.n_seg] = GemvSeg{t->dev, pt(*t, M), P.n_ctas};
     if (xsmc_ && !xsm_part_ && M >= 4 && t->nw_big > 0) P.seg[P.n_seg].t.n_workers = t->nw_big;   
+    if (xw) P.seg[P.n_seg].t.n_workers = xw_nw(*t, M);
     P.max_workers = std::max(P.max_workers, P.seg[P.n_seg].t.n_workers); P.n_seg++; P.n_ctas += ctas; }
   P.qx = in2_ ? qx2_ : qx_; P.alpha = in2_ ? alpha2_ : alpha_; in2_ = false;   
   P.lo = lo_now_ ? 1 : 0;                                                
   if (fin) { P.f_mode = fin->f_mode; P.f_tau = fin->f_tau; P.f_sg_out = fin->f_sg_out; P.f_h = fin->f_h; P.f_w = fin->f_w; P.f_sg_in = fin->f_sg_in;
              P.f_qx = fin->f_qx; P.f_alpha = fin->f_alpha; P.f_S = fin->f_S; P.f_xu = fin->f_xu; P.f_cnt = fin->f_cnt; }
   if (xsmc_) { P.xsum = 1; P.us_out = us_; P.xsm_part = xsm_part_;    
-    if (normed && M > 16) { P.xsm_S = S_; P.xsm_sst = Q35_SST; P.xsm_nb = H_ / 512; P.xsm_n = (float)H_; P.xsm_eps = eps_; }
+    if (normed && M > xw_rows_) { P.xsm_S = S_; P.xsm_sst = Q35_SST; P.xsm_nb = H_ / 512; P.xsm_n = (float)H_; P.xsm_eps = eps_; }
     if (xsm_part_ && M <= 16) for (DevTensor* t : ts) if (t->dev.n_workers > 24) throw std::runtime_error("Engine35: XSUM partials need <= 24 workers"); }
+  if (xw) { gemv_xw(P); return; }
   if ((pfa_ && M > Mmax_) || (xsmc_ && M > 16)) {                       
     if (!pfa_eligible(P)) throw std::runtime_error("Engine35: GEMM launch not PFA-eligible");
     if (launch_q35_g6(P, g6_, smp_p_.pm, st_)) return;
@@ -436,6 +456,118 @@ void Engine35::gemv(std::initializer_list<DevTensor*> ts, int M, bool normed, co
   launch_lnord(P, st_);
   if (pf2_live_) cudaEventRecord(ev_g_, st_);
   if (xsmc_ && !xsm_part_ && M <= 16 && !P.f_mode) chk_after(ts, M, P.qx, P.alpha);   
+}
+int Engine35::xw_nw(const DevTensor& t, int M) const {
+  const int G = t.dev.Kc / 512, base = t.nw_big > 0 ? t.nw_big : t.dev.n_workers;
+  return std::max(1, std::min(G, (base * std::max(1, xw_nws_) + M - 1) / M));
+}
+// The K split of an exact-sum wide GEMV launch (one worker count for its segments): the count with the shortest estimated time when
+// the CTAs (worker 0 first, as the grid is dispatched) go greedily to `slots` places, the work of a CTA being its 512-column groups,
+// plus xw_gamma_ / 100 group times per wave of CTAs.  Any split gives the same int64 sums; this only balances the GPU.
+int Engine35::xw_pick(const GemvLaunch& P, int cols_per_cta, int slots) {
+  const int G = P.seg[0].t.Kc / 512;
+  std::vector<int> key{G, cols_per_cta, slots, xw_gamma_};
+  std::vector<int> ctas;
+  for (int s = 0; s < P.n_seg; ++s) { const int c = (P.seg[s].t.N + cols_per_cta - 1) / cols_per_cta; ctas.push_back(c); key.push_back(c); }
+  const auto it = xw_pick_cache_.find(key); if (it != xw_pick_cache_.end()) return it->second;
+  int best = 1; double best_t = 1e300;
+  for (int nw = 1; nw <= G; ++nw) {
+    std::vector<double> h((size_t)std::max(1, slots), 0.0);              // finish times of the places (a min-heap)
+    auto later = [](double a, double b) { return a > b; };
+    long long n = 0;
+    for (int w = 0; w < nw; ++w) { const double work = (double)((G - w + nw - 1) / nw);
+      for (int c : ctas) for (int i = 0; i < c; ++i) { std::pop_heap(h.begin(), h.end(), later); h.back() += work; std::push_heap(h.begin(), h.end(), later); ++n; } }
+    const double span = *std::max_element(h.begin(), h.end()), waves = (double)((n + slots - 1) / std::max(1, slots));
+    const double t = span + xw_gamma_ / 100.0 * waves;
+    if (t < best_t - 1e-9) { best_t = t; best = nw; }
+  }
+  xw_pick_cache_.emplace(key, best);
+  return best;
+}
+// One exact-sum GEMV of 17..64 rows; P has xsum set and the worker counts of its segments.  Any kernel and any K split give the
+// same int64 sums.
+void Engine35::gemv_xw(GemvLaunch& P) {
+  P.xsm_S = nullptr;
+  if (P.M < 17 || P.M > 64 || !P.xsum || P.xsm_part || P.lo || !P.us_out) throw std::runtime_error("Engine35: exact-sum wide GEMV: bad launch");
+  const int v = P.M <= 32 ? xw_v32_ : xw_v64_;
+  if (xw_nws_ == 0) {                                                   // K split for this launch shape
+    const int nw = v == 1 ? xw_pick(P, 64, 2 * m_.sm_count) : xw_pick(P, 16 * xw_wpc_, (xw_wpc_ <= 4 ? 2 : 1) * m_.sm_count);
+    P.max_workers = 0;
+    for (int s = 0; s < P.n_seg; ++s) { P.seg[s].t.n_workers = std::min(nw, P.seg[s].t.Kc / 512); P.max_workers = std::max(P.max_workers, P.seg[s].t.n_workers); }
+  }
+  if (v == 1) {                                                         // the 32-row GEMV (twice for 33..64 rows: rows 0..31, 32..)
+    for (int r0 = 0; r0 < P.M; r0 += 32) {
+      GemvLaunch Q = P; Q.M = std::min(32, P.M - r0);
+      if (r0) { for (int s = 0; s < Q.n_seg; ++s) Q.seg[s].part = reinterpret_cast<float*>(reinterpret_cast<long long*>(P.seg[s].part) + (size_t)r0 * P.seg[s].t.N);
+                Q.qx = P.qx + (size_t)r0 * P.seg[0].t.Kc; Q.alpha = P.alpha + (size_t)r0 * (P.seg[0].t.Kc / 512); Q.us_out = P.us_out + r0; }
+      if (Q.M <= 16) { if (!lnord_eligible(Q)) throw std::runtime_error("Engine35: exact-sum GEMV tail not LNORD-eligible"); launch_lnord(Q, st_); }   // a short tail
+      else { if (!lnord_xw_eligible(Q)) throw std::runtime_error("Engine35: exact-sum wide GEMV not LNORD-eligible"); launch_lnord_xw(Q, st_); }
+    }
+    return; }
+  if (!pfa_eligible(P)) throw std::runtime_error("Engine35: exact-sum wide GEMV not PFA-eligible");
+  launch_pfa_xw(P, xw_wpc_, st_);
+}
+// Test hook: the exact-sum wide GEMV of tensor `name` ("L<l>.<field>" or "head") for M rows against 16-row launches of the same
+// inputs (random int8 rows, scales with zeros and wide ranges).  variant 0 = the current setting, 1 = the staged-input kernel,
+// 2 = the 32/64-row GEMV.  out4 = {int64 sums that differ, row scales that differ, first differing sum (or -1), sums compared}.
+int Engine35::test_xsum(const std::string& name, int M, unsigned seed, int variant, long long* out4) {
+  if (M < 17 || M > 64 || !xsm_ || xsm_part_) throw std::runtime_error("test_xsum: M must be 17..64 (exact-sum mode)");
+  DevTensor* t = name == "head" ? &head_ : tensor_by_name(name);
+  const int N = t->dev.N, Kc = t->dev.Kc, G = Kc / 512;
+  replay_fence(); cudaStreamSynchronize(st_);
+  std::vector<int8_t> hq((size_t)M * Kc); std::vector<float> ha((size_t)M * G);
+  unsigned long long r = 0x9E3779B97F4A7C15ull ^ seed;
+  auto nx = [&]() { r ^= r << 13; r ^= r >> 7; r ^= r << 17; return r; };
+  for (int i = 0; i < M; ++i) {
+    for (int k = 0; k < Kc; ++k) { int v = (int)(nx() % 255) - 127; hq[(size_t)i * Kc + k] = (int8_t)v; }
+    for (int g = 0; g < G; ++g) { const double u = (double)(nx() % 1000000) / 1e6; ha[(size_t)i * G + g] = (float)(1e-3 + u); }
+    if (i % 5 == 1) for (int k = 0; k < 512; ++k) hq[(size_t)i * Kc + (size_t)((i * 7) % G) * 512 + k] = 0;   // a zero group
+    if (i % 7 == 2) ha[(size_t)i * G + (i % G)] = 3.0e4f;                                                       // one large scale
+    if (i % 11 == 3) ha[(size_t)i * G + ((i + 3) % G)] = 0.f;                                                   // a zero scale
+    if (i % 13 == 4) ha[(size_t)i * G + ((i + 5) % G)] = 1.0e-30f;                                              // a tiny scale
+    if (i == M - 1 && M > 20) for (int g = 0; g < G; ++g) ha[(size_t)i * G + g] = 0.f;                          // a row of zero scales
+    if (i % 3 == 0) for (int k = 0; k < 64; ++k) hq[(size_t)i * Kc + k] = (int8_t)((k & 1) ? 127 : -127);       // extreme values
+  }
+  int8_t* dq = nullptr; float* da = nullptr; long long *pa = nullptr, *pb = nullptr; float *ua = nullptr, *ub = nullptr;
+  const size_t nsum = (size_t)M * N;
+  if (cudaMalloc(&dq, hq.size()) != cudaSuccess || cudaMalloc(&da, ha.size() * 4) != cudaSuccess || cudaMalloc(&pa, nsum * 8) != cudaSuccess ||
+      cudaMalloc(&pb, nsum * 8) != cudaSuccess || cudaMalloc(&ua, 64 * 4) != cudaSuccess || cudaMalloc(&ub, 64 * 4) != cudaSuccess) {
+    cudaFree(dq); cudaFree(da); cudaFree(pa); cudaFree(pb); cudaFree(ua); cudaFree(ub); cudaGetLastError(); throw std::runtime_error("test_xsum: out of memory"); }
+  cudaMemcpy(dq, hq.data(), hq.size(), cudaMemcpyHostToDevice); cudaMemcpy(da, ha.data(), ha.size() * 4, cudaMemcpyHostToDevice);
+  cudaMemsetAsync(pa, 0, nsum * 8, st_); cudaMemsetAsync(pb, 0, nsum * 8, st_); cudaMemsetAsync(ua, 0xff, 64 * 4, st_); cudaMemsetAsync(ub, 0xfe, 64 * 4, st_);
+  cudaDeviceSynchronize();                                                // st_ does not wait for the legacy stream
+  for (int c = 0; c < M; c += 16) {                                       // reference: the 16-row launches of gemv()
+    const int rows = std::min(16, M - c);
+    GemvLaunch P{}; P.M = rows; P.stage_bytes = 0; P.seg[0] = GemvSeg{t->dev, reinterpret_cast<float*>(pa + (size_t)c * N), 0}; P.n_seg = 1;
+    if (rows >= 4 && t->nw_big > 0) P.seg[0].t.n_workers = t->nw_big;
+    P.max_workers = P.seg[0].t.n_workers; P.n_ctas = (N / 64 + GEMV_WARPS - 1) / GEMV_WARPS;
+    P.qx = dq + (size_t)c * Kc; P.alpha = da + (size_t)c * G; P.xsum = 1; P.us_out = ua + c;
+    if (!lnord_eligible(P)) throw std::runtime_error("test_xsum: reference launch not eligible");
+    launch_lnord(P, st_);
+  }
+  const int sv32 = xw_v32_, sv64 = xw_v64_;
+  if (variant == 1) xw_v32_ = xw_v64_ = 0; else if (variant == 2) xw_v32_ = xw_v64_ = 1;
+  try {
+    GemvLaunch P{}; P.M = M; P.stage_bytes = 0; P.seg[0] = GemvSeg{t->dev, reinterpret_cast<float*>(pb), 0}; P.n_seg = 1;
+    P.seg[0].t.n_workers = xw_nw(*t, M); P.max_workers = P.seg[0].t.n_workers; P.n_ctas = (N / 64 + GEMV_WARPS - 1) / GEMV_WARPS;
+    P.qx = dq; P.alpha = da; P.xsum = 1; P.us_out = ub;
+    gemv_xw(P);
+  } catch (...) { xw_v32_ = sv32; xw_v64_ = sv64; cudaFree(dq); cudaFree(da); cudaFree(pa); cudaFree(pb); cudaFree(ua); cudaFree(ub); throw; }
+  xw_v32_ = sv32; xw_v64_ = sv64;
+  cudaStreamSynchronize(st_);
+  const cudaError_t e = cudaGetLastError();
+  std::vector<long long> A(nsum), B(nsum); std::vector<float> UA(64), UB(64);
+  cudaMemcpy(A.data(), pa, nsum * 8, cudaMemcpyDeviceToHost); cudaMemcpy(B.data(), pb, nsum * 8, cudaMemcpyDeviceToHost);
+  cudaMemcpy(UA.data(), ua, 64 * 4, cudaMemcpyDeviceToHost); cudaMemcpy(UB.data(), ub, 64 * 4, cudaMemcpyDeviceToHost);
+  cudaFree(dq); cudaFree(da); cudaFree(pa); cudaFree(pb); cudaFree(ua); cudaFree(ub);
+  if (e != cudaSuccess) throw std::runtime_error(std::string("test_xsum: ") + cudaGetErrorString(e));
+  long long nd = 0, first = -1, nu = 0;
+  for (size_t i = 0; i < nsum; ++i) if (A[i] != B[i]) { if (first < 0) first = (long long)i; ++nd; }
+  for (int i = 0; i < M; ++i) if (std::memcmp(&UA[(size_t)i], &UB[(size_t)i], 4) != 0) {
+    if (nu < 4 && std::getenv("YSKN_TEST_XSUM_LOG")) std::fprintf(stderr, "[test_xsum] %s M=%d row %d scale %a vs %a\n", name.c_str(), M, i, UA[(size_t)i], UB[(size_t)i]);
+    ++nu; }
+  out4[0] = nd; out4[1] = nu; out4[2] = first; out4[3] = (long long)nsum;
+  return nd == 0 && nu == 0 ? 0 : 1;
 }
 void Engine35::chk_after(std::initializer_list<DevTensor*> ts, int M, const int8_t* qx, const float* alpha) {
   if (!chk_on_ || chk_.empty()) return;
@@ -778,7 +910,7 @@ void Engine35::layer(int l, int M, int n_commit) {
   Q35Layer& Y = L_[l]; const bool G = !(kskip_ & 16), S = !(kskip_ & 32);
   if (!Y.full) {
     uint16_t* const pmx = M > Mmax_ ? pmix_big_ : Y.pmix; float* const pab = M > Mmax_ ? pab_big_ : Y.pab;
-    const bool fuse_ab = M <= 32;                                          
+    const bool fuse_ab = M <= 32 || (M <= xw_rows_ && xsmc_);             // exact-sum wide passes: the gates in the mix launch up to 64 rows
     Q35AbArgs AB{xn_, Y.wb, Y.wa, M, pab};
     if (xsmc_) { AB.S = S_; AB.eps = eps_; }                               
     if (S && !ks(256) && !fuse_ab) launch_q35_ab(AB, st_);
@@ -830,6 +962,28 @@ void Engine35::head_slice(int row0, int rows, bool advance, bool topk, bool nll)
   if (topk && !(smp_ && q35_smp2_on())) { TopkArgs TA{logits_, V_, tk_val_, tk_idx_, top_val_ + (size_t)row0 * 8, top_idx_ + (size_t)row0 * 8, rows}; TA.cnt = tk_cnt_; launch_topk8(TA, st_); }
   if (nll) launch_nll(NllArgs{logits_, V_, d_target8_ + row0, d_nll8_ + row0, blk_max_, blk_sum_, rows}, st_);
 }
+// The output layer of a pass of 17..64 rows: one exact-sum GEMV of all rows, then the same per-16-row argmax / sampling / top-8 / NLL
+// launches as head_slice, reading rows row0.. of the int64 partials, us_ and S_.
+void Engine35::head_wide(int M, bool topk, bool nll) {
+  GemvLaunch P{}; P.M = M; P.stage_bytes = 0; P.seg[0] = GemvSeg{head_.dev, head_.part, 0}; P.n_seg = 1;
+  P.seg[0].t.n_workers = xw_nw(head_, M); P.max_workers = P.seg[0].t.n_workers;
+  P.n_ctas = (head_.dev.N / 64 + GEMV_WARPS - 1) / GEMV_WARPS; P.qx = qx_; P.alpha = alpha_; P.xsum = 1; P.us_out = us_;
+  gemv_xw(P);
+  for (int row0 = 0; row0 < M; row0 += HM_) {
+    const int rows = std::min(HM_, M - row0);
+    ArgmaxArgs AA{head_.part, head_.tau, V_, logits_, d_next8_ + row0, blk_val_, blk_idx_, head_.dev.n_workers, M, row0, rows}; AA.cnt = am_cnt_;
+    AA.us = us_; AA.rr = S_; AA.xsm_eps = eps_; AA.xsm_nb = H_ / 512; AA.xsm_stride = Q35_SST; AA.xsm_n = (float)H_;
+    launch_argmax(AA, st_);
+    if (smp_) {
+      Q35SmpArgs KA{logits_, V_, rows, row0, d_next8_ + row0, d_pos_, wk_now_ ? d_wk_ : nullptr, d_smp_, kj_val_, kj_idx_, kj_cnt_};
+      if (topk && q35_smp2_on()) { KA.top_val = top_val_ + (size_t)row0 * 8; KA.top_idx = top_idx_ + (size_t)row0 * 8; }
+      if (k20_on_ && q35_smp2_on()) { KA.topk_val = d_k20v_ + (size_t)row0 * Q35_SMP_K; KA.topk_idx = d_k20i_ + (size_t)row0 * Q35_SMP_K; }
+      launch_q35_smp(KA, st_);
+    }
+    if (topk && !(smp_ && q35_smp2_on())) { TopkArgs TA{logits_, V_, tk_val_, tk_idx_, top_val_ + (size_t)row0 * 8, top_idx_ + (size_t)row0 * 8, rows}; TA.cnt = tk_cnt_; launch_topk8(TA, st_); }
+    if (nll) launch_nll(NllArgs{logits_, V_, d_target8_ + row0, d_nll8_ + row0, blk_max_, blk_sum_, rows}, st_);
+  }
+}
 void Engine35::pass_body(int M, bool commit, int upto, int head_mode, bool topk, bool nll, bool advance) {
   g_pdl_rows = M; xsmc_ = xsm_ != 0; wk_now_ = wk_pass(M, commit, head_mode);
   pf2_live_ = l2pf2_mb_ > 0 && xsmc_ && M <= 16; if (pf2_live_) cudaEventRecord(ev_g_, st_);   
@@ -843,25 +997,32 @@ void Engine35::pass_body(int M, bool commit, int upto, int head_mode, bool topk,
   }
   g_pdl_rows = std::min(M, HM_);
   if (head_mode == HEAD_LAST) head_slice(M - 1, 1, advance, topk, nll);
-  else if (head_mode == HEAD_ALL) for (int s = 0; s < M; s += HM_) head_slice(s, std::min(HM_, M - s), false, topk, nll);
+  else if (head_mode == HEAD_ALL) {
+    // head_wide writes M x V int64 sums into head_.part (n_workers x 16 x V floats): it fits with 8 or more workers for 64 rows
+    if (M > HM_ && M <= xw_rows_ && xw_head_ && xsmc_ && !in2_ && !lo_now_
+        && (size_t)head_.dev.n_workers * HM_ * 4 >= (size_t)M * 8) head_wide(M, topk, nll);
+    else for (int s = 0; s < M; s += HM_) head_slice(s, std::min(HM_, M - s), false, topk, nll); }
   if (xsmc_ && mtp_.on && upto == nlayers_ && !ks(32)) { g_pdl_rows = M; launch_q35_xsm_xn(h_, S_, fnorm_, eps_, M, xn_, st_); }   
   if (pf2_live_) { cudaEventRecord(ev_pf_, st3_); cudaStreamWaitEvent(st_, ev_pf_, 0); pf2_live_ = false; }   
   lo_now_ = false;
   xsmc_ = false; wk_now_ = false; in2_ = false;
 }
 void Engine35::replay_commit(int rows) {
+  const bool keep = last_keep_ != 0;                                    // the conv outputs of the last pass are in Y.tq.. (rows <= 16)
+  if (keep && rows > HM_) throw std::runtime_error("replay_commit: kept conv outputs cover 16 rows");
+  if (rows > Mmax_) throw std::runtime_error("replay_commit: rows out of range");
   auto body = [&] {
     g_pdl_rows = rows;
     for (Q35Layer& Y : L_) {
       if (Y.full) continue;
-      if (opt_kconv_) {                                               
+      if (keep) {                                               
         launch_q35_state(Q35StateArgs{Y.tq, Y.tk, Y.tv, Y.tbeta, Y.tg, Y.S, rows, rows, core_, Y.pmix, Y.hist}, st_); continue; }
       launch_q35_conv(Q35ConvArgs{Y.pmix, Y.conv, Y.hist, Y.pab, Y.A_log, Y.dt_bias, rows, rows, gq_, gk_, gv_, gbeta_, gg_}, st_);
       launch_q35_state(Q35StateArgs{gq_, gk_, gv_, gbeta_, gg_, Y.S, rows, rows, core_, Y.pmix, Y.hist}, st_);
     }
   };
   if (!opt_replay_graph_) { replay_fence(); body(); return; }
-  const int rkey = rows + (opt_kconv_ ? 1000 : 0);
+  const int rkey = rows + (keep ? 1000 : 0);
   auto it = rgraph_.find(rkey);                                         
   if (it == rgraph_.end()) {
     cudaGraph_t g; cudaGraphExec_t ge; cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal); body(); cudaStreamEndCapture(st_, &g);
@@ -955,6 +1116,13 @@ void Engine35::set_opt(int key, int value) {
   else if (key == 21) { if (value != kz_) drop_pass_graphs(); kz_ = value; apply_kz(); }   
   else if (key == 29) { if (value < 0 || value > 1000) throw std::runtime_error("set_opt 29: min-p x 1000 must be 0..1000");   
                        smp_p_.min_p = value / 1000.0; cudaStreamSynchronize(st_); cudaMemcpy(d_smp_, &smp_p_, sizeof(Q35SmpParams), cudaMemcpyHostToDevice); }
+  else if (key == 31) { const int r = (value && xw_arch_) ? 64 : 16; if (r != xw_rows_) drop_pass_graphs(); xw_rows_ = r; }   // exact-sum wide passes
+  else if (key == 32) { if (value != xw_v32_) drop_pass_graphs(); xw_v32_ = value ? 1 : 0; }
+  else if (key == 33) { if (value != xw_v64_) drop_pass_graphs(); xw_v64_ = value ? 1 : 0; }
+  else if (key == 34) { const int w = std::max(1, std::min(8, value)); if (w != xw_wpc_) drop_pass_graphs(); xw_wpc_ = w; }
+  else if (key == 35) { const int w = std::max(0, std::min(64, value)); if (w != xw_nws_) drop_pass_graphs(); xw_nws_ = w; }
+  else if (key == 37) { const int g = std::max(0, value); if (g != xw_gamma_) drop_pass_graphs(); xw_gamma_ = g; }
+  else if (key == 36) { if ((value != 0) != (xw_head_ != 0)) drop_pass_graphs(); xw_head_ = value != 0; }
   else if (key == 20) bdr_.cpl_pm = value;                            
   else if (key == 16) {                                                
     if (value != 2 && value != 3) throw std::runtime_error("set_opt: SMP version must be 2 or 3");
@@ -973,6 +1141,7 @@ void Engine35::set_opt(int key, int value) {
 
 void Engine35::run_pass(int M, bool commit, int head_mode, bool topk, bool nll, bool use_graph) {
   replay_fence(); ++sh_epoch_;
+  if (!commit) last_keep_ = (opt_kconv_ && M <= HM_) ? 1 : 0;          // what layer() does; the commit replay must match it
   if (!use_graph) { pass_body(M, commit, nlayers_, head_mode, topk, nll, false); return; }
   const int key = M * 64 + (commit ? 32 : 0) + head_mode * 4 + (topk ? 2 : 0) + (nll ? 1 : 0) + (opt_kconv_ ? (1 << 30) : 0)
                   + (wk_pass(M, commit, head_mode) ? (1 << 29) : 0) + (atx_ ? (1 << 28) : 0) + (smp_ ? (1 << 27) : 0); auto it = pgraph_.find(key);
@@ -1307,7 +1476,7 @@ void Engine35::nll(const int32_t* ids, int n, float* out) {
   last_M_ = 0; pre_committed_ = false;
 }
 void Engine35::verify(const int32_t* ids, int M, int use_graph, int32_t* out_argmax, int32_t* top_ids, float* top_vals, const int32_t* targets, float* out_nll) {
-  if (M < 1 || M > HM_) throw std::runtime_error("verify: M must be 1..16");
+  if (M < 1 || M > kVerifyMax || (M > HM_ && (!wide_ok_ || mtp_.on))) throw std::runtime_error("verify: M must be 1..16 (1..64 where wide passes are on)");
   if (pos_ + M > max_ctx_) throw std::runtime_error("verify: context overflow");
   upload_rows(ids, M, targets);
   const bool c1 = M == 1 && (opt_single_commit_ == 2 || (opt_single_commit_ == 1 && specx_scope_));   
@@ -1349,7 +1518,8 @@ float Engine35::time_verify(int M, int mask, int iters) {
   if (M < 1 || M > Pmax_ || pos_ + M > max_ctx_) throw std::runtime_error("time_verify: bad M");
   for (int i = 0; i < M; ++i) h_pin_[PIN_IDS + i] = 0;
   cudaMemcpyAsync(d_toks_, h_pin_ + PIN_IDS, (size_t)M * 4, cudaMemcpyHostToDevice, st_); launch_set_int(d_pos_, pos_, st_);
-  const int hm = M <= HM_ ? HEAD_ALL : HEAD_LAST; const bool topk = (mask & 1) != 0 && M <= HM_;
+  const bool all = M <= HM_ || ((mask & 2) && M <= kVerifyMax);         // mask bit 2: every row through the output layer (M <= 64)
+  const int hm = all ? HEAD_ALL : HEAD_LAST; const bool topk = (mask & 1) != 0 && all;
   kskip_ = mask & ~15; const int key = M * 64 + hm * 4 + (topk ? 2 : 0) + 100000 * (kskip_ >> 4) + (opt_kconv_ ? (1 << 30) : 0)
                                        + (wk_pass(M, false, hm) ? (1 << 29) : 0) + (atx_ ? (1 << 28) : 0);
   if (kskip_ && !pgraph_.count(key)) {                                  
@@ -1519,7 +1689,7 @@ void Engine35::draft_steps(int steps, int use_graph) {
   }
 }
 void Engine35::set_verify_tokens(const int32_t* ids, int first_row, int n) {
-  if (first_row < 0 || n < 0 || first_row + n > HM_) throw std::runtime_error("set_verify_tokens: rows out of range");
+  if (first_row < 0 || n < 0 || first_row + n > kVerifyMax) throw std::runtime_error("set_verify_tokens: rows out of range");
   int32_t* stg = h_pin_ + PIN_VT + 64 * (vt_slot_++ & 3);                  
   std::memcpy(stg, ids, (size_t)n * 4); cudaMemcpyAsync(d_toks_ + first_row, stg, (size_t)n * 4, cudaMemcpyHostToDevice, st_);
 }
@@ -1557,40 +1727,105 @@ static uint64_t fnv_words(uint64_t h, const std::vector<uint8_t>& b) {
 
 
 
-void Engine35::snap_save(const int32_t* ids, int n) {
-  if (n != pos_ || n < 1) throw std::runtime_error("snap_save: the ids must cover positions 0..pos-1");
-  replay_fence();
+// Prompt snapshots: a few saved states in pinned host memory.  All slots are prefixes of sh_seq_, and the KV rows of their positions
+// stay on the GPU (every later write is at a position >= the slot it continues from; slots after a divergence are trimmed first).
+bool Engine35::snap_alloc(SnapSlot& sl) {
   constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV, RB = (size_t)8 * 2048 * 128;
   int ng = 0; for (const Q35Layer& Y : L_) if (!Y.full) ++ng;
-  if (!sh_S_) { DevMemScope dm_scope(this);                          
-    auto pin = [](auto** p, size_t bytes) { if (cudaMallocHost(p, bytes) != cudaSuccess) throw std::runtime_error("snap_save: out of pinned memory"); };
-    pin(&sh_S_, ng * SB * 4); pin(&sh_hist_, ng * HB * 2);
-    if (bdr_.on) pin(&sh_ring_, 10 * RB * 2);
-    if (mtp_.on) pin(&sh_pend_, (size_t)H_ * 2); }
-  if ((bdr_.on && !sh_ring_) || (mtp_.on && !sh_pend_)) throw std::runtime_error("snap_save: drafter loaded after the first snapshot");
+  DevMemScope dm_scope(this);
+  auto pin = [](auto** p, size_t bytes) { if (*p) return true; if (cudaMallocHost(p, bytes) != cudaSuccess) { *p = nullptr; cudaGetLastError(); return false; } return true; };
+  bool ok = pin(&sl.S, ng * SB * 4) && pin(&sl.hist, ng * HB * 2);
+  if (ok && bdr_.on) ok = pin(&sl.ring, 10 * RB * 2);
+  if (ok && mtp_.on) ok = pin(&sl.pend, (size_t)H_ * 2);
+  return ok;
+}
+void Engine35::snap_free() {
+  for (SnapSlot& sl : sh_slots_) { if (sl.S) cudaFreeHost(sl.S); if (sl.hist) cudaFreeHost(sl.hist); if (sl.ring) cudaFreeHost(sl.ring); if (sl.pend) cudaFreeHost(sl.pend); sl = SnapSlot{}; }
+  sh_slots_.clear();
+}
+int Engine35::snap_best(int L) const {
+  int b = -1;
+  for (int i = 0; i < (int)sh_slots_.size(); ++i) { const int p = sh_slots_[(size_t)i].pos; if (p > 0 && p <= L && (b < 0 || p > sh_slots_[(size_t)b].pos)) b = i; }
+  return b;
+}
+void Engine35::snap_trim(int L) { for (SnapSlot& sl : sh_slots_) if (sl.pos > L) sl.pos = -1; }
+bool Engine35::snap_save_at(int n) {
+  if (n != pos_ || n < 1 || n > (int)sh_seq_.size()) throw std::runtime_error("snap_save: the slot must be at the current position, inside the prompt ids");
+  if (sh_max_ < 1) return false;
+  replay_fence();
+  int pick = -1;
+  for (int i = 0; i < (int)sh_slots_.size(); ++i) if (sh_slots_[(size_t)i].pos == n) pick = i;          // same position: refresh it
+  if (pick < 0) for (int i = 0; i < (int)sh_slots_.size(); ++i) if (sh_slots_[(size_t)i].pos < 0 && sh_slots_[(size_t)i].S) { pick = i; break; }
+  if (pick < 0 && (int)sh_slots_.size() < sh_max_) {
+    SnapSlot sl; if (snap_alloc(sl)) { sh_slots_.push_back(sl); pick = (int)sh_slots_.size() - 1; }
+    else {                                                              // not enough pinned host memory: keep the slots there are
+      if (sl.S) cudaFreeHost(sl.S); if (sl.hist) cudaFreeHost(sl.hist); if (sl.ring) cudaFreeHost(sl.ring); if (sl.pend) cudaFreeHost(sl.pend);
+      sh_max_ = (int)sh_slots_.size();
+      if (!sh_warned_) { std::fprintf(stderr, "[yskn] prompt snapshots: pinned host memory for %d slot(s) only\n", sh_max_); sh_warned_ = true; }
+    } }
+  if (pick < 0) {                                                       // reuse the least recently used slot (not the one just restored)
+    for (int i = 0; i < (int)sh_slots_.size(); ++i) { if (i == sh_last_ && sh_slots_.size() > 1) continue;
+      if (pick < 0 || sh_slots_[(size_t)i].tick < sh_slots_[(size_t)pick].tick) pick = i; } }
+  if (pick < 0) return false;
+  SnapSlot& sl = sh_slots_[(size_t)pick];
+  if (!snap_alloc(sl)) { sl.pos = -1; return false; }                   // e.g. the drafter was loaded after this slot was made
+  constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV, RB = (size_t)8 * 2048 * 128;
   int g = 0;
   for (const Q35Layer& Y : L_) if (!Y.full) {
-    cudaMemcpyAsync(sh_S_ + g * SB, Y.S, SB * 4, cudaMemcpyDeviceToHost, st_); cudaMemcpyAsync(sh_hist_ + g * HB, Y.hist, HB * 2, cudaMemcpyDeviceToHost, st_); ++g; }
-  if (bdr_.on) for (int i = 0; i < 5; ++i) { cudaMemcpyAsync(sh_ring_ + (2 * i) * RB, bdr_.rk[i], RB * 2, cudaMemcpyDeviceToHost, st_);
-                                            cudaMemcpyAsync(sh_ring_ + (2 * i + 1) * RB, bdr_.rv[i], RB * 2, cudaMemcpyDeviceToHost, st_); }
-  if (mtp_.on) cudaMemcpyAsync(sh_pend_, mtp_.pend, (size_t)H_ * 2, cudaMemcpyDeviceToHost, st_);
+    cudaMemcpyAsync(sl.S + g * SB, Y.S, SB * 4, cudaMemcpyDeviceToHost, st_); cudaMemcpyAsync(sl.hist + g * HB, Y.hist, HB * 2, cudaMemcpyDeviceToHost, st_); ++g; }
+  if (bdr_.on) for (int i = 0; i < 5; ++i) { cudaMemcpyAsync(sl.ring + (2 * i) * RB, bdr_.rk[i], RB * 2, cudaMemcpyDeviceToHost, st_);
+                                            cudaMemcpyAsync(sl.ring + (2 * i + 1) * RB, bdr_.rv[i], RB * 2, cudaMemcpyDeviceToHost, st_); }
+  if (mtp_.on) cudaMemcpyAsync(sl.pend, mtp_.pend, (size_t)H_ * 2, cudaMemcpyDeviceToHost, st_);
   cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("snap_save: ") + cudaGetErrorString(e));
-  sh_pos_ = n; sh_ids_.assign(ids, ids + n);
+  sl.pos = n; sl.tick = ++sh_tick_;
+  return true;
 }
-void Engine35::snap_load() {
-  if (sh_pos_ < 1 || !sh_S_) throw std::runtime_error("snap_load: no snapshot");
+void Engine35::snap_load_slot(int i) {
+  if (i < 0 || i >= (int)sh_slots_.size() || sh_slots_[(size_t)i].pos < 1) throw std::runtime_error("snap_load: no snapshot");
+  SnapSlot& sl = sh_slots_[(size_t)i];
+  if ((bdr_.on && !sl.ring) || (mtp_.on && !sl.pend)) throw std::runtime_error("snap_load: the snapshot has no drafter state");
   replay_fence(); ++sh_epoch_;
   constexpr size_t SB = (size_t)Q35_GV * Q35_GD * Q35_GD, HB = (size_t)3 * Q35_CONV, RB = (size_t)8 * 2048 * 128;
   int g = 0;
   for (Q35Layer& Y : L_) if (!Y.full) {
-    cudaMemcpyAsync(Y.S, sh_S_ + g * SB, SB * 4, cudaMemcpyHostToDevice, st_); cudaMemcpyAsync(Y.hist, sh_hist_ + g * HB, HB * 2, cudaMemcpyHostToDevice, st_); ++g; }
-  if (bdr_.on && sh_ring_) for (int i = 0; i < 5; ++i) { cudaMemcpyAsync(bdr_.rk[i], sh_ring_ + (2 * i) * RB, RB * 2, cudaMemcpyHostToDevice, st_);
-                                                       cudaMemcpyAsync(bdr_.rv[i], sh_ring_ + (2 * i + 1) * RB, RB * 2, cudaMemcpyHostToDevice, st_); }
-  if (mtp_.on && sh_pend_) cudaMemcpyAsync(mtp_.pend, sh_pend_, (size_t)H_ * 2, cudaMemcpyHostToDevice, st_);
-  pos_ = sh_pos_; last_M_ = 0; pre_committed_ = false; launch_set_int(d_pos_, pos_, st_);
+    cudaMemcpyAsync(Y.S, sl.S + g * SB, SB * 4, cudaMemcpyHostToDevice, st_); cudaMemcpyAsync(Y.hist, sl.hist + g * HB, HB * 2, cudaMemcpyHostToDevice, st_); ++g; }
+  if (bdr_.on) for (int k = 0; k < 5; ++k) { cudaMemcpyAsync(bdr_.rk[k], sl.ring + (2 * k) * RB, RB * 2, cudaMemcpyHostToDevice, st_);
+                                            cudaMemcpyAsync(bdr_.rv[k], sl.ring + (2 * k + 1) * RB, RB * 2, cudaMemcpyHostToDevice, st_); }
+  if (mtp_.on) cudaMemcpyAsync(mtp_.pend, sl.pend, (size_t)H_ * 2, cudaMemcpyHostToDevice, st_);
+  pos_ = sl.pos; last_M_ = 0; pre_committed_ = false; launch_set_int(d_pos_, pos_, st_);
+  sl.tick = ++sh_tick_; sh_last_ = i;
   cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("snap_load: ") + cudaGetErrorString(e));
+}
+// Build the graphs of the wide copy passes (32 with the exact-sum GEMV, 48 and 64 rows, current sampling mode) and of the commit replays that recompute the conv
+// outputs (1..64 rows), so that the first wide pass of a request does not pay for the capture.  Nothing is run.
+void Engine35::prepare_wide(int max_rows) {
+  if (!wide_ok_ || mtp_.on || max_rows <= HM_) return;
+  replay_fence(); cudaStreamSynchronize(st_); cudaStreamSynchronize(st2_);
+  for (int M : {32, 48, 64}) {
+    if (M > max_rows || M > kVerifyMax || (M == 32 && xw_rows_ < 32)) continue;   // 32-row copy passes only with the exact-sum GEMV
+    const int key = M * 64 + HEAD_ALL * 4 + 2 + (opt_kconv_ ? (1 << 30) : 0) + (wk_pass(M, false, HEAD_ALL) ? (1 << 29) : 0) + (atx_ ? (1 << 28) : 0) + (smp_ ? (1 << 27) : 0);
+    if (pgraph_.count(key)) continue;
+    cudaGraph_t g; cudaGraphExec_t ge; cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal); pass_body(M, false, nlayers_, HEAD_ALL, true, false, false);
+    cudaStreamEndCapture(st_, &g);
+    if (cudaGraphInstantiate(&ge, g, 0) != cudaSuccess) throw std::runtime_error("prepare_wide: graph instantiate failed");
+    cudaGraphDestroy(g); pgraph_.emplace(key, ge);
+  }
+  if (opt_replay_graph_) {
+    for (int rows = 1; rows <= std::min(max_rows, (int)kVerifyMax); ++rows) {
+      if (rgraph_.count(rows)) continue;
+      cudaGraph_t g; cudaGraphExec_t ge; cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal);
+      g_pdl_rows = rows;
+      for (Q35Layer& Y : L_) { if (Y.full) continue;
+        launch_q35_conv(Q35ConvArgs{Y.pmix, Y.conv, Y.hist, Y.pab, Y.A_log, Y.dt_bias, rows, rows, gq_, gk_, gv_, gbeta_, gg_}, st_);
+        launch_q35_state(Q35StateArgs{gq_, gk_, gv_, gbeta_, gg_, Y.S, rows, rows, core_, Y.pmix, Y.hist}, st_); }
+      cudaStreamEndCapture(st_, &g);
+      if (cudaGraphInstantiate(&ge, g, 0) != cudaSuccess) throw std::runtime_error("prepare_wide: replay graph instantiate failed");
+      cudaGraphDestroy(g); rgraph_.emplace(rows, ge);
+    }
+  }
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("prepare_wide: ") + cudaGetErrorString(e));
 }
 int Engine35::state_hash(uint64_t* out, int max_out) {
   replay_fence(); cudaStreamSynchronize(st_);

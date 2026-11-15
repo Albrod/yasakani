@@ -38,7 +38,7 @@ What it does:
   variable `YASAKANI_NVIDIA_SMI` can name another nvidia-smi, or `none` to run none). It does not execute code the model writes. It does not write prompts or answers to disk or to a log. It writes a file only
   when you run `yasakani selfcheck --write`, or with `--vision-cache FOLDER` of the optional image input (see below).
 * The optional image input (since 0.1.2) is off unless you start the server with `--mmproj`, `--llama-dir` and `--vision-model`. Then
-  the package also loads the libraries of llama.cpp b10488 (CPU build) from the folder you name: it compares `llama.dll`, `mtmd.dll`,
+  the package also loads the libraries of llama.cpp b10488 (on Windows its CPU build) from the folder you name: it compares `llama.dll`, `mtmd.dll`,
   `ggml.dll` and `ggml-base.dll` with their SHA-256 first and refuses a folder with GPU backends; the other `ggml-*` libraries of that
   folder (llama.cpp loads them itself) and `libomp140.x86_64.dll` (the OpenMP runtime that the CPU backend imports) are loaded too and
   are not compared. These libraries are not part of YASAKANI and were not checked like `yskn.dll`; one of them, `ggml-rpc.dll`, imports
@@ -47,6 +47,11 @@ What it does:
   llama.cpp loads its backends. The folder stays on the DLL search path until the image encoder is closed, which is when the server
   stops: a library that the process loads by name in that time can also be found there. Use a folder that holds only the unpacked
   llama.cpp release.
+  On Linux (since 0.1.4, contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8); llama.cpp built from source, see
+  [BUILDING.md](BUILDING.md#image-input-on-linux)) there is no SHA-256 to compare with: the package checks only the version and the
+  commit that `libggml-base.so` reports, then loads `libllama.so`, `libmtmd.so`, `libggml.so` and every `libggml-*.so` backend of the
+  folder, and does not change `PATH`. Keep that folder writable only by you. On both systems llama.cpp also loads a library named by the
+  environment variable `GGML_BACKEND_PATH`, if it is set.
   Image URLs on the network are never fetched; local image files are read only with `--vision-allow-local-files DIR`, and only inside
   DIR. `--vision-cache FOLDER` keeps the features of every image sent, one file per image.
 * The engine library (`yskn.dll`) imports no networking functions and starts no other program, and it opens the model files read-only (memory-mapped).

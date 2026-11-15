@@ -788,11 +788,11 @@ __global__ void __launch_bounds__(128) q35_ab_kernel(Q35AbArgs A) {
 void launch_q35_ab(const Q35AbArgs& A, cudaStream_t st) {
   if (q35_pf_launch(A.M)) { launch_k(q35_ab_pf_kernel<6>, dim3(96 / 6, (A.M + 15) / 16), dim3(128), 0, st, A); return; } launch_k(q35_ab_kernel, dim3(96, (A.M + 31) / 32), dim3(128), 0, st, A); }
 
-__device__ __forceinline__ void q35_ab_row1(const Q35AbArgs& A, int r) {
+template <int AR = 32> __device__ __forceinline__ void q35_ab_row1(const Q35AbArgs& A, int r) {
   
   
   
-  __shared__ float s_red1[32][4], s_r1[32];
+  __shared__ float s_red1[AR][4], s_r1[AR];                               // AR = most rows (64: passes of 33..64 rows)
   const int g = threadIdx.x >> 7, tid = threadIdx.x & 127, nt = A.M;
   const uint16_t* w = r < 48 ? A.wb + (size_t)r * Q35_H : A.wa + (size_t)(r - 48) * Q35_H;
   uint4 wv[5];
@@ -822,14 +822,14 @@ __device__ __forceinline__ void q35_ab_row1(const Q35AbArgs& A, int r) {
     A.ab[(size_t)t * 96 + r] = rbf(A.S ? __fmul_rn(sum, s_r1[t]) : sum); }
 }
 
-__global__ void __launch_bounds__(512) q35_mix_kernel(Q35MixArgs A) {
+template <int AR = 32> __global__ void __launch_bounds__(512) q35_mix_kernel(Q35MixArgs A) {
   __shared__ float buf[512];
   
   
   constexpr int NB = Q35_CONV / 512 + Q35_Z / 512;
   const int tid = threadIdx.x, nab = A.with_ab ? 96 : 0;                  
   if ((int)blockIdx.x < nab) {                                            
-    q35_ab_row1(A.ab, blockIdx.x);
+    q35_ab_row1<AR>(A.ab, blockIdx.x);
     return;
   }
   const int blk = (blockIdx.x - nab) % NB, tok = (blockIdx.x - nab) / NB;
@@ -856,8 +856,9 @@ __global__ void __launch_bounds__(512) q35_mix_kernel(Q35MixArgs A) {
 void launch_q35_mix(const Q35MixArgs& A, cudaStream_t st) {
   if (q35_pf_launch(A.M) && A.xsm.us && A.xsm.mode == 3 && !A.with_ab && !A.pf.p[0]) {   
     const int tasks = (Q35_CONV / 512 + Q35_Z / 512) * ((A.M + Q35_PF_TPW - 1) / Q35_PF_TPW); launch_k(q35_mix_pf_kernel, dim3((tasks + 7) / 8), dim3(256), 0, st, A); return; }
-  if (A.with_ab && A.M > 32) throw std::runtime_error("launch_q35_mix: fused a / b gates need M <= 32");
-  launch_k(q35_mix_kernel, dim3((Q35_CONV / 512 + Q35_Z / 512) * A.M + (A.with_ab ? 96 : 0)), dim3(512), 0, st, A); }
+  if (A.with_ab && A.M > 64) throw std::runtime_error("launch_q35_mix: fused a / b gates need M <= 64");
+  if (A.with_ab && A.M > 32) { launch_k(q35_mix_kernel<64>, dim3((Q35_CONV / 512 + Q35_Z / 512) * A.M + 96), dim3(512), 0, st, A); return; }   // the same sums per row
+  launch_k(q35_mix_kernel<32>, dim3((Q35_CONV / 512 + Q35_Z / 512) * A.M + (A.with_ab ? 96 : 0)), dim3(512), 0, st, A); }
 
 
 __global__ void __launch_bounds__(128) q35_conv_kernel(Q35ConvArgs A) {

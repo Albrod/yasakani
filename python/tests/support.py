@@ -78,7 +78,7 @@ class Stub:
         return self.d.stub_get_opt(engine._e, key)
 
     def last_cfg(self):
-        out = np.zeros(44, np.int32)
+        out = np.zeros(46, np.int32)
         n = self.d.stub_last_cfg(out.ctypes.data)
         return out[:n].tolist()
 

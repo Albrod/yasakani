@@ -1,7 +1,7 @@
 # The quality measurement, so that you can repeat it
 
 日本語：品質の表（[docs/MEASUREMENTS.ja.md](../../docs/MEASUREMENTS.ja.md) の「思考文の品質比較」）を自分で測り直すための一式です。評価に使った 20 本の文章、
-元のモデルから基準を作るプログラム、公開版のエンジンで配布モデルを測るプログラム、私たちの結果が入っています。
+元のモデルから基準を作るプログラム、公開版のエンジンで配布モデルを測るプログラム、私たちの結果が入っています。素の8bitとFP16のKVで測るときは、ソースから測定用にビルドしたエンジンを使います（手順4、[BUILDING.md](../../BUILDING.md)）。
 
 The quality table in [docs/MEASUREMENTS.md](../../docs/MEASUREMENTS.md) ("Quality on thinking text") compares the next-token
 distribution of a compressed model with that of the original model on 20 windows of text. This folder holds what is needed to
@@ -33,6 +33,17 @@ tool; they are in [`bench/20261108/quality/scripts/kld_base.py`](../../bench/202
 3. **Other engines** on the same reference file: `llama_kld.py` (llama.cpp) and `api_topk_dump.py` with `topk_score.py` (servers) in
    [`bench/20261108/quality/scripts/`](../../bench/20261108/quality/scripts/).
 
+4. **A plain 8-bit or an FP16 key-value cache.** The released `yskn.dll` runs neither. Build a measurement library from the source
+   with `YSKN_KVX_MODE=2` (plain 8-bit) or `YSKN_KVX_MODE=0` (FP16), as in "Measurement builds" of [BUILDING.md](../../BUILDING.md),
+   and give it the matching `--kv`:
+
+       python tools/quality/score_yasakani.py --model-dir <model folder> --dll <yskn.dll built with mode 2> --reference own_reference.kld --kv int8 --out score_int8.json
+       python tools/quality/score_yasakani.py --model-dir <model folder> --dll <yskn.dll built with mode 0> --reference own_reference.kld --kv fp16 --out score_fp16.json
+
+   A mode 2 library has no KV5, so with it `--kv int8` is a plain 8-bit cache. A mode 0 library needs `--kv fp16`: with `--kv default`
+   it would keep an 8-bit cache without the rotation. The engine prints the cache it uses when it opens the model, for example
+   `[KV-PROTOCOL] target_kv=fp16`.
+
 ## What we get
 
 Measured on November 14, 2026 with the engine of release 0.1.1 (`yskn.dll`, SHA-256 `0f5d973b...50bbb`) on one RTX 5090.
@@ -53,15 +64,30 @@ positions.
 For comparison, the YASAKANI rows of the table in MEASUREMENTS.md (research build, FP16 cache): quality model 0.0122 and 95.24%,
 fastest model 0.0304 and 93.01%.
 
+Measured on November 15, 2026 with measurement builds of the source (step 4) on one RTX 5090, against the reference of the table.
+20 windows, 20,460 positions.
+
+| Model | Key-value cache | Library | KL divergence | Top-1 agreement | Perplexity (of the reference) |
+|---|---|---|---|---|---|
+| quality | plain 8-bit (`--kv int8`) | built with `YSKN_KVX_MODE=2` | 0.012198 | 95.308% | 2.0681 (2.0652) |
+| quality | FP16 (`--kv fp16`) | built with `YSKN_KVX_MODE=0` | 0.012220 | 95.244% | 2.0678 (2.0652) |
+| fastest | plain 8-bit (`--kv int8`) | built with `YSKN_KVX_MODE=2` | 0.030365 | 93.143% | 2.0754 (2.0652) |
+| fastest | FP16 (`--kv fp16`) | built with `YSKN_KVX_MODE=0` | 0.030431 | 93.011% | 2.0749 (2.0652) |
+
+The FP16 rows are the two YASAKANI rows of the table in MEASUREMENTS.md, to every digit (0.0122199 and 95.2444%, 0.0304307 and
+93.0108%). We measured the four rows with builds of the 0.1.2 source and again with builds of the 0.1.4 source; both gave the same
+values to every digit. The records of these runs are not in `records/`.
+
 ## How this relates to the table in MEASUREMENTS.md
 
 * The two YASAKANI rows of that table (KL 0.0122 with 95.24% agreement for the quality model, 0.0304 with 93.01% for the fastest
   model) were measured on November 8, 2026 with a research build of the engine that can use an FP16 key-value cache, so that the
-  rows show the weights and not the cache. The released `yskn.dll` always rounds the cache with KV5 and has no FP16 cache, and the
-  published source builds only that configuration, so those two rows cannot be repeated with the released engine. What the released
+  rows show the weights and not the cache. The released `yskn.dll` always rounds the cache with KV5 and has no FP16 cache, so those
+  two rows cannot be repeated with it; a build of the published source with an FP16 cache (step 4) repeats them. What the released
   engine gives is in the table above: the row "KV5" is the engine as the package starts it. With `--kv int8` (`YSKN_TB_CAP=0`) the keys
   and values are still rounded by KV5 and only kept unpacked in 8-bit form; it is not a plain 8-bit cache, which the released engine
-  cannot run (until 0.1.3 these rows were labelled "8-bit, without the KV5 compression", which was not correct).
+  cannot run (a build with `YSKN_KVX_MODE=2` can, step 4; until 0.1.3 these rows were labelled "8-bit, without the KV5 compression",
+  which was not correct).
 * The reference file of that table was made on November 7, 2026 with our own implementation of the original model (bfloat16
   weights, the output matrix in 32-bit floats), not with transformers. It is about 10 GB and is not published. `make_reference.py`
   makes a reference with transformers instead; the last rows of the table above show how far the two references and the scores

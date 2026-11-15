@@ -19,15 +19,28 @@ HAVE_TOK = support.tokenizer_dir() is not None
 
 
 class TimingsTests(unittest.TestCase):
+    LAYOUT = ["cache_n", "prompt_n", "prompt_ms", "prompt_per_token_ms", "prompt_per_second",
+              "predicted_n", "predicted_ms", "predicted_per_token_ms", "predicted_per_second"]   # the llama.cpp server's fields
+
     def test_llama_cpp_layout(self):
-        t = timings_json(Usage(prompt_tokens=120, cached_tokens=20, completion_tokens=50, passes=10, prefill_ms=200.0, gen_ms=250.0))
-        self.assertEqual((t["cache_n"], t["prompt_n"], t["prompt_ms"], t["prompt_per_second"]), (20, 100, 200.0, 500.0))
-        self.assertEqual((t["predicted_n"], t["predicted_ms"], t["predicted_per_second"]), (50, 250.0, 200.0))
-        self.assertEqual((t["passes"], t["draft_n_accepted"]), (10, 40))
+        t = timings_json(Usage(prompt_tokens=120, cached_tokens=20, completion_tokens=50, passes=10, prefill_ms=200.0, prompt_ms=200.0,
+                               gen_ms=250.0, draft_n=60, draft_n_accepted=39))
+        self.assertEqual(list(t), self.LAYOUT + ["draft_n", "draft_n_accepted"])
+        self.assertEqual((t["cache_n"], t["prompt_n"], t["prompt_ms"], t["prompt_per_token_ms"], t["prompt_per_second"]),
+                         (20, 100, 200.0, 2.0, 500.0))
+        self.assertEqual((t["predicted_n"], t["predicted_ms"], t["predicted_per_token_ms"], t["predicted_per_second"]), (50, 250.0, 5.0, 200.0))
+        self.assertEqual((t["draft_n"], t["draft_n_accepted"]), (60, 39))
+
+    def test_later_readings_count_as_generation(self):
+        # a second stage (thinking budget, loop guard) reads its prompt again: that time comes after the first token
+        t = timings_json(Usage(prompt_tokens=100, completion_tokens=40, prefill_ms=130.0, prompt_ms=100.0, gen_ms=170.0))
+        self.assertEqual((t["prompt_ms"], t["predicted_ms"], t["predicted_per_token_ms"]), (100.0, 200.0, 5.0))
+        self.assertEqual(list(t), self.LAYOUT)                                  # no look-ahead counts when nothing was proposed
 
     def test_no_time_measured(self):
         t = timings_json(Usage(prompt_tokens=5, cached_tokens=5))            # everything from the cache, nothing generated
-        self.assertEqual((t["prompt_n"], t["prompt_per_second"], t["predicted_per_second"]), (0, 0.0, 0.0))
+        self.assertEqual((t["prompt_n"], t["prompt_per_token_ms"], t["prompt_per_second"]), (0, 0.0, 0.0))
+        self.assertEqual((t["predicted_n"], t["predicted_per_token_ms"], t["predicted_per_second"]), (0, 0.0, 0.0))
 
 
 @unittest.skipUnless(HAVE_TOK, "set YASAKANI_TEST_MODEL_DIR to a folder with the Qwen3.8 tokenizer files")
@@ -107,7 +120,11 @@ class ServerTests(unittest.TestCase):
         u = d["usage"]
         self.assertEqual(u["total_tokens"], u["prompt_tokens"] + u["completion_tokens"])
         self.assertEqual(u["prompt_tokens_details"]["cached_tokens"], 0)
-        self.assertEqual((d["timings"]["prompt_n"], d["timings"]["predicted_n"]), (u["prompt_tokens"], u["completion_tokens"]))
+        t = d["timings"]
+        self.assertEqual((t["prompt_n"], t["predicted_n"]), (u["prompt_tokens"], u["completion_tokens"]))
+        # the stub proposes 4 tokens per pass after the prompt pass and confirms all but the last token it writes in a pass
+        passes = t["draft_n"] // 4
+        self.assertEqual((t["draft_n"] % 4, t["draft_n_accepted"]), (0, u["completion_tokens"] - 1 - passes))
         self.assertEqual(self.stub.opt(self.engine, 13), 5)
 
     def test_streaming(self):
@@ -131,6 +148,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(objs[-1]["choices"], [])
         self.assertEqual(objs[-1]["usage"]["completion_tokens"] > 0, True)
         self.assertEqual(objs[-1]["timings"]["predicted_n"], objs[-1]["usage"]["completion_tokens"])
+        self.assertEqual([o for o in objs[:-1] if "timings" in o], [])          # only the last chunk carries them
+
+    def test_streaming_without_usage_has_timings_in_the_last_chunk(self):
+        self.start()
+        self.stub.push(self.ids("Let me see.") + [self.fmt.think_end] + self.ids("\n\nHello, world.") + [EOS])
+        c, r = self.request("POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}], "stream": True})
+        raw = r.read().decode("utf-8")
+        objs = [json.loads(e[len("data: "):]) for e in raw.split("\n\n") if e.startswith("data: ") and not e.endswith("[DONE]")]
+        self.assertEqual(objs[-1]["choices"][0]["finish_reason"], "stop")    # as the llama.cpp server: the finish chunk, no usage chunk
+        self.assertNotIn("usage", objs[-1])
+        self.assertGreater(objs[-1]["timings"]["predicted_n"], 0)
+        self.assertEqual([o for o in objs[:-1] if "timings" in o], [])
 
     def test_stream_has_one_chunk_per_token(self):
         self.start()

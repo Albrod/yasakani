@@ -266,8 +266,8 @@ class QuickstartTests(unittest.TestCase):
             raise unittest.SkipTest("quickstart/quickstart.py not found (set YASAKANI_QUICKSTART)")
 
     def test_version(self):
-        self.assertEqual(self.qs.QS_VERSION, "0.1.3")
-        self.assertIn("/v0.1.3/", self.qs.ENGINE_URL)
+        self.assertEqual(self.qs.QS_VERSION, "0.1.4")
+        self.assertIn("/v0.1.4/", self.qs.ENGINE_URL)
 
     def test_decision_table(self):
         for name, cc, total, qs, quality in CARDS:
@@ -372,10 +372,11 @@ class CliGpuTests(unittest.TestCase):
         return dict(index=index, uuid="GPU-%d" % index, name=name, compute_cap=cc, **{"memory.total": total, "memory.used": used},
                     driver_version="616.92")
 
-    def run_cli(self, gpus, *args, timeout=60):
+    def run_cli(self, gpus, *args, timeout=60, stub=None):
         env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1", YASAKANI_NVIDIA_SMI=str(self.smi), FAKE_GPUS=json.dumps(gpus))
-        for k in [k for k in env if k.startswith("YSKN_")] + ["YASAKANI_DLL", "YASAKANI_MODEL_DIR", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"]:
+        for k in [k for k in env if k.startswith(("YSKN_", "STUB_"))] + ["YASAKANI_DLL", "YASAKANI_MODEL_DIR", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"]:
             env.pop(k, None)
+        env.update(stub or {})                                                   # knobs of the stub library (tests/stub/yskn_stub.c)
         return subprocess.run([sys.executable, "-m", "yasakani", *args], capture_output=True, text=True, timeout=timeout, cwd=str(ROOT),
                               env=env, input="/exit\n")
 
@@ -434,23 +435,104 @@ class CliGpuTests(unittest.TestCase):
         args = ["--model-dir", str(self.folder), "--dll", self.dll, "--max-ctx", "4096"]
         g5090 = [self.gpu("NVIDIA GeForce RTX 5090", "12.0", 32607, 2644)]
         g4080 = [self.gpu("NVIDIA GeForce RTX 4080", "8.9", 16376, 1000)]
+        diff = dict(STUB_GEN_DIFF_AT="5")                                         # the generated output differs from id #6 on
         r = self.run_cli(g5090, "selfcheck", *args, "--write", str(ref))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(ref))
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)                 # the same output passes on any GPU
         d = json.loads(ref.read_text(encoding="utf-8"))
-        d["cases"][1]["sha256"] = "0" * 64
-        ref.write_text(json.dumps(d), encoding="utf-8")
-        r = self.run_cli(g5090, "selfcheck", *args, "--reference", str(ref))
-        self.assertEqual(r.returncode, 1, r.stdout)                            # on the RTX 5090 a difference is a failure
-        self.assertNotIn("Exit code 3", r.stdout)
+        for c in d["cases"]:                                                      # 0.1.4: the full output and the predictions
+            self.assertEqual(len(c["ids"]), c["tokens"])
+            self.assertEqual(len(c["forced"]["nll"]), c["prompt_tokens"] + c["tokens"] - 1)
         r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(ref))
-        self.assertEqual(r.returncode, 3, r.stdout)                            # elsewhere it is told apart
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)                 # the same output and the same predictions
+        self.assertIn("its predictions are also compared", r.stdout)
+        self.assertIn("same most likely id at 100.0 %", r.stdout)
+        self.assertIn("self-check passed: this installation reproduces the reference output.", r.stdout)
+        r = self.run_cli(g5090, "selfcheck", *args, "--reference", str(ref), stub=dict(STUB_TF_NLL_SHIFT="0.05"))
+        self.assertEqual(r.returncode, 0, r.stdout)                            # the RTX 5090: the output alone decides, as before
+        self.assertNotIn("reads the reference output", r.stdout)
+        r = self.run_cli(g5090, "selfcheck", *args, "--reference", str(ref), stub=diff)
+        self.assertEqual(r.returncode, 1, r.stdout)                            # on the RTX 5090 a difference is a failure, as before
+        self.assertIn("FAIL  the output differs", r.stdout)
+        self.assertIn("self-check FAILED for 3 case(s).", r.stdout)
+        self.assertNotIn("reads the reference output", r.stdout)
+        r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(ref), stub=diff)
+        self.assertEqual(r.returncode, 3, r.stdout)                            # elsewhere: the predictions on the reference output decide
+        self.assertIn("DIFF  the output differs", r.stdout)
         self.assertIn("made on an RTX 5090", r.stdout)
+        n = sum(c["prompt_tokens"] + c["tokens"] - 1 for c in d["cases"])
+        self.assertIn("all %d positions: same most likely id at 100.0 %%" % n, r.stdout)
+        self.assertIn("(generated output differs from id #6)", r.stdout)
+        self.assertIn("passed within the tolerances", r.stdout)
+        self.assertIn("Exit code 3", r.stdout)
+        for knob, text in ((dict(STUB_TF_NLL_SHIFT="0.05"), "differs by 0.0500 on average"),        # a GPU that computes wrongly
+                           (dict(STUB_TF_FLIP_EVERY="10"), "the most likely id is the same at only 9"),
+                           (dict(STUB_TF_NAN="30"), "NaN")):
+            r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(ref), stub=dict(diff, **knob))
+            self.assertEqual(r.returncode, 1, (knob, r.stdout))
+            self.assertIn("self-check FAILED: ", r.stdout)
+            self.assertIn(text, r.stdout)
+            self.assertIn("yasakani verify", r.stdout)
+        r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(ref), stub=dict(STUB_TF_NLL_SHIFT="0.05"))
+        self.assertEqual(r.returncode, 1, r.stdout)                            # the same output, but wrong predictions: a failure
+        self.assertIn("differs by 0.0500 on average", r.stdout)
+        old = self.folder.parent / "ref_gpu_old.json"                            # a reference file written before 0.1.4
+        old.write_text(json.dumps(dict(d, cases=[{k: v for k, v in c.items() if k not in ("ids", "forced")} for c in d["cases"]])),
+                       encoding="utf-8")
+        r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(old))
+        self.assertEqual(r.returncode, 0, r.stdout)                            # the same output; nothing more to compare with
+        self.assertNotIn("also compared", r.stdout)
+        r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(old), stub=diff)
+        self.assertEqual(r.returncode, 1, r.stdout)                            # nothing to compare with: not passed
+        self.assertIn("has no full output", r.stdout)
         d["cases"][2]["prompt_sha256"] = "1" * 64
         ref.write_text(json.dumps(d), encoding="utf-8")
-        r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(ref))
+        r = self.run_cli(g4080, "selfcheck", *args, "--reference", str(ref), stub=diff)
         self.assertEqual(r.returncode, 1, r.stdout)                            # a tokenizer problem stays a failure
+        self.assertIn("prompt ids differ", r.stdout)
+        self.assertNotIn("reads the reference output", r.stdout)
+
+    def test_selfcheck_consistency(self):
+        """0.1.4: every GPU also checks its generated output against its own teacher-forced predictions (16- and 64-row passes)."""
+        ref = self.folder.parent / "ref_cons.json"
+        args = ["--model-dir", str(self.folder), "--dll", self.dll, "--max-ctx", "4096"]
+        g5090 = [self.gpu("NVIDIA GeForce RTX 5090", "12.0", 32607, 2644)]
+        g5080 = [self.gpu("NVIDIA GeForce RTX 5080", "12.0", 16303, 1000)]
+        g4080 = [self.gpu("NVIDIA GeForce RTX 4080", "8.9", 16376, 1000)]
+        r = self.run_cli(g4080, "selfcheck", *args, "--write", str(ref))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("not known to be an RTX 5090", r.stdout)                  # --write elsewhere: a note, and the GPU in the file
+        self.assertEqual(json.loads(ref.read_text(encoding="utf-8"))["gpu"], "NVIDIA GeForce RTX 4080")
+        r = self.run_cli(g5090, "selfcheck", *args, "--write", str(ref))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("not known to be an RTX 5090", r.stdout)
+        self.assertEqual(json.loads(ref.read_text(encoding="utf-8"))["gpu"], "NVIDIA GeForce RTX 5090")
+        self.assertNotIn("self-consistency", r.stdout)                          # --write checks nothing
+        r = self.run_cli(g5090, "selfcheck", *args, "--reference", str(ref))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("self-check passed: this installation reproduces the reference output.", r.stdout)
+        self.assertIn("self-consistency (every GPU, no reference)", r.stdout)
+        self.assertIn("every generated id is the most likely id (41 ids)", r.stdout)
+        self.assertIn("note: this GPU does not use passes of more than 16 positions", r.stdout)
+        self.assertIn("self-consistency passed.", r.stdout)
+        wide = dict(STUB_TF_WIDE="1", STUB_GEN_MAX_ROWS="64", STUB_GEN_WIDE_PASSES="3")
+        r = self.run_cli(g5090, "selfcheck", *args, "--reference", str(ref), stub=wide)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("3 of them wider than 16 positions, the widest 64", r.stdout)
+        self.assertIn("the same predictions as in passes of 16, bit for bit", r.stdout)
+        r = self.run_cli(g5080, "selfcheck", *args, "--reference", str(ref), stub=dict(wide, STUB_GEN_DIFF_AT="5"))
+        self.assertEqual(r.returncode, 3, r.stdout)                            # another RTX 50: within the tolerances, consistent
+        self.assertIn("passed within the tolerances", r.stdout)
+        self.assertIn("self-consistency passed.", r.stdout)
+        for gpus, knob, text in (
+                (g5090, dict(STUB_TF_FLIP_EVERY="10"), "of the 41 generated ids are not the most likely id when this GPU reads"),
+                (g5090, dict(wide, STUB_TF_WIDE_NLL_SHIFT="0.000001"), "passes of 64 positions do not give the same predictions"),
+                (g5090, dict(STUB_GEN_MAX_ROWS="64"), "were used in the generation, but reading the text in passes of 64 failed"),
+                (g5080, dict(wide, STUB_TF_WIDE_NLL_SHIFT="0.000001"), "passes of 64 positions do not give the same predictions")):
+            r = self.run_cli(gpus, "selfcheck", *args, "--reference", str(ref), stub=knob)
+            self.assertEqual(r.returncode, 1, (knob, r.stdout))
+            self.assertIn("self-check FAILED: ", r.stdout)
+            self.assertIn(text, r.stdout)
+            self.assertIn("the same sums in the same order", r.stdout)
 
 
 @unittest.skipUnless(support.tokenizer_dir() is not None and os.name == "posix",

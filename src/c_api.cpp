@@ -8,6 +8,7 @@
 #include "yskn_abi.h"
 #include <string>
 #include <atomic>
+#include <algorithm>
 namespace yskn { extern std::atomic<int> g_specx_cancel; }   
 static thread_local std::string g_err;
 struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; };   
@@ -34,7 +35,15 @@ extern "C" int yskn_commit(yskn_engine* e, int n_accept) { YSKN_TRY(if (e->q) e-
 extern "C" int yskn_prefill_rows(yskn_engine* e, const int32_t* ids, int n, int32_t* first, int32_t* out_argmax, int32_t* top_ids, float* top_vals) { YSKN_TRY(*first = e->q ? e->q->prefill_rows(ids, n, out_argmax, top_ids, top_vals) : e->e->prefill_rows(ids, n, out_argmax, top_ids, top_vals)) }
 extern "C" int yskn_hidden_rows(yskn_engine* e, int n, float* out) { YSKN_TRY(if (e->q) e->q->hidden_rows(n, out); else e->e->hidden_rows(n, out)) }
 extern "C" int yskn_logits_rows(yskn_engine* e, int row0, int n, float* out) { YSKN_TRY(if (e->q) e->q->logits_rows(row0, n, out); else e->e->logits_rows(row0, n, out)) }
-extern "C" int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(*ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }
+// Test-only exports (a build with -DYSKN_TEST_EXPORTS): pass timing and the exact-sum wide GEMV check.
+#if defined(YSKN_TEST_EXPORTS) && defined(_WIN32)
+#  define YSKN_TEST_API __declspec(dllexport)
+#else
+#  define YSKN_TEST_API
+#endif
+extern "C" YSKN_TEST_API int yskn_test_xsum(yskn_engine* e, const char* name, int M, unsigned seed, int variant, long long* out4) {
+  YSKN_TRY(if (!e->q) throw std::runtime_error("test_xsum: qwen3_5 engine only"); e->q->test_xsum(name, M, seed, variant, out4)) }
+extern "C" YSKN_TEST_API int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(*ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }
 extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_prompt, int n_gen, const int32_t* cfg, int n_cfg, int32_t* out_ids, double* stats, double* times_ms) {
   try {
     if (n_cfg < 12) throw std::runtime_error("spec_generate: need at least 12 config values");
@@ -52,7 +61,9 @@ extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_p
     if (n_cfg > 33) c.cost_tok_k = cfg[33]; if (n_cfg > 34) c.cost_row2_k = cfg[34]; if (n_cfg > 35) c.cost_mtp_k = cfg[35];
     if (n_cfg > 36) c.bdraft = cfg[36]; if (n_cfg > 37) c.bdr_long_n = cfg[37]; if (n_cfg > 38) c.bdr_adapt = cfg[38]; if (n_cfg > 39) c.bdr_probe = cfg[39];
     if (n_cfg > 40) c.bdr_d0_len = cfg[40];
-    if (n_cfg > 41) c.prefill_head = cfg[41]; if (n_cfg > 42) c.snap = cfg[42]; if (n_cfg > 43) c.snap_tok = cfg[43];   
+    if (n_cfg > 41) c.prefill_head = cfg[41]; if (n_cfg > 42) c.snap = cfg[42]; if (n_cfg > 43) c.snap_tok = cfg[43];
+    if (n_cfg > 44) c.copy_rows = std::max(1, std::min(yskn::Engine35::kVerifyMax, (int)cfg[44]));
+    if (n_cfg > 45) c.copy_index = cfg[45];   
     auto run = [&](auto& y) {
       using clk = std::chrono::steady_clock; using ms = std::chrono::duration<double, std::milli>;
       const auto t0 = clk::now(); out_ids[0] = y.prefill(prompt, n_prompt); const auto t1 = clk::now();
@@ -66,7 +77,12 @@ extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_p
         if (n_cfg > 30) { o[32] = (double)s.leaves; o[33] = (double)s.leaf_breaks; o[34] = (double)s.leaf_hits; }
         if (n_cfg > 32) { o[35] = s.ms_mark; o[36] = (double)s.mark_at; }   
         if (n_cfg > 36) { o[37] = (double)s.bdr_rounds; o[38] = (double)s.bdr_d0; o[39] = (double)s.bdr_probes; o[40] = s.ms_ctx; }   
-        if (n_cfg > 42) { o[41] = (double)s.sh_mode; o[42] = (double)s.sh_start; } }   
+        if (n_cfg > 42) { o[41] = (double)s.sh_mode; o[42] = (double)s.sh_start; }
+        if (n_cfg > 44) {                                                // 0.1.4: the caller gives 64 statistics
+          o[43] = (double)s.copy_passes; o[44] = (double)s.wide_passes; o[45] = (double)s.copy_tok; o[46] = s.ms_index;
+          o[47] = (double)s.max_rows; o[48] = (double)s.sh_lcp; o[49] = (double)s.sh_slots; o[50] = (double)s.sh_saved; o[51] = s.ms_snap;
+          o[52] = (double)s.rows_hist[48]; o[53] = (double)s.rows_hist[64]; o[54] = (double)s.wide_tok; o[55] = (double)s.cursor_hits;
+          o[56] = (double)s.wide_full; o[57] = (double)s.rows_hist[32]; } }   
     };
     if (e->q) { yskn::Specx35 y(*e->q, c, e->q->vocab()); run(y);
                 if (c.snap) { const auto& s = y.seq(); e->q->snap_note(s.data(), (int)s.size() - 1); } }   
@@ -84,6 +100,7 @@ extern "C" YSKN_API int yskn_set_visual(yskn_engine* e, const uint16_t* features
 }
 
 
+extern "C" YSKN_API int yskn_prepare_wide(yskn_engine* e, int max_rows) { YSKN_TRY(if (!e->q) throw std::runtime_error("prepare_wide: qwen3_5 engine only"); e->q->prepare_wide(max_rows)) }
 extern "C" YSKN_API int yskn_snap_info(yskn_engine* e, int32_t* out4, int32_t* ids, int max_ids) { YSKN_TRY(
   if (!e->q) throw std::runtime_error("snap: qwen3_5 engine only");
   const auto& lv = e->q->snap_live(); out4[0] = e->q->position(); out4[1] = e->q->snap_pos(); out4[2] = e->q->snap_live_ok() ? 1 : 0;

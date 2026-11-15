@@ -61,6 +61,8 @@ YSKN_API int           yskn_spec_generate(yskn_engine* e, const int32_t* prompt,
 
 
 YSKN_API int           yskn_specx_load_static(const char* path);
+/* 0.1.4: build the graphs of the wide copy passes (up to max_rows rows) ahead of the first request; nothing runs. */
+YSKN_API int           yskn_prepare_wide(yskn_engine* e, int max_rows);
 
 
 YSKN_API int           yskn_set_opt(yskn_engine* e, int key, int value);

@@ -7,25 +7,26 @@ from pathlib import Path
 from tests import support                                   # noqa: F401
 from yasakani import runtime as R
 
-# the generation call of the published configuration, as the integers the engine reads (44 values)
+# the generation call of the published configuration, as the integers the engine reads (46 values)
 GOLDEN_SPEC = [7, 1, 1, 2, 8, 3, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 15, 6, 1, 248046, 248044, 8, 0, 0, 0, 0, 0, 0, 0, 0, 300, -1, 0, 0, 0,
-               1, 4, 1, 4, 15, 1, 1, 248045]
+               1, 4, 1, 4, 15, 1, 1, 248045, 64, 1]
 
 
 class RuntimeTests(unittest.TestCase):
     def test_spec_vector(self):
         self.assertEqual(R.spec_array(R.DEFAULT_SPEC).tolist(), GOLDEN_SPEC)
-        self.assertEqual(len(R.SPEC_FIELDS), 44)
+        self.assertEqual(len(R.SPEC_FIELDS), 46)
 
     def test_unknown_spec_key(self):
         with self.assertRaises(ValueError):
             R.spec_array(dict(R.DEFAULT_SPEC, bogus=1))
 
-    def test_env_has_seventeen_settings(self):
+    def test_env_has_twenty_two_settings(self):
         with tempfile.TemporaryDirectory() as t:
             pack = support.make_pack(Path(t))
             prof = R.RuntimeProfile.default(pack)
-        self.assertEqual(len(prof.env), 17)
+        self.assertEqual(len(prof.env), 22)
+        self.assertEqual(prof.env["YSKN_SNAP_SLOTS"], "8")
         self.assertEqual(set(R.PATH_ENV) - set(prof.env), set())
         self.assertTrue(all(k.startswith("YSKN_") for k in prof.env))
 

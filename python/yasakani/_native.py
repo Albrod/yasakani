@@ -93,6 +93,17 @@ class NativeLib:
         if f is not None:
             f.argtypes, f.restype = [P, P, P, I, P, I, I], I
             self.fn["yskn_set_visual"] = f
+        f = getattr(self.dll, "yskn_prepare_wide", None)      # 0.1.4 and newer
+        if f is not None:
+            f.argtypes, f.restype = [P, I], I
+            self.fn["yskn_prepare_wide"] = f
+        # teacher forcing (the self-check on GPUs other than the RTX 5090; every released engine library has them)
+        for name, sig in (("yskn_verify_nll", ([P, P, P, I, I, P, P], I)), ("yskn_verify", ([P, P, I, I, P, P, P], I)),
+                          ("yskn_commit", ([P, I], I)), ("yskn_logits_rows", ([P, I, I, P], I))):
+            f = getattr(self.dll, name, None)
+            if f is not None:
+                f.argtypes, f.restype = sig
+                self.fn[name] = f
 
     def last_error(self) -> str:
         m = self.fn["yskn_last_error"]()

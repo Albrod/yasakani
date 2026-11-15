@@ -139,6 +139,56 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(u.loop_guard["where"], "answer")
         self.assertEqual(u.finish, "length")
 
+    def test_loop_cut_does_not_depend_on_the_timing(self):
+        prefix = self.ids("I will think about this problem carefully. ")
+        unit = self.ids("and again and")[:5]
+        w = loopguard.LoopWatch(self.fmt.think_end, self.fmt.digit_ids, True)
+        expect = w.check(np.array(prefix + unit * 200, np.int32)).at
+        texts = set()
+        for delay in (0, 40, 300):
+            self.stub.push(prefix + unit, loop_from=len(prefix))
+            self.stub.push(self.ids("Final answer.") + [EOS])
+            self.stub.delay_us(delay)
+            text, u = self.run_chat(max_tokens=100000)
+            self.assertEqual(u.loop_guard["tokens_before"], expect)
+            self.assertEqual(self.stub.d.stub_last_n_prompt(), u.prompt_tokens + expect + len(self.runner.bridge))
+            texts.add((text["reasoning"], text["content"]))
+        self.assertEqual(len(texts), 1)
+
+    def test_budget_cut_is_exact(self):
+        think = self.ids(" ".join("step%d" % i for i in range(40)))      # a long period: not a loop
+        answer = self.ids("Done.") + [EOS]
+        for delay in (0, 200):
+            self.stub.push(think, loop_from=0)
+            self.stub.push(answer)
+            self.stub.delay_us(delay)
+            calls = self.stub.d.stub_calls()
+            text, u = self.run_chat(max_tokens=100000, thinking_budget=100)
+            self.assertEqual((u.loop_guard["kind"], u.loop_guard["tokens_before"], u.reasoning_tokens), ("budget", 100, 100))
+            self.assertEqual(self.stub.d.stub_last_n_prompt(), u.prompt_tokens + 100 + len(self.runner.bridge))
+            self.assertEqual(text["content"], "Done.")
+            self.assertEqual(u.completion_tokens, 100 + len(self.runner.bridge) + len(answer))
+            self.assertEqual(self.stub.d.stub_calls() - calls, 2)
+            # timings: the first reading is the prompt time, the second one is part of the generation; both stages' drafts count
+            self.assertTrue(0 < u.prompt_ms < u.prefill_ms)
+            self.assertTrue(u.draft_n > 0 and u.draft_n % 4 == 0 and 0 < u.draft_n_accepted < u.draft_n)
+
+    def test_budget_not_reached_goes_on_where_it_stopped(self):
+        think = self.ids("Short thought.")
+        full = think + [self.fmt.think_end] + self.ids("\n\n" + " ".join("word%d" % i for i in range(60))) + [EOS]
+        self.assertGreater(len(full), 100)
+        self.stub.push(full)
+        plain, u0 = self.run_chat(max_tokens=100000)
+        self.stub.push(full)
+        self.stub.push(full[60:])                                    # what the engine writes when asked to go on after 60 ids
+        calls = self.stub.d.stub_calls()
+        text, u = self.run_chat(max_tokens=100000, thinking_budget=60)
+        self.assertEqual(self.stub.d.stub_calls() - calls, 2)
+        self.assertEqual(self.stub.d.stub_last_n_prompt(), u.prompt_tokens + 60)
+        self.assertIsNone(u.loop_guard)
+        self.assertEqual(text, plain)
+        self.assertEqual((u.completion_tokens, u.reasoning_tokens, u.finish), (len(full), len(think), "stop"))
+
     def test_prompt_too_long(self):
         with self.assertRaises(RequestError):
             self.run_chat(messages=[{"role": "user", "content": "word " * 30000}])

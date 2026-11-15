@@ -15,7 +15,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 import numpy as np
 
 from ._native import NativeLib, YasakaniError
-from .runtime import (DEFAULT_SPEC, EOS_IDS, STAT_INDEX, STATE_FIELDS, ModelPack, RuntimeProfile, spec_array)
+from .runtime import (DEFAULT_SPEC, EOS_IDS, N_STATS, STAT_INDEX, STATE_FIELDS, VOCAB_SIZE, ModelPack, RuntimeProfile, spec_array)
 
 # engine option keys (yskn_set_opt)
 OPT_TEMPERATURE, OPT_TOP_P, OPT_TOP_K, OPT_SEED, OPT_SAMPLER, OPT_MIN_P = 10, 11, 12, 13, 16, 29
@@ -54,10 +54,32 @@ class GenResult:
     prefill_ms: float
     gen_ms: float
     stats: Dict[str, float] = field(default_factory=dict)
+    draft_n: int = 0                    # tokens the look-ahead proposed (its three sources together)
+    draft_n_accepted: int = 0           # of these, the tokens the model's own pass confirmed
 
     @property
     def completion_tokens(self) -> int:
         return len(self.ids)
+
+
+@dataclass
+class Forced:
+    """What :meth:`Engine.teacher_forced` measured.  Index ``i`` is the prediction made after ``ids[:i + 1]``."""
+    argmax: np.ndarray                  # int32: the most likely next id
+    nll: np.ndarray                     # float32: -log p(ids[i + 1]), natural log
+    margin: Optional[np.ndarray] = None # float32: logit of the most likely id minus the logit of the second one (margins=True only)
+
+
+def forced_passes(n: int, rows: int) -> List[int]:
+    """Rows of each pass for ``n`` positions: ``rows`` at a time, and never a last pass of one row (a one-row pass can take a path of
+    its own in the engine)."""
+    if n < 1 or rows < 2:
+        raise ValueError("teacher forcing needs at least one position and passes of two rows or more")
+    sizes = [rows] * (n // rows) + ([n % rows] if n % rows else [])
+    if len(sizes) > 1 and sizes[-1] == 1:
+        sizes[-2] -= 1
+        sizes[-1] = 2
+    return sizes
 
 
 def _narrow_paths_as_utf8(paths) -> bool:
@@ -249,7 +271,7 @@ class Engine:
                 cfg["eos2"] = stops[1] if len(stops) > 1 else stops[0]
         cfa = spec_array(cfg)
         out = np.full(n_gen + 1, -1, np.int32)
-        st = np.zeros(48, np.float64)
+        st = np.zeros(N_STATS, np.float64)
         tm = np.zeros(2, np.float64)
         box: Dict[str, object] = {}
         with self._lock:
@@ -310,7 +332,65 @@ class Engine:
         stats = {k: float(st[i]) for k, i in STAT_INDEX.items()}
         return GenResult(ids=ids, finish=finish, prompt_tokens=len(prompt_arr), cached_tokens=int(st[STAT_INDEX["cached_tokens"]]),
                          snap_mode=int(st[STAT_INDEX["snap_mode"]]), passes=int(st[STAT_INDEX["passes"]]),
-                         prefill_ms=float(tm[0]), gen_ms=float(tm[1]), stats=stats)
+                         prefill_ms=float(tm[0]), gen_ms=float(tm[1]), stats=stats,
+                         draft_n=int(sum(st[STAT_INDEX["drafted_%d" % s]] for s in range(3))),
+                         draft_n_accepted=int(sum(st[STAT_INDEX["accepted_%d" % s]] for s in range(3))))
+
+    # ---- teacher forcing -------------------------------------------------------------------------------------------------------
+    @property
+    def supports_forced(self) -> bool:
+        return all(k in self._f for k in ("yskn_verify_nll", "yskn_commit"))
+
+    def teacher_forced(self, ids: Sequence[int], *, rows: int = 16, margins: bool = False) -> Forced:
+        """Let the engine read ``ids`` in passes of ``rows`` positions without generating anything (teacher forcing) and return, for
+        every position but the last, the most likely next id and the negative log-likelihood of the id that really follows.
+        ``margins=True`` also reads the logits of the whole vocabulary to give the margin of the most likely id.  The state is reset
+        before and after; the sampling settings are not used."""
+        if not self.supports_forced or (margins and not all(k in self._f for k in ("yskn_logits_rows", "yskn_verify"))):
+            raise YasakaniError("the engine library has no exports for teacher forcing (yskn_verify_nll, yskn_commit)")
+        seq = np.ascontiguousarray(np.asarray(ids, dtype=np.int32))
+        n = len(seq) - 1
+        if n + 1 > self.max_ctx - CONTEXT_MARGIN:
+            raise ValueError("%d ids do not fit the context of %d tokens" % (len(seq), self.max_ctx))
+        sizes = forced_passes(n, rows)
+        am = np.empty(n, np.int32)
+        nll = np.empty(n, np.float32)
+        mg = np.empty(n, np.float32) if margins else None
+        f = self._f
+        with self._lock:
+            self._need_open()
+            e = self._e
+            self._check(f["yskn_reset"](e))
+            done = False
+            try:
+                pos = 0
+                for m in sizes:
+                    x = np.ascontiguousarray(seq[pos:pos + m])
+                    t = np.ascontiguousarray(seq[pos + 1:pos + m + 1])
+                    a = np.empty(m, np.int32)
+                    v = np.empty(m, np.float32)
+                    self._check(f["yskn_verify_nll"](e, x.ctypes.data, t.ctypes.data, m, 1, a.ctypes.data, v.ctypes.data))
+                    if margins:
+                        lg = np.empty((m, VOCAB_SIZE), np.float32)
+                        self._check(f["yskn_logits_rows"](e, 0, m, lg.ctypes.data))
+                        if not np.array_equal(lg.argmax(1), a):        # the logits may not be kept by this pass: make it again
+                            b = np.empty(m, np.int32)
+                            self._check(f["yskn_verify"](e, x.ctypes.data, m, 1, b.ctypes.data, None, None))
+                            self._check(f["yskn_logits_rows"](e, 0, m, lg.ctypes.data))
+                            if not (np.array_equal(b, a) and np.array_equal(lg.argmax(1), a)):
+                                raise YasakaniError("teacher forcing: the logits of the rows do not belong to the pass")
+                        top2 = np.partition(lg, -2, axis=1)[:, -2:]
+                        mg[pos:pos + m] = top2.max(1) - top2.min(1)
+                    self._check(f["yskn_commit"](e, m - 1))
+                    am[pos:pos + m] = a
+                    nll[pos:pos + m] = v
+                    pos += m
+                done = True
+            finally:
+                rc = f["yskn_reset"](e)
+                if done:                                             # an earlier error is the one to report
+                    self._check(rc)
+        return Forced(argmax=am, nll=nll, margin=mg)
 
     # ---- warm-up ---------------------------------------------------------------------------------------------------------------
     def warmup(self, prompts: Sequence[Sequence[int]], n_gen: int = 32) -> None:
@@ -321,3 +401,23 @@ class Engine:
             self.reset()
             self.generate(p, n_gen + 1)
         self.reset()
+        self.prepare_wide()
+
+    def prepare_wide(self) -> None:
+        """Build the graphs of the wide copy passes for greedy and for sampled generation (engine libraries of 0.1.4 or newer; nothing
+        runs, the state is unchanged).  The sampling settings are restored afterwards."""
+        f = self._f.get("yskn_prepare_wide")
+        rows = int(self.spec.get("copy_rows", 16))
+        if f is None or rows <= 16:
+            return
+        with self._lock:
+            self._need_open()
+            keep = self.sampling
+            self._check(self._f["yskn_set_opt"](self._e, OPT_TEMPERATURE, 0))
+            self._check(f(self._e, rows))
+            self._check(self._f["yskn_set_opt"](self._e, OPT_TEMPERATURE, 1000))
+            self._check(f(self._e, rows))
+            if keep is not None:
+                self.set_sampling(keep)
+            else:
+                self._check(self._f["yskn_set_opt"](self._e, OPT_TEMPERATURE, 0))

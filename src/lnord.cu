@@ -34,7 +34,7 @@ template <int MT> __host__ __device__ constexpr int lno_uw() { return MT > 8 ? 4
 
 
 template <int MT, int NR> __host__ __device__ constexpr int lno_nr_minb() { return MT > 8 ? (NR >= 8 ? 2 : NR >= 4 ? 4 : 8) : (NR >= 8 ? 3 : NR >= 4 ? 5 : 10); }
-template <int K, int MT, bool XSM, int LOOK> __host__ __device__ constexpr int lno_minb() { return MT > 32 ? 2 : (MT > 16 ? 3 : (MT > 8 ? (XSM ? 4 : 6) : (LOOK > 1 ? (K > 6 ? 9 : 11) : (K > 6 ? 12 : 16)))); }
+template <int K, int MT, bool XSM, int LOOK> __host__ __device__ constexpr int lno_minb() { return MT > 32 ? 2 : (MT > 16 ? (XSM ? 2 : 3) : (MT > 8 ? (XSM ? 4 : 6) : (LOOK > 1 ? (K > 6 ? 9 : 11) : (K > 6 ? 12 : 16)))); }
 
 template <int K> __device__ __forceinline__ unsigned lno_field(const unsigned* w, int i) {   
   constexpr int FB = 4 * K; const int bit = FB * i, wi = bit >> 5, sh = bit & 31;
@@ -233,7 +233,19 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
     }
   }
   float fin_us = 0.f; (void)fin_us;                                    
-  if (XSM && G <= 64) {
+  if (XSM && G <= 64 && MT > 16) {
+    // exact sums for 32 or 64 rows (passes of 17..64 rows): lane l takes rows l and l + 32; the same max and scales as below
+    float m0 = 0.f, m1 = 0.f;
+    if (lane < M) { const float* al = P.alpha + (size_t)lane * G; for (int gx = 0; gx < G; ++gx) m0 = fmaxf(m0, __ldg(al + gx)); }
+    if (MT > 32 && lane + 32 < M) { const float* al = P.alpha + (size_t)(lane + 32) * G; for (int gx = 0; gx < G; ++gx) m1 = fmaxf(m1, __ldg(al + gx)); }
+    const float r0 = m0 > 0.f ? __fdiv_rn(16777216.f, m0) : 0.f, r1 = m1 > 0.f ? __fdiv_rn(16777216.f, m1) : 0.f;
+    if (blockIdx.x == 0 && blockIdx.y == 0 && warp == 0) { if (lane < M) P.us_out[lane] = ldexpf(m0, -24); if (MT > 32 && lane + 32 < M) P.us_out[lane + 32] = ldexpf(m1, -24); }
+    #pragma unroll
+    for (int nb = 0; nb < NB; ++nb) {
+      #pragma unroll
+      for (int k = 0; k < 2; ++k) { const int tk = 8 * nb + 2 * tig + k; const float x = __shfl_sync(0xffffffffu, nb < 4 ? r0 : r1, tk & 31); rm[nb][k] = tk < M ? x : 0.f; }
+    }
+  } else if (XSM && G <= 64) {
     
     
     
@@ -375,8 +387,8 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
   }
 }
 
-static int lnord_k(const GemvLaunch& P) {                          
-  if (P.draft || P.e_fuse || P.M < 1 || P.M > 64 || (P.xsum && P.M > 16) || P.n_seg < 1) return 0;
+static int lnord_k(const GemvLaunch& P, bool xw = false) {          
+  if (P.draft || P.e_fuse || P.M < 1 || P.M > 64 || (P.xsum && P.M > 16 && (!xw || P.M > 32 || P.xsm_part || P.lo)) || P.n_seg < 1) return 0;
   if (P.f_mode && (P.M != 1 || !P.xsum || P.xsm_part || P.n_seg != 1 || P.seg[0].t.N % 512 || P.seg[0].t.Kc / 512 > 64)) return 0;
   const int K = P.seg[0].t.k_default; if (K != 4 && K != 6 && K != 8) return 0;
   for (int s = 0; s < P.n_seg; ++s) { const TensorDev& t = P.seg[s].t;
@@ -384,6 +396,7 @@ static int lnord_k(const GemvLaunch& P) {
   return K;
 }
 bool lnord_eligible(const GemvLaunch& P) { return lnord_k(P) != 0; }
+bool lnord_xw_eligible(const GemvLaunch& P) { return P.xsum && P.M > 16 && lnord_k(P, true) != 0; }
 static int lno_prew_env() { static const int v = [] { const char* e = std::getenv("YSKN_LNO_PREW"); return e ? std::atoi(e) : 1; }(); return v; }
 static int lno_look_env() { static const int v = [] { const char* e = std::getenv("YSKN_LNO_LOOK"); return e ? std::atoi(e) : 0; }(); return v; }   
 static int lno_pre_env() { static const int v = [] { const char* e = std::getenv("YSKN_LNO_PRE"); return e ? std::atoi(e) : 3; }(); return v; }   
@@ -400,7 +413,10 @@ template <int K, int MT, int UWX = 0, int MBX = 0, bool LO = false> static void 
     const int G = P.seg[s].t.Kc / 512, nw = P.seg[s].t.n_workers; maxblk = std::max(maxblk, 2 * ((G + nw - 1) / nw)); }
   const dim3 grid(ctas, P.max_workers), block(uw * 32);
   (void)maxblk; const int look = lno_look_env() ? lno_look_env() : 1;      
-  if constexpr (MT > 16) { launch_k(lnord_kernel<K, MT, false, 1>, grid, block, 0, st, P); return; }   
+  if constexpr (MT > 16) {
+    if (P.xsum) { if constexpr (MT == 32) launch_k(lnord_kernel<K, 32, true, 1>, grid, block, 0, st, P); else throw std::runtime_error("launch_lnord: exact sums up to 32 rows"); }
+    else launch_k(lnord_kernel<K, MT, false, 1>, grid, block, 0, st, P);
+    return; }   
   else {
   if constexpr (MT == 8 && UWX == 0) { if (P.f_mode) { launch_k(lnord_kernel<K, 8, true, 1, 1, true>, grid, block, 0, st, P); return; } }   
   if (!LO && UWX == 0 && P.xsum && !P.xsm_part && lno_nr_env() > 1) { const int nr = lno_nr_env();   
@@ -423,6 +439,14 @@ template <int K> static void launch_lno_m(const GemvLaunch& P, cudaStream_t st) 
   if (P.M <= 8 && cfg == 1) { launch_lno<K, 8, 2, 11>(P, st); return; }
   if (P.M <= 8 && cfg == 2) { launch_lno<K, 8, 4, 8>(P, st); return; }
   if (P.M <= 8) launch_lno<K, 8>(P, st); else if (P.M <= 16) launch_lno<K, 16>(P, st); else if (P.M <= 32) launch_lno<K, 32>(P, st); else launch_lno<K, 64>(P, st);
+}
+void launch_lnord_xw(const GemvLaunch& P, cudaStream_t st) {
+  if (!lnord_xw_eligible(P)) throw std::runtime_error("launch_lnord_xw: launch not eligible");
+  switch (lnord_k(P, true)) {
+    case 4: launch_lno_m<4>(P, st); break;
+    case 6: launch_lno_m<6>(P, st); break;
+    default: launch_lno_m<8>(P, st); break;
+  }
 }
 void launch_lnord(const GemvLaunch& P, cudaStream_t st) {
   switch (lnord_k(P)) {

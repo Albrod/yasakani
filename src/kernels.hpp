@@ -52,6 +52,8 @@ struct GemmLaunch { TensorDev t; float* part; const int8_t* qx; const float* alp
 size_t gemv_smem_bytes(const GemvLaunch& P);
 bool   lnord_eligible(const GemvLaunch& P);                      
 void   launch_lnord(const GemvLaunch& P, cudaStream_t st);
+bool   lnord_xw_eligible(const GemvLaunch& P);                   // exact sums for 17..32 rows (the wide exact-sum path)
+void   launch_lnord_xw(const GemvLaunch& P, cudaStream_t st);
 size_t lnord_bytes(int N, int Kc, int K);
 void   lnord_build(const uint4* frag, int N, int Kc, int K, uint4* out, cudaStream_t st);
 void   launch_gemv(const GemvLaunch& P, cudaStream_t st);
@@ -59,6 +61,7 @@ void   launch_gemv(const GemvLaunch& P, cudaStream_t st);
 
 bool   pfa_eligible(const GemvLaunch& P);
 void   launch_pfa(const GemvLaunch& P, int mode, int wpc, cudaStream_t st);
+void   launch_pfa_xw(const GemvLaunch& P, int wpc, cudaStream_t st);   // exact sums, 17..64 rows, K split by the worker counts
 size_t gemm_smem_bytes(const GemmLaunch& P);
 void   launch_gemm(const GemmLaunch& P, cudaStream_t st);
 }

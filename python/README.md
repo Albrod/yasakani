@@ -6,13 +6,13 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.1.3`. Text, and optionally still images (new in 0.1.2, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
+Status: version `0.1.4`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
 
 ## What you need
 
 | | |
 |---|---|
-| GPU | NVIDIA **RTX 5090** (tested), or since 0.1.3 another RTX 30, 40 or 50 series card with compute capability 8.6 or higher and 16 GB or more (not optimized or tested; [below](#gpus-other-than-the-rtx-5090)); a current NVIDIA driver |
+| GPU | NVIDIA **RTX 5090** (tested), or since 0.1.3 another RTX 30, 40 or 50 series card with compute capability 8.6 or higher and 16 GB or more (not optimized or tested; [below](#gpus-other-than-the-rtx-5090)); NVIDIA driver 580 or newer (a driver for CUDA 13; tested with 616.92) |
 | OS | **Windows 11**, 64-bit (the only version tested), with the *Microsoft Visual C++ 2015-2022 x64 runtime* ([download](https://aka.ms/vs/17/release/vc_redist.x64.exe)) |
 | Python | 3.10 or newer |
 | Disk | about 15 GB for the quality model folder, about 13 GB for the fastest model folder |
@@ -65,7 +65,7 @@ Loading the model takes about a minute; `serve` answers `/health` with `503 load
 
 Since 0.1.3 the engine library is built for compute capability 8.6, 8.9 and 12.x. On any GPU other than the RTX 5090, `chat`, `serve`,
 `bench` and `selfcheck` print a note at start: the engine runs there, but it is not optimized or tested, and its speed and operation are not
-guaranteed. `yasakani info` shows what 0.1.3 does on each GPU it finds. AMD GPUs and Macs are not supported.
+guaranteed. `yasakani info` shows what the package does on each GPU it finds. AMD GPUs and Macs are not supported.
 
 **Context length.** The engine reserves the key-value cache for the whole context when it opens the model. When you do not give `--max-ctx`,
 on a GPU with less than 30,000 MiB the package chooses the context before it opens the model:
@@ -85,8 +85,11 @@ been checked on other cards. It is `yasakani.gpu.plan_context`; `Engine` itself 
 neither `CUDA_DEVICE_ORDER=PCI_BUS_ID` nor `CUDA_VISIBLE_DEVICES` tells which one `--device` is, the context is chosen for the smallest of
 them. The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
 
-**The self-check** compares with output made on an RTX 5090. On another GPU the output can differ from it; `selfcheck` then exits with
-code 3 (only the output differs) instead of 1, and the quickstart reports this and goes on.
+**The self-check** compares with output made on an RTX 5090. On another GPU tiny differences in the computation can make the greedy output
+take another token part-way through, so since 0.1.4 `selfcheck` also lets the engine read the reference output there and compares its
+predictions with those of the RTX 5090 ([The self-check](#the-self-check)). Within the tolerances it exits with 0 (the same output) or 3 (only
+the output differs; the quickstart reports this and goes on); otherwise with 1, and the quickstart stops. Every GPU also checks itself against
+its own predictions, with no tolerance (the same section).
 
 `YASAKANI_NVIDIA_SMI` names the nvidia-smi to use; `none` turns the GPU check and the context rule off.
 
@@ -112,19 +115,23 @@ curl http://127.0.0.1:8765/v1/chat/completions -H "Content-Type: application/jso
 ```
 
 Supported request fields: `messages` (text, and images only with the optional image input below; the roles `system`, `developer`, `user`, `assistant` and `tool`), `tools` with `tool_choice`
-`auto` or `none`, `max_tokens` / `max_completion_tokens`, `temperature` (0-2; 0 is greedy), `top_p`, `top_k` (at most 20),
+`auto`, `none`, `required` or a named function (see below), `max_tokens` / `max_completion_tokens`, `temperature` (0-2; 0 is greedy), `top_p`, `top_k` (at most 20),
 `min_p`, `seed`, `stop` (up to 4 strings), `stream` with `stream_options.include_usage`, `reasoning_effort` (`low`, `medium`, `high`, `xhigh`),
 `chat_template_kwargs` (for example `{"enable_thinking": false}`), `ignore_eos`, `loop_guard`. The defaults are the model's own:
 temperature 1.0, top_p 0.95, top_k 20. Not supported (answered with 400): images when the server runs without the image input options, the old `functions` / `function_call` fields, `n` other than 1, `logprobs`.
 
-Tool calling (new in 0.1.1): send `tools` (functions) with `tool_choice` `"auto"` (the default) or `"none"`. `"required"` and a named
-function are accepted too, but not enforced: the engine has no constrained decoding, so the request runs as `"auto"` (with only the named
-function offered, when one is named) and the model is left to make the call. The model's own chat template
+Tool calling (new in 0.1.1): send `tools` (functions) with `tool_choice` `"auto"` (the default) or `"none"`. The model's own chat template
 describes the tools to the model. The calls it writes come back as `message.tool_calls`, and `finish_reason` is `tool_calls`; in a stream each
 finished call arrives as one chunk with the whole arguments. Send the results back as messages with the role `tool`. An input that does
 not fit into the context is answered with 400 and the error code `context_length_exceeded` before any text is sent. Also accepted:
 `thinking_budget` (a number of tokens after which the thinking is closed and the answer starts; 0 = no limit) and
 `"thinking": {"type": "enabled"}` / `{"type": "disabled"}`. Tool calling is new and has been tested far less than plain chat.
+
+Since 0.1.4 `tool_choice` `"required"` and a named function (`{"type": "function", "function": {"name": "get_weather"}}`) are accepted
+too (contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8)), but not enforced: the engine has no constrained decoding, so the request runs as `"auto"` and the
+model is left to make the call. An answer without a call comes back as text with `finish_reason` `stop`. With a named function only that
+function is put into the prompt; the prompt then differs near its start, so a long conversation is read again from the start, and once more
+by the next request with all the tools. A name that is not in `tools`, or `"required"` without `tools`, is answered with 400.
 
 ```python
 tools = [{"type": "function", "function": {"name": "get_weather", "description": "Get the weather of a city.",
@@ -141,23 +148,34 @@ print(r.choices[0].message.tool_calls)
   of chunks is slightly smaller than the number of tokens; the exact count is `usage.completion_tokens` (ask for it with
   `stream_options: {"include_usage": true}`). The chunks arrive in small groups, about 64 times a second.
 * **Loop guard.** If the thinking falls into an endless repetition, the guard cuts it, asks the model to answer from what it has written, and reports this in
-  `usage.loop_guard`. Pass `"loop_guard": false` to turn it off.
+  `usage.loop_guard`. Pass `"loop_guard": false` to turn it off. Since 0.1.4 the guard and `thinking_budget` cut at a point that depends only on
+  the generated tokens, so the answer does not depend on the look-ahead.
 * Input, thinking and answer together are limited to the context length (262,144 tokens by default; `--max-ctx` lowers it and the memory it needs).
 * Asking again with the earlier conversation in front of a new question does not recompute the earlier turns (`usage.prompt_tokens_details.cached_tokens`).
-* Next to `usage`, the answer (and the last chunk of a stream asked for with `include_usage`) carries `timings`, the engine's own timing in the
-  layout of llama.cpp's server: `prompt_n`, `prompt_ms`, `prompt_per_second`, `predicted_n`, `predicted_ms`, `predicted_per_second`, `cache_n`.
-  Tools that read the speed of a llama.cpp server from this object work unchanged.
+  Since 0.1.4 the same long document followed by a different question is not read again either (when the document comes before the question
+  and no other request comes in between): the engine keeps up to 8 saved states along the prompt of one conversation in pinned host memory
+  (about 1.5 GiB of RAM). The prompt is read from the start after an unrelated request, when thinking is
+  switched on or off, after a request with an image, when the tools differ (a named function in `tool_choice`, above), and when a prompt under 8,192 tokens
+  differs part-way.
+* Next to `usage`, the answer carries `timings` in the layout of the llama.cpp server (contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8)): `cache_n`, `prompt_n`,
+  `prompt_ms`, `prompt_per_token_ms`, `prompt_per_second`, `predicted_n`, `predicted_ms`, `predicted_per_token_ms`, `predicted_per_second`,
+  and `draft_n` / `draft_n_accepted` (the tokens the look-ahead proposed and those the model confirmed; only when it proposed any). A stream
+  carries them in its last chunk: the usage chunk with `stream_options.include_usage`, else the chunk with `finish_reason`. As with
+  llama.cpp, `prompt_ms` runs until the first generated token and `predicted_ms` from it to the last one; the encoding of images is not in
+  them. These times are measured inside the engine. The speed tables of this project are measured by the client, from the first to the
+  last chunk ([docs/MEASUREMENTS.md](https://github.com/yasakani-dev/yasakani/blob/main/docs/MEASUREMENTS.md)), so their numbers differ from these.
 
 ### Image input (optional)
 
-Image input works on Windows and, with llama.cpp built from source, on Linux (see [Linux](#image-input-on-linux) below). The engine library already has the entry for image features (`yskn_set_visual`); the server feeds it
+Image input works on **Windows**, and on Linux with llama.cpp built from source (contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8); we have not tried it there,
+see [Linux](#image-input-on-linux) below). The engine library already has the entry for image features (`yskn_set_visual`); the server feeds it
 when it is started with three more files. Without them the server is text only, as before: a request with an image is answered with 400 at
 once, without waiting for a running generation.
 
 | | |
 |---|---|
 | `--mmproj` | the projector of Qwen3.8-27B: `mmproj-Qwen3.8-27B-BF16.gguf` from [ggml-org/Qwen3.8-27B-GGUF](https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF) (931,145,888 bytes, sha256 `de2a49866988ea272c43dc2a43ee2662c25725a717ca5b9059ea420a97f53fe8`) |
-| `--llama-dir` | a folder with the unpacked `llama-b10488-bin-win-cpu-x64.zip` of the [llama.cpp release b10488](https://github.com/ggml-org/llama.cpp/releases/tag/b10488) (18,490,962 bytes, sha256 `6c938f6d79aac96cb90fda673aade20cff9b1b6c1e97de04f4d5d60bca107082`); its multimodal library turns the image into features. Only this CPU build is accepted: at start the server compares its `llama.dll`, `mtmd.dll`, `ggml.dll` and `ggml-base.dll` by SHA-256 and refuses a folder with GPU backends (`ggml-cuda.dll` and the like) |
+| `--llama-dir` | Windows: a folder with the unpacked `llama-b10488-bin-win-cpu-x64.zip` of the [llama.cpp release b10488](https://github.com/ggml-org/llama.cpp/releases/tag/b10488) (18,490,962 bytes, sha256 `6c938f6d79aac96cb90fda673aade20cff9b1b6c1e97de04f4d5d60bca107082`); its multimodal library turns the image into features. Only this CPU build is accepted: at start the server compares its `llama.dll`, `mtmd.dll`, `ggml.dll` and `ggml-base.dll` by SHA-256 and refuses a folder with GPU backends (`ggml-cuda.dll` and the like). Linux: a folder with the shared libraries of llama.cpp b10488 built from source ([below](#image-input-on-linux)) |
 | `--vision-model` | a Qwen3.8-27B GGUF. Only its settings and vocabulary are read, never its weights. We tested `Qwen3.8-27B-Q4_K_M.gguf` of [bartowski/Qwen3.8-27B-GGUF](https://huggingface.co/bartowski/Qwen3.8-27B-GGUF) (17,442,399,968 bytes); other GGUF files of this model should work the same way, but we have not tried them |
 | Pillow | install the package with `pip install ".[vision]"` instead of `pip install .`, or add Pillow to the Python that runs `yasakani` with `pip install Pillow` (in a quick-start folder: `venv\Scripts\python -m pip install Pillow`) |
 
@@ -189,7 +207,7 @@ the context, the answer is 400 with the error code `context_length_exceeded`, as
 `--vision-cache FOLDER` keeps the features of images seen before, one file per image: it holds information about every image sent to the
 server, so delete the folder when you no longer want it.
 
-* The image is encoded on the CPU; generation then runs on the GPU as usual. The encode time grows with the square of the image tokens.
+* The image is encoded on the CPU (by default; on Linux see below); generation then runs on the GPU as usual. The encode time grows with the square of the image tokens.
   On our PC (AMD Ryzen 9 9950X3D2, 16 cores) with the default of one thread per physical core (16 threads): 1.2 s for a 512 × 512 image
   (256 image tokens), 12 s for 1280 × 720 (920), 12 to 15 s for any image downsized to the default limit (1920 × 1080, 2048 × 2048,
   4032 × 3024). At full size the same encoder took 51 s for a 1920 × 1080 screenshot with 16 threads and 5 1/2 minutes for a
@@ -201,21 +219,29 @@ server, so delete the folder when you no longer want it.
   the default limit), and `--vision-cache FOLDER` also keeps them on disk.
 * Image understanding was measured by the contributor of this feature (pull request #4) with their own test of 5 levels and 49 questions,
   which is not published: **87.8** with the quality model, against 89.8 for the original BF16 model in llama.cpp. With the projector on the GPU
-  their score fell to 79.6 and 81.6 in two runs, which is why the projector runs on the CPU here. We have not measured image quality ourselves; we checked that it works on an
+  their score fell to 79.6 and 81.6 in two runs, which is why the projector runs on the CPU by default. We have not measured image quality ourselves; we checked that it works on an
   RTX 5090 with the quality model and a few simple test images.
-* <a id="image-input-on-linux"></a>**Linux.** There is no llama.cpp release to compare with, so `--llama-dir` is a folder with the shared libraries of
-  llama.cpp b10488 built from source (`libllama.so`, `libmtmd.so`, `libggml.so`, `libggml-base.so` and the backends; the commands are in
-  [BUILDING.md](../BUILDING.md#image-input-on-linux)). Only their presence is checked at start, not a checksum; the structure layout is
-  still checked when the encoder opens. By default the projector runs on the CPU, as on Windows. With the environment variable
-  `YASAKANI_VISION_GPU=1` and a CUDA build of llama.cpp it runs on the GPU **with flash attention switched off**. Measured by the
-  contributor of the Linux port on an RTX 5090, against the features of the CPU: with flash attention the relative error was 3% at 1,024 image
-  tokens and 10% at 4,096; without it 0.6 to 0.7%, at 0.15 s per 1,024-token image and 0.44 s per 2,048-token image instead of 7 s and 20 s
-  on the CPU (14 threads). Without flash attention the GPU memory of an encode grows with the square of the image tokens: about 4 GiB at
-  2,048, and at 4,096 (about 17 GiB) it did not fit next to the model. The image test above has not been repeated in this mode, so it is off
-  by default. The variable is ignored on Windows.
 * Image tokens get Qwen's three-axis positions (time, row, column); the text after an image continues from the largest of them.
 * Requests without images are handled as before: the same prompt tokens and the same answers. After a request with an image the engine
   starts the next prompt from the beginning (no reuse of the earlier turns).
+
+#### Image input on Linux
+
+Contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8); its author ran it on native Ubuntu 26.04 with an RTX 5090. We have not run image input on Linux, and it is not
+part of an official release. There is no llama.cpp release to compare with, so `--llama-dir` is a folder with the shared libraries of
+llama.cpp b10488 built from source (`libllama.so`, `libmtmd.so`, `libggml.so`, `libggml-base.so` and the backends; the commands are in
+[BUILDING.md](https://github.com/yasakani-dev/yasakani/blob/main/BUILDING.md#image-input-on-linux)). At start the server checks that they are there and that `libggml-base.so`
+reports the version and the commit of b10488 (ggml 0.20.2, commit 9d77fa172; a build without git or from a changed ggml source is
+refused). There is no checksum, so build b10488 unchanged; the structure layout is checked when the encoder opens.
+
+By default the projector runs on the CPU, as on Windows. With the environment variable `YASAKANI_VISION_GPU=1` and a CUDA build of
+llama.cpp it runs on the GPU **with flash attention switched off** (experimental, off by default). Measured by the contributor on an
+RTX 5090, against the features of the CPU: with flash attention the relative error was 3% at 1,024 image tokens and 10% at 4,096;
+without it 0.6 to 0.7%, at 0.15 s per 1,024-token image and 0.44 s per 2,048-token image instead of 7 s and 20 s on the CPU (14 threads).
+Without flash attention the GPU memory of an encode grows with the square of the image tokens: about 4 GiB at 2,048, and at 4,096 (about
+17 GiB) it did not fit next to the model, so with the variable set `--vision-max-image-tokens` can be at most 2,048. The projector
+(0.93 GB) and its work memory then stay on the GPU next to the model. The image test above has not been repeated in this mode. The
+variable is ignored on Windows.
 
 ### Safety of the server
 
@@ -229,7 +255,36 @@ server, so delete the folder when you no longer want it.
 `selfcheck.json` holds, for three short fixed prompts, a hash of the prompt ids and a hash of the greedy output ids made with the reference installation.
 `yasakani selfcheck` produces the same records on your computer and compares them. A *prompt ids differ* result means the tokenizer or template files are
 not the reference ones; an *output differs* result means the weights, the DLL, or the GPU/driver behave differently from the reference. Send the result
-with your report in that case. The reference was made on an RTX 5090; on other GPUs see [above](#gpus-other-than-the-rtx-5090) (exit code 3).
+with your report in that case. The reference was made on an RTX 5090.
+
+On any other GPU (since 0.1.4) the self-check also lets the engine read prompt + reference output, 16 positions per pass, without generating
+anything (teacher forcing). At each of the 285 positions it compares the most likely next token and the NLL of the token that follows with what
+the RTX 5090 computed there. It passes when the most likely token is the same at 98 % of the positions or more and does not change where the
+RTX 5090 preferred it by 2 nats or more, and when, at the 195 positions of the reference output, the NLL differs by 0.015 or less on average and
+by 0.25 or less at any one position. This is checked also when the output is the same. Exit codes: 0 passed (on another GPU: the same
+output and predictions within the tolerances), 1 failed, 2 no reference file, 3 another GPU whose output differs but whose predictions are
+within the tolerances. On the RTX 5090 the comparison with the reference stays exact, as before. For scale, measured on the RTX 5090 by the same comparison
+(`docs/MEASUREMENTS.md`): the 8-bit key-value cache instead of KV5 differs by 0.0056 on average and 0.081 at most (99.6 % the same token)
+and passes; the fastest model's weights against the quality model's reference differ by 0.028 and 0.53 (97.2 %) and fail. The tolerances
+were chosen on the RTX 5090; the check has not been run on another GPU yet, so a card that computes correctly could still fail it, or a
+small fault could pass it: on the RTX 5090 it did not find one matrix scaled by 1.25, all 400 layer matrices scaled by 1.02, or one bit changed in
+every 4,096th byte of 64 matrices.
+
+Since 0.1.4 every GPU, the RTX 5090 included, then also checks itself, with no reference and no tolerance (the *self-consistency* lines).
+It generates the answer of a prompt that copies most of its input (60 short JSON lines with two values changed, thinking off; on compute
+capability 12.x the copied part is checked in passes of up to 64 positions), reads prompt + answer again in passes of 16 positions, and
+every generated token must be the most likely token at its position. Where passes of more than 16 positions are used, it also reads the
+text in passes of 64, and every prediction (the most likely token and the NLL, bit for bit) must be the same as in passes of 16. The engine
+computes passes of every width with the same integer sums in the same order, so on a card that computes correctly both comparisons agree
+exactly; any difference fails the self-check (exit code 1). This finds a card whose passes of different widths do not agree; damaged
+weights give the same wrong answer in both readings, which is what `yasakani verify` and the comparison with the reference are for. On the
+RTX 5090 it takes 3.5 to 3.7 s (prompt 1,127 tokens, answer 1,080 tokens, 15 of its 27 passes wider than 16 positions) and passed with both
+models.
+
+The predictions of the RTX 5090 for the two published `selfcheck.json` files are in the package (`yasakani/_selfcheck_ref.py`).
+`selfcheck --write` writes the full output and the predictions into a new reference file, and the name of the GPU (information only). Write
+reference files on an RTX 5090: other GPUs compare their predictions with the file as if it came from one (on another GPU `--write` prints a
+note). A reference file written before 0.1.4 has neither; with it, another GPU passes only with the same output.
 
 The three prompts are short on purpose. Output is not guaranteed to be bit-identical from run to run while other programs use the GPU at the
 same time (see `docs/MEASUREMENTS.md` in the repository). In our checks the three self-check requests were identical in all 180 repeats and
@@ -259,6 +314,11 @@ The package sets the engine's environment variables itself (`yasakani.runtime.DE
 before it opens the model, because a stray setting silently changes the engine. The published results were measured with the defaults; changing them
 means running an engine configuration that the self-check and the published numbers do not cover.
 
+0.1.4 adds the settings of the saved prompt states to `DEFAULT_ENV` (`YSKN_SNAP_SLOTS` 8, `YSKN_SNAP_STEP` 1024, `YSKN_SNAP_TAIL` 4096,
+`YSKN_SNAP_SPARSE` 65536, `YSKN_SNAP_MIN` 8192) and two look-ahead settings to `DEFAULT_SPEC`: `copy_rows` (64: copy passes of up to 64 rows,
+used on compute capability 12.x) and `copy_index` (1: the copy index with the cursor). `copy_rows=16, copy_index=0` is the look-ahead of 0.1.3. These values are the current defaults; they
+have not been tuned. An older package that does not set `YSKN_SNAP_SLOTS` gets one saved state, as with 0.1.3.
+
 ## Troubleshooting
 
 * *engine library not found / could not be loaded* - give `--dll`, and install the Visual C++ runtime linked above.
@@ -272,6 +332,9 @@ means running an engine configuration that the self-check and the published numb
   (`/effort medium`, `/effort low` or `/think off` in `yasakani chat`).
 * *cannot listen on 127.0.0.1:8765* - another program (or a second server) uses the port; pick another with `--port`.
 * *output differs in selfcheck* - run `yasakani verify` first (a damaged download is the most common cause), then run the self-check once more.
+  On a GPU other than the RTX 5090, *self-check FAILED* after the comparison of the predictions, or after the self-consistency lines on any
+  GPU, means, when `verify` passes, that the engine probably does not compute correctly on that GPU: please report it with the output of
+  `yasakani info` and of the self-check.
 
 ## Tests
 
