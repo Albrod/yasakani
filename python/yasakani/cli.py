@@ -161,14 +161,14 @@ def _open_stack(args, *, warm: bool = True):
     note = gpus.untested_note(det)
     if note:
         _say(note)
-    max_ctx, profile = args.max_ctx, None
-    if max_ctx is None:                          # 0.1.3: a context that fits the free GPU memory (unchanged on the RTX 5090)
+    if args.max_ctx is None:                     # 0.1.3: a context that fits the free GPU memory (unchanged on the RTX 5090)
         plan = gpus.plan_context(pack, det)
-        for line in plan.notes:
-            _say(line)
-        max_ctx = plan.max_ctx
-        if plan.env:
-            profile = RuntimeProfile.default(pack, plan.env)
+    else:                                        # a given context is used as it is; the draft model's output head only where it fits
+        plan = gpus.plan_given_context(pack, det, args.max_ctx)
+    for line in plan.notes:
+        _say(line)
+    max_ctx = plan.max_ctx
+    profile = RuntimeProfile.default(pack, plan.env) if plan.env else None
     _say("loading the model (%s of weights) ..." % _human(pack.weights.stat().st_size))
     t0 = time.time()
     eng = Engine(pack, max_ctx=max_ctx, device=args.device, dll=args.dll, profile=profile)

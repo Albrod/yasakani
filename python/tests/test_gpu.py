@@ -255,6 +255,27 @@ class ContextRuleTests(unittest.TestCase):
         det = det_of("0, GPU-1, NVIDIA GeForce RTX 4080, 8.9, 16376, [N/A], 581.57")
         self.assertEqual(G.plan_context(FakePack(FASTEST), det).max_ctx, None)
 
+    def test_given_context(self):
+        """--max-ctx: the context stays as given; the draft model's output head only where it fits beside it (plan_given_context)."""
+        ti = det_of(smi_line(0, "NVIDIA GeForce RTX 5070 Ti", "12.0", 16303, 340))     # no display on the card: 340 MiB in use
+        plan = G.plan_given_context(FakePack(FASTEST), ti, 16384)                    # the head fits beside 16,384 tokens
+        self.assertEqual((plan.max_ctx, plan.env, plan.notes), (16384, {}, []))
+        plan = G.plan_given_context(FakePack(FASTEST), ti, 98304)                    # it does not beside 98,304 (0.1.4 loaded it anyway)
+        self.assertEqual((plan.max_ctx, plan.env), (98304, {"YSKN_BDR_SHEAD": "0"}))
+        self.assertEqual(len(plan.notes), 1)
+        self.assertIn("bdraft2_k8.shead", plan.notes[0])
+        self.assertIn("beside 98304 tokens", plan.notes[0])
+        self.assertNotIn("context: ", plan.notes[0])                                 # only the rule's own choice is reported that way
+        plan = G.plan_given_context(FakePack(FASTEST), ti, 1048576)                  # far too long: still tried as given
+        self.assertEqual((plan.max_ctx, plan.env), (1048576, {"YSKN_BDR_SHEAD": "0"}))
+        rtx4090 = det_of(smi_line(0, "NVIDIA GeForce RTX 4090", "8.9", 24564, 4000))
+        self.assertEqual(G.plan_given_context(FakePack(QUALITY), rtx4090, 163840).env, {})     # what plan_context chooses there
+        self.assertEqual(G.plan_given_context(FakePack(QUALITY), rtx4090, 262144).env, {"YSKN_BDR_SHEAD": "0"})
+        for det in (det_of(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 20000)), G.Detected(),
+                    det_of("0, GPU-1, NVIDIA GeForce RTX 4080, 8.9, 16376, [N/A], 581.57")):   # 30,000 MiB or more, or unknown: unchanged
+            plan = G.plan_given_context(FakePack(QUALITY), det, 262144)
+            self.assertEqual((plan.max_ctx, plan.env, plan.notes), (262144, {}, []))
+
 
 class QuickstartTests(unittest.TestCase):
     """The quickstart's own copy of the decision and the rule (it runs before the package is installed)."""
@@ -408,7 +429,17 @@ class CliGpuTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("(context 8192 tokens)", r.stderr)
         self.assertNotIn("context: ", r.stderr)
+        self.assertNotIn("bdraft2_k8.shead", r.stderr)                                    # the head fits beside 8,192 tokens
         self.assertIn("not optimized or tested", r.stderr)
+
+    def test_given_context_leaves_out_the_head(self):
+        gpus = [self.gpu("NVIDIA GeForce RTX 4080", "8.9", 16376, 11418)]                 # about 4,958 MiB free beside the placeholders
+        r = self.run_cli(gpus, "chat", *self.common(), "--no-think", "--max-ctx", "98304")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("bdraft2_k8.shead", r.stderr)
+        self.assertIn("is not loaded: it does not fit beside 98304 tokens", r.stderr)
+        self.assertIn("(context 98304 tokens)", r.stderr)                               # the given context, unchanged
+        self.assertNotIn("context: ", r.stderr)
 
     def test_does_not_fit(self):
         r = self.run_cli([self.gpu("NVIDIA GeForce RTX 4080", "8.9", 16376, 14000)], "chat", *self.common())
@@ -564,6 +595,33 @@ class OpenStackTests(unittest.TestCase):
             self.assertTrue(args.gpu_detected.untested)
         finally:
             eng.close()
+
+    def test_given_context_head_reaches_the_engine(self):
+        """--max-ctx: the head is left out where it does not fit beside the given context, and loaded where it does."""
+        from yasakani import cli
+        folder = support.make_real_folder("given")
+        self.addCleanup(shutil.rmtree, folder.parent, True)
+        with open(folder / "bdraft2_k8.shead", "wb") as f:
+            f.truncate(FASTEST[2])
+        gpus = G.parse(smi_line(0, "NVIDIA GeForce RTX 5070 Ti", "12.0", 16303, 11300))     # about 5,000 MiB free
+        saved = {k: v for k, v in os.environ.items() if k.startswith("YSKN_")}
+
+        def restore():
+            for k in [k for k in os.environ if k.startswith("YSKN_")]:
+                del os.environ[k]
+            os.environ.update(saved)
+        self.addCleanup(restore)
+        for ctx, head_off in (("98304", True), ("16384", False)):
+            args = cli.build_parser().parse_args(["chat", "--model-dir", str(folder), "--dll", str(support.stub_path()), "--max-ctx", ctx])
+            with mock.patch.object(G, "query", return_value=gpus):
+                pack, eng, fmt, runner = cli._open_stack(args, warm=False)
+            try:
+                head = "0" if head_off else str(pack.draft_head)                     # "0" leaves it out; its path loads it
+                self.assertEqual(eng.max_ctx, int(ctx))
+                self.assertEqual(eng.profile.env["YSKN_BDR_SHEAD"], head)
+                self.assertEqual(os.environ["YSKN_BDR_SHEAD"], head)
+            finally:
+                eng.close()
 
 
 if __name__ == "__main__":
