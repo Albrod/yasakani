@@ -222,9 +222,18 @@ def _is_string_schema(schema) -> bool:
 
 def convert_parameter(value: str, schema) -> object:
     """The text of one <parameter> block as a JSON value.  A parameter declared as a string stays text; anything else is read as
-    JSON when it is JSON (numbers, booleans, lists, objects) and stays text when it is not."""
+    JSON when it is JSON (numbers, booleans, lists, objects) and stays text when it is not.  A parameter declared as a boolean
+    (or one that may be null) also takes Python's spelling, which the model sometimes writes: True, False, None."""
     if _is_string_schema(schema):
         return value
+    if isinstance(schema, dict):
+        t = schema.get("type")
+        types = [t] if isinstance(t, str) else t if isinstance(t, list) else []
+        word = value.strip()
+        if word in ("True", "False") and "boolean" in types:
+            return word == "True"
+        if word == "None" and "null" in types:
+            return None
     try:
         v = json.loads(value)
     except (ValueError, TypeError):
