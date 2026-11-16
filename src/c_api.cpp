@@ -6,20 +6,32 @@
 #include "gpu_caps.hpp"
 #include <chrono>
 #include "yskn_abi.h"
+#include <cuda_runtime.h>
 #include <string>
 #include <atomic>
 #include <algorithm>
 namespace yskn { extern std::atomic<int> g_specx_cancel; }   
 static thread_local std::string g_err;
-struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; };   
+struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; int dev = -1; };   
+// The CUDA current device belongs to the host thread, and callers use other threads than the one that opened the engine (the
+// Python package generates on a new thread for every request; the server answers on request threads). A thread that never chose
+// a device runs on CUDA device 0. So every call that reaches CUDA first makes the engine's GPU current on the calling thread
+// (issue #20: --device 1 with two GPUs visible failed with "graph instantiate failed"). It is not set back afterwards: setting
+// device 0 again on a new thread would create a context on that GPU.
+static void on_gpu(const yskn_engine* e) {
+  if (!e || e->dev < 0) return;
+  const cudaError_t r = cudaSetDevice(e->dev);
+  if (r != cudaSuccess) throw std::runtime_error("cannot make CUDA device " + std::to_string(e->dev) + " current on this thread (" + cudaGetErrorString(r) + ")");
+}
 static yskn::Engine& E(yskn_engine* e) { if (!e->e) throw std::runtime_error("this API is not available for the qwen3_5 engine yet"); return *e->e; }
-#define YSKN_TRY(body) try { body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
+#define YSKN_TRY(body) try { on_gpu(e); body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
 extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int flags) {
   try { yskn::select_gpu(device); std::string arch; { yskn::Container c; c.open(path); arch = c.model.arch; }
-    if (arch == "qwen3_5") return new yskn_engine{nullptr, new yskn::Engine35(path, max_ctx, flags)};
-    return new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr}; } catch (const std::exception& ex) { g_err = ex.what(); return nullptr; }
+    yskn_engine* r = arch == "qwen3_5" ? new yskn_engine{nullptr, new yskn::Engine35(path, max_ctx, flags)}
+                                       : new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr};
+    r->dev = device; return r; } catch (const std::exception& ex) { g_err = ex.what(); return nullptr; }
 }
-extern "C" void yskn_close(yskn_engine* e) { if (e) { delete e->e; delete e->q; delete e; } }
+extern "C" void yskn_close(yskn_engine* e) { if (e) { try { on_gpu(e); } catch (const std::exception&) {} delete e->e; delete e->q; delete e; } }
 extern "C" int yskn_reset(yskn_engine* e) { YSKN_TRY(if (e->q) e->q->reset(); else e->e->reset()) }
 extern "C" int yskn_prefill(yskn_engine* e, const int32_t* ids, int n, int32_t* first) { YSKN_TRY(*first = e->q ? e->q->prefill(ids, n) : e->e->prefill(ids, n)) }
 extern "C" int yskn_decode(yskn_engine* e, int32_t* out, int steps) { YSKN_TRY(if (e->q) e->q->decode(out, steps); else e->e->decode(out, steps)) }
@@ -46,6 +58,7 @@ extern "C" YSKN_TEST_API int yskn_test_xsum(yskn_engine* e, const char* name, in
 extern "C" YSKN_TEST_API int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(*ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }
 extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_prompt, int n_gen, const int32_t* cfg, int n_cfg, int32_t* out_ids, double* stats, double* times_ms) {
   try {
+    on_gpu(e);
     if (n_cfg < 12) throw std::runtime_error("spec_generate: need at least 12 config values");
     e->cancel.store(0);                                   
     yskn::SpecxConfig c; c.cancel = &e->cancel; c.gamma = cfg[0]; c.use_d0 = cfg[1]; c.use_d1 = cfg[2]; c.d0_nmin = cfg[3]; c.d0_nmax = cfg[4]; c.d0_priority_n = cfg[5];
@@ -123,8 +136,8 @@ extern "C" int yskn_verify_device(yskn_engine* e, int M, int use_graph, int32_t*
 extern "C" int yskn_set_verify_tokens(yskn_engine* e, const int32_t* ids, int first_row, int n) { YSKN_TRY(if (e->q) e->q->set_verify_tokens(ids, first_row, n); else e->e->set_verify_tokens(ids, first_row, n)) }
 extern "C" int yskn_draft_debug(yskn_engine* e, int which, int n, float* out) { YSKN_TRY(E(e).draft_debug(which, n, out)) }
 extern "C" int yskn_time_draft(yskn_engine* e, int mode, int a, int steps, int iters, float* ms) { YSKN_TRY(*ms = E(e).time_draft(mode, a, steps, iters)) }
-extern "C" int yskn_specx_load_static(const char* path) { YSKN_TRY(yskn::specx_load_static(path)) }
-extern "C" unsigned yskn_xsum_nonfinite(yskn_engine* e) { return e->e ? e->e->xsum_nonfinite() : 0u; }
+extern "C" int yskn_specx_load_static(const char* path) { try { yskn::specx_load_static(path); return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; } }
+extern "C" unsigned yskn_xsum_nonfinite(yskn_engine* e) { try { on_gpu(e); } catch (const std::exception&) { return 0u; } return e->e ? e->e->xsum_nonfinite() : 0u; }
 extern "C" int yskn_draft_catchup(yskn_engine* e, int p0, int n, const int32_t* toks, int use_graph) { YSKN_TRY(if (e->q) e->q->draft_catchup(p0, n, toks, use_graph); else e->e->draft_catchup(p0, n, toks, use_graph)) }
 extern "C"  int yskn_debug_kv_hash(yskn_engine* e, uint64_t* out) { YSKN_TRY(*out = E(e).debug_kv_hash()) }
 extern "C" YSKN_API int yskn_state_hash(yskn_engine* e, uint64_t* out, int max_out, int* n_out) { YSKN_TRY(if (!e->q) throw std::runtime_error("state_hash: qwen3_5 engine only"); *n_out = e->q->state_hash(out, max_out)) }
@@ -145,7 +158,7 @@ extern "C" YSKN_API int yskn_bdraft_ring(yskn_engine* e, int layer, int slot0, i
 extern "C"  int yskn_shared_info(yskn_engine* e, uint64_t* out) { YSKN_TRY(if (!e->q) throw std::runtime_error("27B only"); e->q->shared_info(out)) }
 
 extern "C"  int yskn_nll_layer(yskn_engine* e,const int32_t* ids,int n,float* out) {
-  try {if(!e->q)throw std::runtime_error("nll_layer needs 27B");e->q->nll_layer(ids,n,out);return 0;}
+  try {on_gpu(e);if(!e->q)throw std::runtime_error("nll_layer needs 27B");e->q->nll_layer(ids,n,out);return 0;}
   catch(const std::exception& ex){g_err=ex.what();return -1;}
 }
 extern "C"  int yskn_layer_info(yskn_engine* e,uint64_t* out) {
