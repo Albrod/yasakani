@@ -95,6 +95,13 @@ The tables were measured on an RTX 5090; other GPUs are slower, and we have not 
 becomes several times slower. In that case a warning that the GPU memory is almost full is printed at start. Close the other programs, or
 lower `--max-ctx`. The speed also depends on what you ask (see "Will I see the same speed?" above).
 
+A monitor on the same GPU can also cost a lot. In one report ([#18](https://github.com/yasakani-dev/yasakani/issues/18)), an RTX 5070 Ti
+that also drove two monitors (one of them at 240 Hz) generated 1.5 to 2.1 times as fast once the monitors were moved to the CPU's
+integrated graphics: about half the speed of the RTX 5090, as its memory bandwidth suggests. The tokens per pass were the same; with
+the monitors on the card each pass took longer. If your PC has integrated graphics, connecting the monitors to the motherboard leaves
+the GPU to YASAKANI (`nvidia-smi --query-gpu=display_active --format=csv` then says `Disabled`). The cause is not known yet, and we
+have not measured it on other cards.
+
 ## It only thinks and never answers
 
 By default the model thinks before it answers, at its longest thinking setting. On requests that ask for a certain number of characters, or for
