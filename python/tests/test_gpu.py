@@ -191,6 +191,61 @@ class SelectTests(unittest.TestCase):
         self.assertTrue(det.tested)
 
 
+# issue #20: an RTX A2000 12 GB at PCI 01:00.0 (nvidia-smi's GPU 0, the display) and an RTX 5060 Ti 16 GB at 02:00.0
+REPORTED = [smi_line(0, "NVIDIA RTX A2000 12GB", "8.6", 12282, 826, "GPU-a2000000-0000"),
+            smi_line(1, "NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 400, "GPU-50600000-0000")]
+PCI = {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+
+
+class DeviceOrderTests(unittest.TestCase):
+    """0.1.5: --device N is nvidia-smi's GPU N (the package sets CUDA_DEVICE_ORDER=PCI_BUS_ID), and the plan is made for that GPU."""
+
+    def gpus(self):
+        return G.parse("\n".join(REPORTED))
+
+    def test_device_numbers(self):
+        gs = self.gpus()
+        self.assertEqual(G.select(gs, 0, PCI)[0].name, "NVIDIA RTX A2000 12GB")
+        self.assertEqual(G.select(gs, 1, PCI)[0].name, "NVIDIA GeForce RTX 5060 Ti")
+        self.assertEqual(G.select(gs, 2, PCI), [])
+        self.assertTrue(G.detect(1, environ=PCI, gpus=gs).numbered)
+        self.assertEqual(len(G.select(gs, 0, {})), 2)                          # CUDA's own order (0.1.4): not known which
+        self.assertFalse(G.detect(0, environ={}, gpus=gs).numbered)
+        self.assertTrue(G.detect(0, environ={}, gpus=gs[:1]).numbered)          # one GPU: always known
+        det = G.detect(0, environ=dict(PCI, CUDA_VISIBLE_DEVICES="GPU-5060"), gpus=gs)
+        self.assertEqual((det.gpu.name, det.numbered), ("NVIDIA GeForce RTX 5060 Ti", False))
+
+    def test_plan_for_the_chosen_gpu(self):
+        plan = G.plan_context(FakePack(FASTEST), G.detect(1, environ=PCI, gpus=self.gpus()))
+        self.assertEqual((plan.max_ctx, plan.env, plan.free_mib), (98304, {"YSKN_BDR_SHEAD": "0"}, 15911))
+        self.assertFalse(any("GPUs" in n for n in plan.notes))
+        with self.assertRaises(YasakaniError) as cm:                           # GPU 0 is the A2000: it says so, and which GPU has room
+            G.plan_context(FakePack(FASTEST), G.detect(0, environ=PCI, gpus=self.gpus()))
+        msg = str(cm.exception)
+        self.assertIn("(11456 of 12282 MiB free; it needs about 13906 MiB with a context of 16384 tokens)", msg)
+        self.assertIn("That is nvidia-smi's GPU 0 (NVIDIA RTX A2000 12GB); GPU 1 (NVIDIA GeForce RTX 5060 Ti, 15911 MiB free) has room "
+                      "for it: add --device 1.", msg)
+        with self.assertRaises(YasakaniError) as cm:                           # CUDA_DEVICE_ORDER set to something else: why the numbers
+            G.plan_context(FakePack(FASTEST), G.detect(0, environ={"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}, gpus=self.gpus()))
+        self.assertIn("This PC has 2 GPUs and CUDA's device 0 cannot be matched", str(cm.exception))
+        self.assertNotIn("add --device", str(cm.exception))
+        with self.assertRaises(YasakaniError) as cm:                           # named by UUID: no --device advice (it counts otherwise)
+            G.plan_context(FakePack(FASTEST), G.detect(0, environ=dict(PCI, CUDA_VISIBLE_DEVICES="GPU-a2000"), gpus=self.gpus()))
+        self.assertIn("That is nvidia-smi's GPU 0 (NVIDIA RTX A2000 12GB).  Close", str(cm.exception))
+
+    def test_one_gpu_message_unchanged(self):
+        for env in ({}, PCI):
+            with self.assertRaises(YasakaniError) as cm:
+                G.plan_context(FakePack(FASTEST), det_of(smi_line(0, "NVIDIA GeForce RTX 4080", "8.9", 16376, 14000), environ=env))
+            self.assertEqual(str(cm.exception), "the model does not fit in the free GPU memory (2376 of 16376 MiB free; it needs about 13906 "
+                             "MiB with a context of 16384 tokens).  Close other programs that use the GPU, or give --max-ctx to try anyway.")
+
+    def test_numbering_line(self):
+        self.assertEqual(G.numbering(PCI), "--device N is GPU N above (PCI bus order)")
+        self.assertIn("CUDA_VISIBLE_DEVICES=GPU-50600000", G.numbering(dict(PCI, CUDA_VISIBLE_DEVICES="GPU-50600000")))
+        self.assertIn("CUDA_DEVICE_ORDER=FASTEST_FIRST", G.numbering({"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}))
+
+
 class ContextRuleTests(unittest.TestCase):
     """The rule, with the numbers of the published files (yasakani/gpu.py: choose, plan_context)."""
 
@@ -323,8 +378,12 @@ class QuickstartTests(unittest.TestCase):
         self.assertEqual((g["index"], v, pin), (0, "small", None))
         g, v, pin = qs.pick_gpu(two, environ={"CUDA_VISIBLE_DEVICES": "GPU-aaaa"})       # the user chose one
         self.assertEqual((g["index"], v, pin), (0, "small", None))
-        g, v, pin = qs.pick_gpu(two, environ={"CUDA_VISIBLE_DEVICES": "0"})              # not known which: the less able one
+        g, v, pin = qs.pick_gpu(two, environ={"CUDA_VISIBLE_DEVICES": "0"})              # 0.1.5: numbers are nvidia-smi's (PCI order)
         self.assertEqual((g["index"], v, pin), (0, "small", None))
+        g, v, pin = qs.pick_gpu(two, environ={"CUDA_VISIBLE_DEVICES": "1"})
+        self.assertEqual((g["index"], v, pin), (1, "tested", None))
+        g, v, pin = qs.pick_gpu(two, environ={"CUDA_VISIBLE_DEVICES": "1", "CUDA_DEVICE_ORDER": "FASTEST_FIRST"})   # not known which:
+        self.assertEqual((g["index"], v, pin), (0, "small", None))                                                # the less able one
         three = qs.parse_gpus("\n".join([smi_line(0, "NVIDIA GeForce RTX 4080", "8.9", 16376, 100, "GPU-c"),
                                          smi_line(1, "NVIDIA GeForce RTX 3090", "8.6", 24576, 900, "GPU-d"),
                                          smi_line(2, "NVIDIA GeForce RTX 2080 Ti", "7.5", 11264, 0, "GPU-e")]))
@@ -460,6 +519,30 @@ class CliGpuTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("NVIDIA GeForce RTX 3090, 24576 MiB, 500 MiB", r.stdout)
         self.assertIn("GPU 0: compute capability 8.6 - runs since 0.1.3, but not optimized or tested", r.stdout)
+
+    def test_two_gpus_device_numbers(self):
+        """issue #20: --device N runs on nvidia-smi's GPU N, and the free-memory check looks at that GPU."""
+        # the folder's weights are placeholders (only the head has its published size): the used memory stands in for the weights
+        gpus = [self.gpu("NVIDIA RTX A2000 12GB", "8.6", 12282, 9500, 0), self.gpu("NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 11353, 1)]
+        log = self.folder.parent / "open_two.log"
+        r = self.run_cli(gpus, "chat", *self.common(), "--no-think", "--device", "1", stub=dict(STUB_OPEN_LOG=str(log)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("NVIDIA GeForce RTX 5060 Ti (compute capability 12.0)", r.stderr)
+        self.assertIn("context: 98304 tokens, chosen from the free GPU memory (4958 of 16311 MiB free)", r.stderr)
+        self.assertEqual(log.read_text().splitlines(), ["device=1 order=PCI_BUS_ID visible=(unset)"])
+        r = self.run_cli(gpus, "chat", *self.common(), "--device", "0", stub=dict(STUB_OPEN_LOG=str(log)))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("(2782 of 12282 MiB free", r.stderr)
+        self.assertIn("add --device 1", r.stderr)
+        self.assertNotIn("loading the model", r.stderr)
+        r = self.run_cli(gpus, "chat", *self.common(), "--no-think", "--device", "0", "--max-ctx", "8192",
+                         stub=dict(STUB_OPEN_LOG=str(log), CUDA_DEVICE_ORDER="FASTEST_FIRST"))
+        self.assertEqual(r.returncode, 0, r.stderr)                            # a value the user set is kept
+        self.assertEqual(log.read_text().splitlines()[-1], "device=0 order=FASTEST_FIRST visible=(unset)")
+        r = self.run_cli(gpus, "info", *self.common())
+        self.assertIn("--device N is GPU N above (PCI bus order)", r.stdout)
+        r = self.run_cli(gpus[:1], "info", *self.common())
+        self.assertNotIn("--device", r.stdout)                                   # one GPU: as before
 
     def test_selfcheck_exit_codes(self):
         ref = self.folder.parent / "ref_gpu.json"

@@ -5,6 +5,7 @@
 #include <stdatomic.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -51,7 +52,16 @@ EXPORT int stub_nhist(yskn_engine *e) { return e->nhist; }
 EXPORT int stub_last_cfg(int32_t *out) { memcpy(out, g_last_cfg, sizeof g_last_cfg); return g_last_n_cfg; }
 
 EXPORT yskn_engine *yskn_open(const char *path, int max_ctx, int device, int flags) {
-    (void)device; (void)flags;
+    (void)flags;
+    const char *log = getenv("STUB_OPEN_LOG");               /* what the real engine would see: the device and CUDA's numbering */
+    if (log && log[0]) {
+        FILE *f = fopen(log, "a");
+        if (f) {
+            const char *order = getenv("CUDA_DEVICE_ORDER"), *vis = getenv("CUDA_VISIBLE_DEVICES");
+            fprintf(f, "device=%d order=%s visible=%s\n", device, order ? order : "(unset)", vis ? vis : "(unset)");
+            fclose(f);
+        }
+    }
     if (strstr(path, "fail")) { set_err("cudaMalloc failed: out of memory"); return 0; }
     yskn_engine *e = calloc(1, sizeof *e);
     e->max_ctx = max_ctx;

@@ -55,3 +55,26 @@ class NativeTests(unittest.TestCase):
                     self.assertEqual(_native.NativeLib(path).path, stub.resolve())
         finally:
             os.chdir(old)
+
+    def test_pci_bus_order(self):
+        """0.1.5 (issue #20): CUDA numbers the GPUs as nvidia-smi does, unless the user set CUDA_DEVICE_ORDER."""
+        env = {}
+        _native.pci_bus_order(env)
+        self.assertEqual(env, {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        for kept in ("FASTEST_FIRST", "PCI_BUS_ID", ""):
+            env = {"CUDA_DEVICE_ORDER": kept}
+            _native.pci_bus_order(env)
+            self.assertEqual(env["CUDA_DEVICE_ORDER"], kept)
+
+    def test_set_before_the_library_loads(self):
+        stub = support.stub_path()
+        real, seen = _native.C.CDLL, []
+
+        def load(path, *a, **k):
+            seen.append(os.environ.get("CUDA_DEVICE_ORDER"))
+            return real(path, *a, **k)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CUDA_DEVICE_ORDER", None)
+            with mock.patch.object(_native.C, "CDLL", side_effect=load):
+                _native.NativeLib(str(stub))
+        self.assertEqual(seen, ["PCI_BUS_ID"])

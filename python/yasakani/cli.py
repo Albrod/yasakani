@@ -20,7 +20,7 @@ from typing import List, Optional, Sequence
 
 from . import __version__
 from . import gpu as gpus
-from ._native import YasakaniError, find_library
+from ._native import YasakaniError, find_library, pci_bus_order
 from .runtime import ModelPack, RuntimeProfile
 from .selfcheck import FORMAT as SELFCHECK_FORMAT
 from .selfcheck import cases as _selfcheck_cases, ids_sha as _ids_sha, run as _selfcheck_run    # noqa: F401  (names of 0.1.3: bench scripts use them)
@@ -74,11 +74,12 @@ def _gpu_lines() -> List[str]:
     return lines or ["nvidia-smi reported no GPU"]
 
 
-def _gpu_memory_warning(device: int = 0) -> Optional[str]:
+def _gpu_memory_warning(device: Optional[int] = 0) -> Optional[str]:
     """After loading: is the GPU's memory (almost) full?  When the model does not fit, Windows keeps part of it in ordinary memory
-    and generation becomes several times slower, without any error.  None when all is well or when it cannot be told."""
+    and generation becomes several times slower, without any error.  None when all is well or when it cannot be told.  ``device`` is
+    nvidia-smi's row of the GPU (None: not known which)."""
     exe = gpus.smi_path()                       # nvidia-smi, or the one YASAKANI_NVIDIA_SMI names
-    if not exe:
+    if not exe or device is None:
         return None
     try:
         r = subprocess.run([exe, "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"],
@@ -100,7 +101,7 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--max-ctx", type=int, default=None,
                     help="context length in tokens: input + thinking + answer (default: the model's 262144; on a GPU with less than "
                          "30,000 MiB, the longest that fits the free GPU memory)")
-    sp.add_argument("--device", type=int, default=0, help="CUDA device index (default 0)")
+    sp.add_argument("--device", type=int, default=0, help="the GPU to use, numbered as in `yasakani info` and nvidia-smi (default 0)")
     sp.add_argument("--seed0", type=int, default=1, help="seed of the first request; every request without its own seed uses the next one")
 
 
@@ -182,7 +183,7 @@ def _open_stack(args, *, warm: bool = True):
         eng.close()
         raise
     _say("model ready in %.0f s (context %d tokens)" % (time.time() - t0, eng.max_ctx))
-    note = _gpu_memory_warning(det.gpu.index if det.gpu else args.device)    # nvidia-smi's row of the GPU, when it is known
+    note = _gpu_memory_warning(det.gpu.index if det.gpu else (0 if len(det.gpus) < 2 else None))    # nvidia-smi's row, when it is known
     if note:
         _say(note)
     return pack, eng, fmt, runner
@@ -209,8 +210,11 @@ def cmd_info(args) -> int:
         ok = False
     for ln in _gpu_lines():
         print("gpu      " + ln)
-    for g in gpus.query() or []:
+    found = gpus.query() or []
+    for g in found:
         print("         GPU %d: compute capability %s - %s" % (g.index, g.cc_text, gpus.describe(g)))
+    if len(found) > 1:
+        print("         " + gpus.numbering())
     d = getattr(args, "model_dir", None) or os.environ.get("YASAKANI_MODEL_DIR")
     if d:
         try:
@@ -637,6 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     _fix_console()
+    pci_bus_order()                              # 0.1.5: --device N is nvidia-smi's GPU N; set before anything can start CUDA
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args) or 0)

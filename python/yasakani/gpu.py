@@ -145,10 +145,12 @@ def query(environ: Optional[Mapping[str, str]] = None, run: Callable = subproces
 @dataclass
 class Detected:
     """What is known about the GPU the engine will use.  ``candidates`` has one entry when it is known which GPU that is, several when
-    the PC has more than one and CUDA's numbering cannot be matched with nvidia-smi's, and none when nothing is known."""
+    the PC has more than one and CUDA's numbering cannot be matched with nvidia-smi's, and none when nothing is known.  ``numbered`` is
+    True when CUDA's device numbers are nvidia-smi's indexes (one GPU, or PCI bus order without ``CUDA_VISIBLE_DEVICES``)."""
     gpus: List[GpuInfo] = field(default_factory=list)
     candidates: List[GpuInfo] = field(default_factory=list)
     device: int = 0
+    numbered: bool = False
 
     @property
     def gpu(self) -> Optional[GpuInfo]:
@@ -183,14 +185,29 @@ class Detected:
                        used_mib=t - f, compute_cap=min(caps) if caps else None)
 
 
+def _pci_order(env: Mapping[str, str]) -> bool:
+    return (env.get("CUDA_DEVICE_ORDER") or "").strip().upper() == "PCI_BUS_ID"
+
+
+def numbering(environ: Optional[Mapping[str, str]] = None) -> str:
+    """How ``--device`` relates to nvidia-smi's GPU numbers (one line for ``yasakani info`` on a PC with several GPUs)."""
+    env = os.environ if environ is None else environ
+    if "CUDA_VISIBLE_DEVICES" in env:
+        return "--device counts only the GPUs in CUDA_VISIBLE_DEVICES=%s, in that order" % env.get("CUDA_VISIBLE_DEVICES")
+    if not _pci_order(env):
+        return "--device follows CUDA_DEVICE_ORDER=%s, not the GPU numbers above" % env.get("CUDA_DEVICE_ORDER")
+    return "--device N is GPU N above (PCI bus order)"
+
+
 def select(gpus: Sequence[GpuInfo], device: int = 0, environ: Optional[Mapping[str, str]] = None) -> List[GpuInfo]:
     """The GPU(s) that CUDA device ``device`` can be.  nvidia-smi numbers GPUs in PCI order; CUDA does too only with
-    ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` (its default puts the fastest first), and ``CUDA_VISIBLE_DEVICES`` renumbers them."""
+    ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` (its default puts the fastest first; since 0.1.5 the package sets PCI_BUS_ID when it is not set,
+    :func:`yasakani._native.pci_bus_order`), and ``CUDA_VISIBLE_DEVICES`` renumbers them."""
     env = os.environ if environ is None else environ
     gpus = list(gpus)
     if not gpus or device < 0:
         return []
-    pci_order = (env.get("CUDA_DEVICE_ORDER") or "").strip().upper() == "PCI_BUS_ID"
+    pci_order = _pci_order(env)
     if "CUDA_VISIBLE_DEVICES" in env:
         entries = [e.strip() for e in (env.get("CUDA_VISIBLE_DEVICES") or "").split(",") if e.strip()]
         if device >= len(entries):
@@ -214,7 +231,9 @@ def detect(device: int = 0, environ: Optional[Mapping[str, str]] = None, gpus: O
     """Ask nvidia-smi once (unless ``gpus`` is given) and match CUDA device ``device``.  Never raises."""
     if gpus is None:
         gpus = query(environ, run=run) or []
-    return Detected(gpus=list(gpus), candidates=select(gpus, device, environ), device=device)
+    env = os.environ if environ is None else environ
+    numbered = bool(gpus) and "CUDA_VISIBLE_DEVICES" not in env and (len(gpus) == 1 or _pci_order(env))
+    return Detected(gpus=list(gpus), candidates=select(gpus, device, environ), device=device, numbered=numbered)
 
 
 def describe(g: GpuInfo) -> str:
@@ -282,6 +301,27 @@ def choose(free_mib: float, weights_bytes: int, draft_bytes: int, head_bytes: in
     return with_head, False
 
 
+def _which_gpu(det: Detected, sizes: Sequence[int], model_max: int) -> str:
+    """For the message when the model does not fit, on a PC with several GPUs: which GPU that was, and another one with room
+    ("" on a PC with one GPU, so that its message stays as before)."""
+    if len(det.gpus) < 2:
+        return ""
+    if len(det.candidates) > 1:
+        return ("This PC has %d GPUs and CUDA's device %d cannot be matched with nvidia-smi's list, so these are the numbers of the "
+                "smallest of them (unset CUDA_DEVICE_ORDER or set it to PCI_BUS_ID to match them).  " % (len(det.candidates), det.device))
+    g = det.gpu
+    if g is None:
+        return ""
+    s = "That is nvidia-smi's GPU %d (%s)" % (g.index, g.name)
+    if det.numbered:
+        room = [o for o in det.gpus if o.index != g.index and o.arch == "ok" and o.free_mib is not None
+                and choose(o.free_mib, sizes[0], sizes[1], sizes[2], model_max)[0] >= MIN_CONTEXT]
+        if room:
+            o = max(room, key=lambda o: (o.tested, o.free_mib, -o.index))
+            s += "; GPU %d (%s, %d MiB free) has room for it: add --device %d" % (o.index, o.name, o.free_mib, o.index)
+    return s + ".  "
+
+
 def plan_context(pack, det: Detected) -> ContextPlan:
     """The context for ``pack`` on the detected GPU.  Unchanged (None) on cards with FULL_CONTEXT_MIN_TOTAL_MIB or more, and when
     nvidia-smi gave no answer.  Raises YasakaniError when not even MIN_CONTEXT tokens fit."""
@@ -303,9 +343,9 @@ def plan_context(pack, det: Detected) -> ContextPlan:
     if n < MIN_CONTEXT:
         raise YasakaniError(
             "the model does not fit in the free GPU memory (%d of %d MiB free; it needs about %d MiB with a context of %d tokens).  "
-            "Close other programs that use the GPU%s, or give --max-ctx to try anyway."
+            "%sClose other programs that use the GPU%s, or give --max-ctx to try anyway."
             % (g.free_mib, g.total_mib, int((sizes[0] + sizes[1]) / MIB + overhead_mib(sizes[0]) + MARGIN_MIB + MIN_CONTEXT * KV_BYTES_PER_TOKEN / MIB),
-               MIN_CONTEXT, "" if sizes[0] / MIB <= QUALITY_WEIGHTS_MIB else ", or use the fastest model"))
+               MIN_CONTEXT, _which_gpu(det, sizes, pack.max_ctx), "" if sizes[0] / MIB <= QUALITY_WEIGHTS_MIB else ", or use the fastest model"))
     if head_off:
         plan.env["YSKN_BDR_SHEAD"] = "0"
         plan.notes.append("note: to leave room for the context, the output head of the draft model (%s, %.1f GiB) is not loaded; "

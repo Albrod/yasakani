@@ -68,12 +68,22 @@ def find_library(explicit: Optional[str] = None) -> Path:
     raise YasakaniError("engine library (yskn.dll) not found; set YASAKANI_DLL or pass --dll.  Looked in: " + "; ".join(tried))
 
 
+def pci_bus_order(environ=None) -> None:
+    """Let CUDA number the GPUs the way nvidia-smi and ``yasakani info`` do: in PCI bus order (CUDA's own default puts the fastest
+    first, so on a PC with two GPUs ``--device 0`` could be nvidia-smi's GPU 1).  CUDA reads ``CUDA_DEVICE_ORDER`` once, when it
+    starts in the process; the engine starts it at the first call of ``yskn_open``, so this is called before the library is loaded.
+    A value that is already set is kept.  Nothing changes on a PC with one GPU."""
+    env = os.environ if environ is None else environ
+    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
+
 class NativeLib:
     """The loaded library with typed entry points in ``fn``.  ``last_error()`` is thread-local in the engine: call it on the thread
     that made the failing call."""
 
     def __init__(self, path: Optional[str] = None):
         self.path = find_library(path)
+        pci_bus_order()                          # before CUDA starts in this process: --device counts as nvidia-smi does
         try:
             self.dll = C.CDLL(str(self.path))
         except OSError as ex:

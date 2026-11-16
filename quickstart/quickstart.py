@@ -488,8 +488,9 @@ def pick_gpu(gpus, environ=None):
     rank = {"tested": 0, "other": 1, "small": 2, "nocode": 3, "old": 4}
     if "CUDA_VISIBLE_DEVICES" in env:
         first = (env.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+        pci = env.get("CUDA_DEVICE_ORDER", "PCI_BUS_ID").strip().upper() == "PCI_BUS_ID"   # the package sets it when not set (0.1.5)
         named = [g for g in gpus if (first.upper().startswith("GPU-") and (g.get("uuid") or "").lower().startswith(first.lower()))
-                 or (first.isdigit() and len(gpus) == 1 and g["index"] == int(first))]
+                 or (first.isdigit() and (len(gpus) == 1 or pci) and g["index"] == int(first))]
         if len(named) == 1:
             return named[0], gpu_verdict(named[0]), None
         worst = max(gpus, key=lambda g: (rank[gpu_verdict(g)], -(g.get("total") or 0)))   # not known which: the least able one

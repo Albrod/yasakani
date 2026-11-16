@@ -82,9 +82,11 @@ numbers, it does not fit beside that length (without this the head was loaded wh
 or more, nothing changes: the context stays 262,144. The 2,100 and 2,300 MiB were measured on the RTX 5090 under Windows; the rule has not
 been checked on other cards. It is `yasakani.gpu.plan_context`; `Engine` itself does not apply it (pass `max_ctx`).
 
-**Several GPUs.** nvidia-smi numbers the GPUs in PCI order, CUDA by default puts the fastest first. When the PC has more than one GPU and
-neither `CUDA_DEVICE_ORDER=PCI_BUS_ID` nor `CUDA_VISIBLE_DEVICES` tells which one `--device` is, the context is chosen for the smallest of
-them. The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
+**Several GPUs.** nvidia-smi and `yasakani info` number the GPUs in PCI order; CUDA by default puts the fastest first. Since 0.1.5 the
+package sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` before it loads the engine library (unless it is already set), so `--device N` is GPU N of
+`yasakani info` and the context is chosen for that GPU. `CUDA_VISIBLE_DEVICES` still renumbers them (`--device` then counts the GPUs it
+names, in its order). When `CUDA_DEVICE_ORDER` is set to something else, it is not known which GPU `--device` is, and the context is chosen
+for the smallest of them. The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
 
 **The self-check** compares with output made on an RTX 5090. On another GPU tiny differences in the computation can make the greedy output
 take another token part-way through, so since 0.1.4 `selfcheck` also lets the engine read the reference output there and compares its
