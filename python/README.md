@@ -84,9 +84,19 @@ been checked on other cards. It is `yasakani.gpu.plan_context`; `Engine` itself 
 
 **Several GPUs.** nvidia-smi and `yasakani info` number the GPUs in PCI order; CUDA by default puts the fastest first. Since 0.1.5 the
 package sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` before it loads the engine library (unless it is already set), so `--device N` is GPU N of
-`yasakani info` and the context is chosen for that GPU. `CUDA_VISIBLE_DEVICES` still renumbers them (`--device` then counts the GPUs it
-names, in its order). When `CUDA_DEVICE_ORDER` is set to something else, it is not known which GPU `--device` is, and the context is chosen
-for the smallest of them. The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
+`yasakani info` and the context is chosen for that GPU. On a PC with two GPUs, 0.1.5 was reported to fail with `graph instantiate
+failed` on a GPU that was not CUDA's device 0 while the other one was visible ([#20](https://github.com/yasakani-dev/yasakani/issues/20)).
+The likely cause, found by reading the code and with a stand-in test on one GPU (not yet confirmed on two GPUs): CUDA's current GPU
+belongs to the thread, the engine chose its GPU only on the thread that opened it, and generation runs on other threads. Since 0.1.6
+the engine makes its GPU current on every call, from any thread. The commands that load the model (`chat`, `serve`, `bench`,
+`selfcheck`) also make that GPU the only one the engine sees: they set `CUDA_VISIBLE_DEVICES` to its UUID from nvidia-smi, open it as
+device 0 and print one line that says so. When nvidia-smi gives no UUID for it, nothing is made invisible, and the line says that the
+engine also sees the other GPUs. A `CUDA_VISIBLE_DEVICES` you set yourself is kept, and still renumbers the GPUs
+(`--device` then counts the GPUs it names, in its order). When `CUDA_DEVICE_ORDER` is set to something else, it is not known which GPU
+`--device` is: nothing is made invisible, and the context is chosen for the smallest of them. With one GPU nothing changes. `Engine`
+itself makes no GPU invisible; to do what the commands do from Python, set `CUDA_VISIBLE_DEVICES` before the first `Engine`
+(`yasakani.gpu.visible_only` names the GPU, but only once `CUDA_DEVICE_ORDER` is `PCI_BUS_ID`: call `yasakani._native.pci_bus_order()`
+first). The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
 
 **The self-check** compares with output made on an RTX 5090. On another GPU tiny differences in the computation can make the greedy output
 take another token part-way through, so since 0.1.4 `selfcheck` also lets the engine read the reference output there and compares its
