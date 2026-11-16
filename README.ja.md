@@ -192,6 +192,8 @@ GPU を使っていると（画面の描画が動いていた状態）、同じ�
 
 **画像（任意）**：0.1.2 から、Windows ではサーバーが画像も受け付けられます（寄稿 [#4](https://github.com/yasakani-dev/yasakani/pull/4)）。配布物に入っていないファイルが要ります。画像のエンコーダー `mmproj-Qwen3.8-27B-BF16.gguf`（0.93 GB）、llama.cpp b10488 の CPU 版、Qwen3.8-27B の GGUF ファイル（読むのは設定と語彙だけですが、Q4_K_M でも約 17〜19 GB あります）、Pillow です。画像は CPU で処理します。既定では 1 枚を 1,024 画像トークン（約 100 万画素）以下に縮めてから処理します。私たちのパソコン（AMD Ryzen 9 9950X3D2・16 コア・16 スレッド）では大きい画像で約 15 秒、512 × 512 の画像で 1.2 秒でした。処理中はサーバーがほかの依頼に応えません。RTX 5090 と品質モデルで、簡単な試験用の画像で動くことを確かめました。画像をどれだけ正しく理解するかは測っていません。準備と制限は [python/README.md](python/README.md#image-input-optional)（英語）にあります。起動ファイルのメニューとハーネスは画像を使いません。Linux では、ソースからビルドした llama.cpp b10488 で画像を使えます（[BUILDING.md](BUILDING.md#image-input-on-linux)。[#8](https://github.com/yasakani-dev/yasakani/pull/8) の寄稿で、寄稿者が Ubuntu 26.04 で試しました。私たちは試していません）。
 
+**GPU が複数のとき**：1 つのプロセスが使う GPU は 1 枚です。`--device N` は `yasakani info` と nvidia-smi の GPU N です（`CUDA_DEVICE_ORDER` が未設定ならパッケージが `PCI_BUS_ID` にします）。0.1.5 では GPU が 2 枚のパソコンで、ほかの GPU が見えていると `--device 1` が `graph instantiate failed` で止まることがありました（[#20](https://github.com/yasakani-dev/yasakani/issues/20)）。0.1.6 で直しを入れました。2 枚の GPU の PC ではまだ確かめていません。エンジンは呼ばれるたびに自分の GPU を選び、`chat`・`serve`・`bench`・`selfcheck` はエンジンにその GPU だけを見せます（nvidia-smi が UUID を返さないときを除きます）。自分で設定した `CUDA_VISIBLE_DEVICES` はそのまま使います（`--device` はそこに並べた GPU を数えます）。起動ファイルは確かめた GPU を使います。
+
 GPU のメモリをたくさん使うほかのプログラム（ゲーム、ほかの LLM のサーバーなど）は、閉じてから起動してください。メモリが足りなくても
 エラーにはならず、生成が数倍遅くなります（そのときは、起動時に警告を出します）。
 

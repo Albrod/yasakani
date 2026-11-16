@@ -15,18 +15,21 @@ Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building 
 | Build tools | CMake (3.24 or newer is required) and Ninja |
 | Target | one DLL with machine code for compute capability 8.6 (`sm_86`, RTX 30 series), 8.9 (`sm_89`, RTX 40 series) and 12.0 (`sm_120`, RTX 50 series), plus PTX for `compute_120`. Tested on the RTX 5090 only |
 
-The `yskn.dll` on the release page is this build (SHA-256 `918560d6ea16ad85bb48ede519535a19d4afa08538822468bbbdc248bfc93f7a`). It is the
-build of 0.1.4 (`bae77ae6…aa09`) with the host-code changes of 0.1.5 (`src/engine35.cpp`, `src/format.hpp`, `src/specx.cpp`) compiled
-into its build folder with the two commands below (the CUDA compiler was named explicitly with `-DCMAKE_CUDA_COMPILER`): five C++ files
-were compiled again and linked, and the GPU code is that of 0.1.4, instruction for instruction (compared with `cuobjdump`). The 0.1.4
-build was made the same way: its last change, one condition in `src/engine35.cpp`, was compiled into the build folder of the build
+The `yskn.dll` on the release page is this build (SHA-256 `967de3ea4102c54972ea8d31f3286eaee466f2db1092d5ea5c26eec10fc6be8f`). It is the
+build of 0.1.5 (`918560d6…3f7a`) with the change of 0.1.6 in `src/c_api.cpp` (every entry point selects the engine's GPU,
+[#20](https://github.com/yasakani-dev/yasakani/issues/20)) compiled into its build folder with the two commands below (the CUDA compiler was named
+explicitly with `-DCMAKE_CUDA_COMPILER`): one C++ file was compiled again and linked, the exported functions are the same, and the GPU
+code is that of 0.1.4, instruction for instruction (compared with `cuobjdump`). The 0.1.5 build was made the same way from the build of
+0.1.4 (`bae77ae6…aa09`): five C++ files with the host-code changes of 0.1.5 (`src/engine35.cpp`, `src/format.hpp`, `src/specx.cpp`)
+were compiled again. The 0.1.4 build was made the same way: its last change, one condition in `src/engine35.cpp`, was compiled
+into the build folder of the build
 before it. 0.1.4 adds GPU code: on compute capability 12.x, passes of 17 to 64 rows (the wide copy passes) have matrix
 kernels of their own, which add the same integer sums as the 16-row kernels, so they give the same results bit for bit (`src/pfa.cu`,
 `src/lnord.cu`, `src/q35_kernels.cu`; see docs/TECHNOLOGY.md, 5.4). Every other kernel compiles from the source of 0.1.3, which is the
 build of 2026-11-07 (`0f5d973b…0bbb`, the engine of 0.1.0 to 0.1.2) plus two fixes (a missing synchronization between GPU threads, and a
 scratch buffer per engine for the KV5 encoder). The host code adds the wider copy passes and the saved prompt states. In our checks on the
 RTX 5090 the 0.1.4 build wrote the same tokens as decoding one token per pass, and passes of 17 to 64 rows gave the same predictions as
-passes of 16 rows; this build wrote the same tokens in the same number of passes as the 0.1.4 build (60 of 60 greedy generations
+passes of 16 rows; the 0.1.5 build wrote the same tokens in the same number of passes as the 0.1.4 build (60 of 60 greedy generations
 with each model). The 0.1.4 speed rows in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) were measured with the 0.1.4 build. Other compiler or CUDA
 versions have not been tried. Compute capability 12.0 needs a recent CUDA Toolkit.
 
@@ -211,7 +214,9 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTUR
 
 Use `120` for the RTX 50 series, `89` for the RTX 40 series or `86` for the RTX 30 series. Values below 86 are refused.
 
-One process uses one GPU. On a PC with several GPUs, choose the GPU with the `CUDA_VISIBLE_DEVICES` environment variable.
+One process uses one GPU. On a PC with several GPUs, choose it with `--device N` (GPU N of `yasakani info` and nvidia-smi) or with the
+`CUDA_VISIBLE_DEVICES` environment variable. With 0.1.5, `--device` could fail while the other GPUs were visible
+([#20](https://github.com/yasakani-dev/yasakani/issues/20)); 0.1.6 has a fix for this, not yet tried on a PC with two GPUs.
 
 ## Measurement builds: a plain 8-bit or an FP16 key-value cache
 

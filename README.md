@@ -237,6 +237,13 @@ simple test images; we have not measured how well the model understands images. 
 The quickstart menu and the harness do not use images. On Linux image input works with llama.cpp b10488 built from source
 ([BUILDING.md](BUILDING.md#image-input-on-linux); contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8), tried by its author on native Ubuntu 26.04, not by us).
 
+**Several GPUs:** one process uses one GPU. `--device N` is GPU N of `yasakani info` and nvidia-smi (the package sets
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` unless it is already set). With 0.1.5, `--device 1` on a PC with two GPUs could fail with
+`graph instantiate failed` while the other GPU was visible ([#20](https://github.com/yasakani-dev/yasakani/issues/20)). 0.1.6 has a fix
+for this; it has not yet been tried on a PC with two GPUs. The engine now selects its GPU on every call, and `chat`, `serve`, `bench`
+and `selfcheck` let it see only that GPU (unless nvidia-smi gives no UUID for it). A `CUDA_VISIBLE_DEVICES` you set yourself is kept
+(`--device` then counts the GPUs it names). The quickstart uses the GPU it checked.
+
 Close other programs that use a lot of GPU memory (games, other LLM servers) before you start. When the memory runs out there is no error:
 generation just becomes several times slower (a warning is printed at start in that case).
 

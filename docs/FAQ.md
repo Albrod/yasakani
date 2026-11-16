@@ -76,6 +76,11 @@ it needs no PTX compilation. We have tested 616.92 only.
 The quickstart checks the driver before it downloads the engine or a model, and if the driver is older it stops and shows where to get a
 new one.
 
+Two GPUs in one PC: one process uses one GPU, chosen with `--device N` (GPU N of `yasakani info` and nvidia-smi). With 0.1.5 this
+could fail with `graph instantiate failed` while the other GPU was visible ([#20](https://github.com/yasakani-dev/yasakani/issues/20)).
+0.1.6 has a fix for this; it has not yet been tried on a PC with two GPUs. A `CUDA_VISIBLE_DEVICES` you set yourself is kept. See
+[What you need](../README.md#what-you-need).
+
 ## How much memory and disk does it need?
 
 One model folder is a download of about 13 GB (fastest model) or 15 GB (quality model); keep 20 GB free. The context length goes up to 262,144

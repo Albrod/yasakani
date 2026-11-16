@@ -52,6 +52,8 @@ RTX 5090 1 枚・Qwen3.8-27B で、YASAKANI の最速モデルは、同じパソ
 NVIDIA のドライバーは 580 以上が要ります。エンジンは CUDA 13.2 で作ってあり、NVIDIA が CUDA 13 のプログラムに求める最低のドライバーが 580 です（マイナーバージョン互換。[NVIDIA の資料](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)）。ただし新しいドライバーが要る機能と、読み込み時の PTX のコンパイルは古いドライバーでは動きません。エンジンは対応する各世代の機械語を持つので、PTX のコンパイルは要りません。手元で確かめたのは 616.92 だけです。
 起動ファイルはエンジンとモデルをダウンロードする前にドライバーの版を確かめ、古いときは止まって新しいドライバーの入手先を表示します。
 
+GPU が 2 枚のパソコンでは、1 つのプロセスが 1 枚を使います。`--device N`（`yasakani info` と nvidia-smi の GPU N）で選びます。0.1.5 では、ほかの GPU が見えていると `graph instantiate failed` で止まることがありました（[#20](https://github.com/yasakani-dev/yasakani/issues/20)）。0.1.6 で直しを入れました。2 枚の GPU の PC ではまだ確かめていません。自分で設定した `CUDA_VISIBLE_DEVICES` はそのまま使います。詳しくは [必要なもの](../README.ja.md#必要なもの)。
+
 ## どれくらいのメモリ・ディスクが要る？
 
 モデルのフォルダー 1 つのダウンロードは、約 13 GB（最速モデル）か約 15 GB（品質モデル）です。空きは 20 GB を目安にしてください。文脈の長さは最大 262,144 トークンまで設定できます。
