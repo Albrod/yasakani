@@ -101,6 +101,21 @@ class ToolCallFilterTests(unittest.TestCase):
         self.assertEqual(convert_parameter("not json", {"type": "object"}), "not json")
         self.assertIsNone(parse_tool_call("no function here", {}))
 
+    def test_python_literals(self):
+        # the model sometimes writes a boolean the way Python does; a parameter declared as a boolean (or null) takes it
+        block = ("\n<function=write_file>\n<parameter=path>\na.txt\n</parameter>\n<parameter=content>\nTrue\n</parameter>\n"
+                 "<parameter=overwrite>\nTrue\n</parameter>\n</function>\n")
+        call = parse_tool_call(block, tool_schemas(TOOLS))
+        self.assertEqual(call["arguments"], {"path": "a.txt", "content": "True", "overwrite": True})
+        self.assertIs(call["arguments"]["overwrite"], True)
+        self.assertIs(convert_parameter("False", {"type": "boolean"}), False)
+        self.assertIs(convert_parameter(" True ", {"type": ["boolean", "null"]}), True)
+        self.assertIsNone(convert_parameter("None", {"type": ["integer", "null"]}))
+        self.assertEqual(convert_parameter("True", {"type": "string"}), "True")      # declared as a string: stays text
+        self.assertEqual(convert_parameter("True", None), "True")                    # not declared: as the model wrote it
+        self.assertEqual(convert_parameter("None", {"type": "integer"}), "None")     # null not allowed: stays text
+        self.assertEqual(convert_parameter("TRUE", {"type": "boolean"}), "TRUE")     # only Python's own spelling
+
 
 class ToolRequestTests(unittest.TestCase):
     def test_clean_tools(self):
