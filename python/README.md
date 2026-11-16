@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.1.4`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
+Status: version `0.1.5`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
 
 ## What you need
 

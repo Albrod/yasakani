@@ -3,7 +3,7 @@
 **Windows** と **NVIDIA の RTX 1 枚**で、**Qwen3.8-27B** を速く動かすローカル AI エンジンです。動作を確かめたのは **RTX 5090** です。オープンソース（Apache License 2.0）。
 English: [README.md](README.md)
 
-> **バージョン 0.1.4（2026 年 11 月 15 日）。** この版で、編集が速くなり、長い入力を読み直すことが減りました。答えが入力を写すところでは、入力から写した続きを 1 回の計算で最大 64 トークンまとめて確かめます（これまで 16）。思考なしのコードと JSONL の編集は 0.1.2 の 1.67〜2.04 倍の速さになりました。思考なしのほかの課題は 0.96〜1.01 倍（同じ時に測った 0.1.3 の 0.99〜1.00 倍で、同じ速さ）で、答えは同じです（[速さ](#速さ)）。起動ファイルはダウンロードの前に NVIDIA のドライバーの版を確かめ、`yasakani selfcheck` は RTX 5090 以外の GPU も確かめるようになりました（[必要なもの](#必要なもの)）。同じ長い資料に続けて別の質問をするときも、資料を最初から読み直さなくなりました（資料が質問より前にあり、間にほかの依頼が無いとき。229,376 トークンの資料のあと、答え始めるまで 116 秒 → 0.37 秒。[長い文脈](#長い文脈)）。サーバーは `tool_choice` の `required` と関数の指定も受け付けます（呼び出しは強制しません）。llama.cpp と同じ形の `timings` も返します。Linux ではソースからビルドした llama.cpp で画像も使えます（3 つとも [#8](https://github.com/yasakani-dev/yasakani/pull/8) の寄稿。Linux の画像は私たちは試していません）。[BUILDING.md](BUILDING.md#linux-building-from-source) に Linux の節を作りました（[#10](https://github.com/yasakani-dev/yasakani/pull/10)・[#8](https://github.com/yasakani-dev/yasakani/pull/8)）。0.1.3 から、RTX 5090 以外の RTX 30・40・50 シリーズ（GPU のメモリ 16 GB 以上）でも動くように作りました。ただしこれらのカードではまだ動かしておらず、最適化もしていません（[必要なもの](#必要なもの)）。0.1.3 では、まれに途中から別の文章になる問題の原因も直しました（[品質](#品質)）。画像の入力は 0.1.2 から（任意。[#4](https://github.com/yasakani-dev/yasakani/pull/4) の寄稿）、ツール／関数呼び出し（`tools`）は 0.1.1 から対応しています。エンジン：[公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.4)。モデル（Hugging Face）：[品質モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality)・[最速モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)。
+> **バージョン 0.1.5（2026 年 11 月 16 日）。** この版は直しの版で、多くは寄稿です。JSON 形のツール呼び出しで引数の値に `<function=...>` があっても正しく読みます。1 つの依頼に同じ画像が 2 回あってもエンコードは 1 回です。`--dll` や `YASAKANI_DLL` が無いファイルを指すと、ほかの DLL を読まずにエラーで止まります（[#12](https://github.com/yasakani-dev/yasakani/pull/12)）。ツール呼び出しで真偽値と宣言した引数は Python の書き方の `True`／`False` も、null を許す引数は `None` も値として読みます（[#21](https://github.com/yasakani-dev/yasakani/pull/21)）。エンジンはモデルファイルの見出しの長さを 64 bit で読みます（[#14](https://github.com/yasakani-dev/yasakani/pull/14)）。`YSKN_Q35_ATX_SPLITS` を 31 未満にしたときも短い文脈の全体を見ます（既定の 42 では変わりません。[#15](https://github.com/yasakani-dev/yasakani/pull/15)）。1 つのプロセスで 2 つのエンジンが同時に生成するときは先読みの状態を分けます（[#13](https://github.com/yasakani-dev/yasakani/pull/13)）。GPU のコードは 0.1.4 と同じなので、速度表は変わりません。`--max-ctx` を指定したとき、その長さと並べて入らなければ補助モデルの出口の表を読み込みません（[#17](https://github.com/yasakani-dev/yasakani/pull/17)）。GPU が複数のパソコンでは、`--device N` が `yasakani info` と nvidia-smi の GPU N になりました（[#20](https://github.com/yasakani-dev/yasakani/issues/20)）。同じ GPU にモニターをつなぐと生成が遅くなることがある、と FAQ に書きました（[#18](https://github.com/yasakani-dev/yasakani/issues/18)）。0.1.4 で、編集が速くなり、長い入力を読み直すことが減りました。答えが入力を写すところでは、入力から写した続きを 1 回の計算で最大 64 トークンまとめて確かめます（これまで 16）。思考なしのコードと JSONL の編集は 0.1.2 の 1.67〜2.04 倍の速さになりました。思考なしのほかの課題は 0.96〜1.01 倍（同じ時に測った 0.1.3 の 0.99〜1.00 倍で、同じ速さ）で、答えは同じです（[速さ](#速さ)）。起動ファイルはダウンロードの前に NVIDIA のドライバーの版を確かめ、`yasakani selfcheck` は RTX 5090 以外の GPU も確かめるようになりました（[必要なもの](#必要なもの)）。同じ長い資料に続けて別の質問をするときも、資料を最初から読み直さなくなりました（資料が質問より前にあり、間にほかの依頼が無いとき。229,376 トークンの資料のあと、答え始めるまで 116 秒 → 0.37 秒。[長い文脈](#長い文脈)）。サーバーは `tool_choice` の `required` と関数の指定も受け付けます（呼び出しは強制しません）。llama.cpp と同じ形の `timings` も返します。Linux ではソースからビルドした llama.cpp で画像も使えます（3 つとも [#8](https://github.com/yasakani-dev/yasakani/pull/8) の寄稿。Linux の画像は私たちは試していません）。[BUILDING.md](BUILDING.md#linux-building-from-source) に Linux の節を作りました（[#10](https://github.com/yasakani-dev/yasakani/pull/10)・[#8](https://github.com/yasakani-dev/yasakani/pull/8)）。0.1.3 から、RTX 5090 以外の RTX 30・40・50 シリーズ（GPU のメモリ 16 GB 以上）でも動くように作りました。ただしこれらのカードではまだ動かしておらず、最適化もしていません（[必要なもの](#必要なもの)）。0.1.3 では、まれに途中から別の文章になる問題の原因も直しました（[品質](#品質)）。画像の入力は 0.1.2 から（任意。[#4](https://github.com/yasakani-dev/yasakani/pull/4) の寄稿）、ツール／関数呼び出し（`tools`）は 0.1.1 から対応しています。エンジン：[公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)。モデル（Hugging Face）：[品質モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality)・[最速モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)。
 >
 > **開発を応援してください：** CAMPFIRE でクラウドファンディングを行っています（2026 年 12 月 16 日まで）→ https://camp-fire.jp/projects/992233/view
 
@@ -84,7 +84,7 @@ YASAKANI は、手元のパソコンで Qwen3.8-27B を動かします。同じ�
 * 思考あり：課題ごとに一番速い回を選び、分野ごとに平均しました。YASAKANI は 5 回、ほかのエンジンは 2 回から選んでおり、試行数はそろっていません。
   全回の平均の表は [docs/MEASUREMENTS.ja.md](docs/MEASUREMENTS.ja.md) にあります。出力の上限で終わった回が多いため、答えにたどり着く時間や正答率の比較ではありません。
 * 重み・量子化・KV の形式・高速化の設定はエンジンごとに違い、全設定をそろえた比較ではありません。複数の設定を測ったエンジンは、分野ごとに一番速い設定を使っています。
-* YASAKANI の 2 モデルは、思考なしを 2026 年 11 月 15 日にこの公開版（0.1.4）の `yskn.dll` で、思考ありを 11 月 8 日に 0.1.0〜0.1.2 のエンジン（11 月 7 日のビルド）で測りました。
+* YASAKANI の 2 モデルは、思考なしを 2026 年 11 月 15 日に 0.1.4 の `yskn.dll`（0.1.5 も GPU のコードは同じ）で、思考ありを 11 月 8 日に 0.1.0〜0.1.2 のエンジン（11 月 7 日のビルド）で測りました。
   MegaCapybara の思考なしは 11 月 3 日、思考ありとほかのエンジンは 11 月 6 日の測定です。
   すべてのソフトの最新版や、すべての用途に対する順位を示すものではありません。
 
@@ -197,11 +197,11 @@ GPU のメモリをたくさん使うほかのプログラム（ゲーム、ほ�
 
 ## 使いはじめ
 
-**いちばん手軽な方法：** [公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.4)の `yasakani-quickstart-0.1.4.zip` を、`C:\yasakani` のような英数字だけの場所に展開して、
+**いちばん手軽な方法：** [公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)の `yasakani-quickstart-0.1.5.zip` を、`C:\yasakani` のような英数字だけの場所に展開して、
 `START.cmd` をダブルクリックします。エンジンとモデルのダウンロードと点検まで自動で進み、そのあと、速さの測定・先読みあり／なしの比較（技術の解説の数字を自分のパソコンで確かめる）・ブラウザーでのチャット・サーバーの起動を選べます。
 画面の質問には、番号で答えるだけです（Python 3.10 以上が必要です）。していることは [quickstart/](quickstart/) にあります。手で入れる場合は、次のとおりです。
 
-1. [公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.4)からエンジンの zip（`yskn.dll` と Python のパッケージ）を、Hugging Face からモデルのフォルダーを 1 つ
+1. [公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)からエンジンの zip（`yskn.dll` と Python のパッケージ）を、Hugging Face からモデルのフォルダーを 1 つ
    （[品質モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) か [最速モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)）ダウンロードします。SHA-256 のチェックサムを、公開ページのものと比べてください。
 
 ```bat
@@ -240,7 +240,7 @@ yasakani serve --model-dir D:\models\qwen38-quality --dll D:\yasakani\yskn.dll
 
 ## エージェントとして使う
 
-[公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.4)の `yasakani-harness-0.1.0.zip` は、このパソコンのモデルが動かす「エージェントの画面」をブラウザーで開きます。
+[公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)の `yasakani-harness-0.1.0.zip` は、このパソコンのモデルが動かす「エージェントの画面」をブラウザーで開きます。
 モデルが、作業フォルダーのファイルを読み書きし、コマンドを実行します（ファイルを書きかえてよいかどうかは、画面で選べます）。
 先に上のクイックスタートを済ませてから、この zip をクイックスタートのフォルダーの中か、そのとなりに展開して、`START_HARNESS.cmd` をダブルクリックします。
 
@@ -248,7 +248,7 @@ yasakani serve --model-dir D:\models\qwen38-quality --dll D:\yasakani\yskn.dll
   はじめて起動するときに npm から入れます（約 730 MB。Node.js が無ければ、それも取ってきます）。YASAKANI が足しているのは、設定のファイルと日本語の表示だけです。
   YASAKANI は DeepSeek 社とは関係のない個人の開発で、この組み合わせは公式の物ではありません。
 * ハーネスの zip は 0.1.0 の物のままです。同梱している Python のパッケージ（0.2.0.dev0）でサーバーを起動します。
-  そのツール呼び出しの処理は、0.1.1 から通常のパッケージに入っている物と同じです。0.1.2 の画像入力は入っていません。
+  そのツール呼び出しの処理は 0.1.1 の通常のパッケージと同じで、0.1.5 のツール呼び出しの直し（[#12](https://github.com/yasakani-dev/yasakani/pull/12)・[#21](https://github.com/yasakani-dev/yasakani/pull/21)）は入っていません。0.1.2 の画像入力は入っていません。
   空きメモリから文脈を決める仕組み（0.1.3）も入っておらず、262,144 トークンの文脈で開くので、GPU のメモリが 24 GB 以上要ります。
 * 最初は、いちばん長く考える設定です。1 回の返事は 98,304 トークンまで。考える量が 49,152 トークンを超えると、そこで切り上げて答えに進みます。
   モデルを 2 つとも入れてあれば、画面のボタンで切り替えられます。

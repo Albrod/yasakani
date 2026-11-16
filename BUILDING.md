@@ -15,16 +15,19 @@ Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building 
 | Build tools | CMake (3.24 or newer is required) and Ninja |
 | Target | one DLL with machine code for compute capability 8.6 (`sm_86`, RTX 30 series), 8.9 (`sm_89`, RTX 40 series) and 12.0 (`sm_120`, RTX 50 series), plus PTX for `compute_120`. Tested on the RTX 5090 only |
 
-The `yskn.dll` on the release page is this build (SHA-256 `bae77ae6e73369dee5d33490b1ff2093f88ab57c02efa06912db6246efffaa09`). It was built
-from this source with the two commands below (the CUDA compiler was named explicitly with `-DCMAKE_CUDA_COMPILER`; the last change, one
-condition in `src/engine35.cpp`, was compiled into the build folder of the build before it, so the GPU code of the two builds is the same,
-instruction for instruction). 0.1.4 adds GPU code: on compute capability 12.x, passes of 17 to 64 rows (the wide copy passes) have matrix
+The `yskn.dll` on the release page is this build (SHA-256 `918560d6ea16ad85bb48ede519535a19d4afa08538822468bbbdc248bfc93f7a`). It is the
+build of 0.1.4 (`bae77ae6…aa09`) with the host-code changes of 0.1.5 (`src/engine35.cpp`, `src/format.hpp`, `src/specx.cpp`) compiled
+into its build folder with the two commands below (the CUDA compiler was named explicitly with `-DCMAKE_CUDA_COMPILER`): five C++ files
+were compiled again and linked, and the GPU code is that of 0.1.4, instruction for instruction (compared with `cuobjdump`). The 0.1.4
+build was made the same way: its last change, one condition in `src/engine35.cpp`, was compiled into the build folder of the build
+before it. 0.1.4 adds GPU code: on compute capability 12.x, passes of 17 to 64 rows (the wide copy passes) have matrix
 kernels of their own, which add the same integer sums as the 16-row kernels, so they give the same results bit for bit (`src/pfa.cu`,
 `src/lnord.cu`, `src/q35_kernels.cu`; see docs/TECHNOLOGY.md, 5.4). Every other kernel compiles from the source of 0.1.3, which is the
 build of 2026-11-07 (`0f5d973b…0bbb`, the engine of 0.1.0 to 0.1.2) plus two fixes (a missing synchronization between GPU threads, and a
 scratch buffer per engine for the KV5 encoder). The host code adds the wider copy passes and the saved prompt states. In our checks on the
-RTX 5090 this build wrote the same tokens as decoding one token per pass, and passes of 17 to 64 rows gave the same predictions as passes
-of 16 rows. The 0.1.4 speed rows in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) were measured with this build. Other compiler or CUDA
+RTX 5090 the 0.1.4 build wrote the same tokens as decoding one token per pass, and passes of 17 to 64 rows gave the same predictions as
+passes of 16 rows; this build wrote the same tokens in the same number of passes as the 0.1.4 build (60 of 60 greedy generations
+with each model). The 0.1.4 speed rows in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) were measured with the 0.1.4 build. Other compiler or CUDA
 versions have not been tried. Compute capability 12.0 needs a recent CUDA Toolkit.
 
 ## Steps
