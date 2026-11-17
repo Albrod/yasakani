@@ -62,6 +62,65 @@ SOFTWARE.
   runtime. The `EULA.txt` installed with the CUDA 13.2 toolkit that built the release DLL was compared on 2026-11-12: it carries the
   same date, has the sections named above, and lists the same three files for the CUDA Runtime on Windows.
 
+### CPython `Lib/textwrap.py` (an input of the speed measurement)
+
+* The code-edit task of the speed tables holds this file of CPython as its input and, with one local variable renamed (`margin` to
+  `common_margin` inside `dedent`), as its expected answer: in `bench/20261103/prompts/cases.json`, in the answers recorded under `bench/`,
+  and since 0.1.6 in the package file `python/yasakani/edit_tasks.json` of `yasakani bench --edit` (also in the engine zip). Changes: the
+  e-mail address in its header is replaced by `<email>` (except in `bench/20261108/demo/`, kept as recorded); nothing else.
+* Its header: Copyright (C) 1999-2001 Gregory P. Ward; Copyright (C) 2002, 2003 Python Software Foundation.
+  PSF's notice: Copyright (c) 2001 Python Software Foundation; All Rights Reserved.
+  License: the PSF License Agreement (below, as in the `LICENSE.txt` of Python 3.14); <https://docs.python.org/3/license.html>.
+
+```
+PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2
+--------------------------------------------
+
+1. This LICENSE AGREEMENT is between the Python Software Foundation
+("PSF"), and the Individual or Organization ("Licensee") accessing and
+otherwise using this software ("Python") in source or binary form and
+its associated documentation.
+
+2. Subject to the terms and conditions of this License Agreement, PSF hereby
+grants Licensee a nonexclusive, royalty-free, world-wide license to reproduce,
+analyze, test, perform and/or display publicly, prepare derivative works,
+distribute, and otherwise use Python alone or in any derivative version,
+provided, however, that PSF's License Agreement and PSF's notice of copyright,
+i.e., "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
+are retained in Python alone or in any derivative version prepared by Licensee.
+
+3. In the event Licensee prepares a derivative work that is based on
+or incorporates Python or any part thereof, and wants to make
+the derivative work available to others as provided herein, then
+Licensee hereby agrees to include in any such work a brief summary of
+the changes made to Python.
+
+4. PSF is making Python available to Licensee on an "AS IS"
+basis.  PSF MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, PSF MAKES NO AND
+DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS
+FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON WILL NOT
+INFRINGE ANY THIRD PARTY RIGHTS.
+
+5. PSF SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON
+FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS
+A RESULT OF MODIFYING, DISTRIBUTING, OR OTHERWISE USING PYTHON,
+OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.
+
+6. This License Agreement will automatically terminate upon a material
+breach of its terms and conditions.
+
+7. Nothing in this License Agreement shall be deemed to create any
+relationship of agency, partnership, or joint venture between PSF and
+Licensee.  This License Agreement does not grant permission to use PSF
+trademarks or trade name in a trademark sense to endorse or promote
+products or services of Licensee, or any third party.
+
+8. By copying, installing or otherwise using Python, Licensee
+agrees to be bound by the terms and conditions of this License
+Agreement.
+```
+
 ## Required, but not redistributed (you install them)
 
 | What | Why | License | Tested with |
