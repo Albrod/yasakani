@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+<title id="title">YASAKANI — Less waiting. More local AI.</title>
+<desc id="desc">2,298 tokens per second on JSONL edits, 10.31 GB fastest model file, up to 262,144 context tokens. RTX 5090, thinking off, two-run mean, engine 0.1.4. Quality tested to 128K.</desc>
+<rect width="1200" height="420" rx="16" fill="#131714"/>
+<path d="M0 16Q0 0 16 0H1200V5H5V420H0Z" fill="#d9bb77"/>
+<g font-family="Segoe UI, Noto Sans JP, Yu Gothic, sans-serif">
+<text x="48" y="62" font-size="26" font-weight="700" letter-spacing="3" fill="#e2c888">YASAKANI</text>
+<text x="1152" y="60" text-anchor="end" font-size="15" letter-spacing="1.5" fill="#bdc5bb">OPEN SOURCE / APACHE 2.0</text>
+<text x="48" y="130" font-size="42" font-weight="700" fill="#f5f3ec">Less waiting. More local AI.</text>
+<text x="48" y="170" font-size="18" fill="#b6c0b7">ON ONE RTX 5090</text>
+<path d="M48 194H1152M472 216V329M827 216V329" stroke="#364038"/>
+<text x="48" y="270" font-size="66" font-weight="700" fill="#e2c888">2,298</text>
+<text x="251" y="270" font-size="26" fill="#e2c888">tok/s</text>
+<text x="48" y="313" font-size="19" fill="#e1e5de">JSONL EDITS · DECODE</text>
+<text x="510" y="270" font-size="52" font-weight="600" fill="#f5f3ec">10.31<tspan font-size="25"> GB</tspan></text>
+<text x="510" y="313" font-size="18" fill="#e1e5de">COMPRESSED MODEL FILE</text>
+<text x="864" y="270" font-size="48" font-weight="600" fill="#f5f3ec">262,144</text>
+<text x="864" y="313" font-size="18" fill="#e1e5de">MAXIMUM CONTEXT</text>
+<text x="48" y="380" font-size="17" fill="#bcc5bb">Thinking off · mean of 2 runs · engine 0.1.4 · excludes prefill. File size: fastest model only.</text>
+</g></svg>
