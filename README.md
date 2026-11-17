@@ -98,7 +98,10 @@ What these tables are, and are not:
   every use.
 
 Everything needed to check or repeat the comparison (launch settings, prompts, the measurement scripts and the raw records) is in
-[`bench/`](bench/). `yasakani bench` measures your own PC.
+[`bench/`](bench/). `yasakani bench` measures your own PC; `yasakani bench --edit` runs the three edit tasks (the code edit and the
+JSONL edit of the table, and the long JSONL edit of [What 0.1.4 changed](#what-014-changed)) and prints the speed, the tokens per pass
+and whether each answer is the expected one ([how](docs/FAQ.md#how-do-i-measure-the-edit-speed-on-my-pc)). The wide copy passes behind
+the edit numbers are used on compute capability 12.x (RTX 50 series) only, and were measured on the RTX 5090 only.
 If you measure with a script of your own, take the token count from the server's `usage.completion_tokens` (in a stream, send `stream_options`
 with `{"include_usage": true}`). A stream carries one chunk per token, but where one character is split over several tokens its text arrives
 with the last of them, so the number of chunks is slightly smaller than the number of tokens.
