@@ -243,6 +243,31 @@ yasakani serve --model-dir D:\models\qwen38-quality --dll D:\yasakani\yskn.dll
 くわしいこと（モデルのフォルダー、使えるリクエストの項目、ループ防止、自己点検）は [python/README.md](python/README.md) にあります。
 `yskn.dll` を自分で作る手順は [BUILDING.md](BUILDING.md)、よくある質問は [docs/FAQ.ja.md](docs/FAQ.ja.md) にあります。
 
+## コミュニティの変換
+
+[tools/convert/](tools/convert/) の変換器でほかの人が作ったファイルです。**このプロジェクトは確かめておらず、保守もしていません**。
+動く状態に保つのは下に名前のある人です。新しい版に追いつかなくなった変換は、その版でこの一覧から外すことがあります。
+
+**Arete-27B**（作成：[@audreyt](https://github.com/audreyt)）：Nous Research が Qwen3.8-27B をファインチューンした [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B) を、
+コミュニティで変換したものです。品質モデルと同じ設定で作り、品質モデルの下書きモデルをそのまま使います。ファイルは
+[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) のリビジョン `659effb` です。
+全ファイルの SHA-256 はその `SHA256SUMS` にあります（モデルファイル `arete_quality.yskn`、12,365,242,368 バイト、
+`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`）。
+
+```bat
+hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
+yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
+```
+
+そのあとは [使いはじめ](#使いはじめ) と同じように `--model-dir D:\models\arete-quality` を付けて使います。次の値は、この変換を作った人が RTX 5090 で測ったものです。
+
+* 元の BF16 の Arete-27B との近さ（`tools/quality/`、思考文 20 本、KV5 のキャッシュ、0.1.3 で測定）：KL 0.0116、第 1 候補一致率 95.64%。
+  品質モデルを同じ方法で Qwen3.8-27B と比べた値は 0.0126 と 95.35% です。
+* 0.1.4 で：`yasakani verify` は 11 ファイル中 11 ファイル、`yasakani selfcheck` は 3 件中 3 件が合格（出力は 0.1.3 と同じ）。
+  先読みの 1 回の計算で進んだトークン数は、文章 2.40・思考あり 2.48・コード 4.68・CSV → JSON 15.04 です。思考文では品質モデルより少ないので
+  （作った人が同じカードと 0.1.3 で両方を測った値で 2.48 対 3.24）、そこでは上の速さの表より遅くなると考えてください。
+* そのほかの評価は、設定と注意点とともに[モデルカード](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9)にあります。
+
 ## エージェントとして使う
 
 [公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)の `yasakani-harness-0.1.0.zip` は、このパソコンのモデルが動かす「エージェントの画面」をブラウザーで開きます。

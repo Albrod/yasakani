@@ -313,7 +313,7 @@ hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e
 yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
 ```
 
-Then use it as in [Quick start](#quick-start) with `--model-dir D:\models\arete-quality`. Measured by the converter's author on an
+Then use it as in [Quick start](#quick-start) with `--model-dir D:\models\arete-quality`. Measured by the author of this conversion on an
 RTX 5090:
 
 * Closeness to its own BF16 original (`tools/quality/`, 20 thinking windows, KV5 cache, measured with 0.1.3): KL divergence 0.0116,
@@ -321,10 +321,7 @@ RTX 5090:
 * With 0.1.4: `yasakani verify` 11 of 11 files, `yasakani selfcheck` 3 of 3 (the same outputs as with 0.1.3). Tokens per look-ahead
   pass: prose 2.40, thinking 2.48, code 4.68, CSV to JSON 15.04. On thinking text that is fewer than the quality model (2.48 against
   3.24 in the author's run of both on the same card with 0.1.3), so expect it to be slower there than the speed tables above.
-* Nous Research's Propaganda_Eval (803 prompts), with the converted file and BF16 Arete-27B graded by the same judge: answers scored
-  as containing propaganda 9 (1.12%) against 1 (0.12%) for BF16 (paired difference +1.0 points, 95% interval +0.25 to +1.74); mean
-  fact score 2.873 against 2.929 of 5, no measurable difference. One sample per prompt, a different serving engine for each model,
-  and a different judge from Nous's; the numbers, settings and per-prompt grades are on the model card.
+* Further evaluations, with their settings and caveats, are on the [model card](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9).
 
 ## Use it as an agent
 
