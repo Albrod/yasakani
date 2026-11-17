@@ -30,7 +30,10 @@ build of 2026-11-07 (`0f5d973b…0bbb`, the engine of 0.1.0 to 0.1.2) plus two f
 scratch buffer per engine for the KV5 encoder). The host code adds the wider copy passes and the saved prompt states. In our checks on the
 RTX 5090 the 0.1.4 build wrote the same tokens as decoding one token per pass, and passes of 17 to 64 rows gave the same predictions as
 passes of 16 rows; the 0.1.5 build wrote the same tokens in the same number of passes as the 0.1.4 build (60 of 60 greedy generations
-with each model). The 0.1.4 speed rows in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) were measured with the 0.1.4 build. Other compiler or CUDA
+with each model). The 0.1.6 build wrote the same tokens in the same number of passes as the 0.1.5 build (60 of 60 greedy generations
+with each model). In `yasakani bench` (its 4 prompts with each model, the median of 6 runs each) the speed of the 0.1.6 build
+differed from that of the 0.1.5 build by -0.44 % to +0.26 %. The 0.1.4 speed rows in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) were
+measured with the 0.1.4 build. Other compiler or CUDA
 versions have not been tried. Compute capability 12.0 needs a recent CUDA Toolkit.
 
 ## Steps
