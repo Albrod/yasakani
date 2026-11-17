@@ -2,7 +2,7 @@
 
 **English** · [日本語](README.ja.md)
 
-![YASAKANI: 2,298 tok/s on JSONL edits with one RTX 5090. A 10.31 GB fastest model file and up to 262,144 context tokens.](docs/assets/hero-en.svg)
+![On one RTX 5090 with thinking off, the recommended quality model (12.37 GB) generated 2,243 tok/s on JSONL edits. The fastest model (10.31 GB) generated 2,298 tok/s. Maximum context is 262,144 tokens.](docs/assets/hero-en.svg)
 
 **Qwen3.8-27B on your PC. Fast generation, long conversations, and evidence you can inspect.**
 
@@ -38,7 +38,7 @@ It targets Qwen3.8-27B, generating one request at a time. Choose the quality or 
 3. Unpack it to a simple path such as `C:\yasakani` and double-click **`START.cmd`**.
 
 Choose a number from the menu. The launcher downloads an engine and model, runs the checks, then offers browser chat, benchmarks, and an API server.
-**Start with the quality model.** For a 16 GB GPU, choose the fastest model; see the [hardware status](#what-you-need) for untested cards.
+**Start with the quality model (12.37 GB main file).** For a 16 GB GPU, choose the fastest model (10.31 GB main file). See the [hardware status](#what-you-need) for untested cards.
 
 **Waiting for an answer?** The default is the longest thinking setting. In terminal chat, use `/effort medium` for shorter thinking or `/think off` to disable it.
 API output limits include thinking tokens. [Full usage guide](python/README.md)

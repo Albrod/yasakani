@@ -1,20 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
-<title id="title">YASAKANI — ローカル AI の待ち時間を短く。</title>
-<desc id="desc">2,298 tokens per second on JSONL edits, 10.31 GB fastest model file, up to 262,144 context tokens. RTX 5090, thinking off, two-run mean, engine 0.1.4. Quality tested to 128K.</desc>
-<rect width="1200" height="420" rx="16" fill="#131714"/>
-<path d="M0 16Q0 0 16 0H1200V5H5V420H0Z" fill="#d9bb77"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="356" viewBox="0 0 1000 356" role="img" aria-labelledby="title desc" xml:lang="ja">
+<title id="title">YASAKANI の品質モデルと最速モデル</title>
+<desc id="desc">RTX 5090 1枚での JSONL 編集（思考なし）。推奨の品質モデルは本体 12.37 GB で 2,243 tok/s、最速モデルは本体 10.31 GB で 2,298 tok/s。文脈上限は 262,144 トークン。</desc>
+<rect width="1000" height="356" rx="16" fill="#131714"/>
+<path d="M18 3H982" stroke="#d9bb77" stroke-width="4"/>
 <g font-family="Segoe UI, Noto Sans JP, Yu Gothic, sans-serif">
-<text x="48" y="62" font-size="26" font-weight="700" letter-spacing="3" fill="#e2c888">YASAKANI</text>
-<text x="1152" y="60" text-anchor="end" font-size="15" letter-spacing="1.5" fill="#bdc5bb">OPEN SOURCE / APACHE 2.0</text>
-<text x="48" y="130" font-size="42" font-weight="700" fill="#f5f3ec">ローカル AI の待ち時間を短く。</text>
-<text x="48" y="170" font-size="18" fill="#b6c0b7">1枚の RTX 5090 で</text>
-<path d="M48 194H1152M472 216V329M827 216V329" stroke="#364038"/>
-<text x="48" y="270" font-size="66" font-weight="700" fill="#e2c888">2,298</text>
-<text x="251" y="270" font-size="26" fill="#e2c888">tok/s</text>
-<text x="48" y="313" font-size="19" fill="#e1e5de">JSONL 編集・生成速度</text>
-<text x="510" y="270" font-size="52" font-weight="600" fill="#f5f3ec">10.31<tspan font-size="25"> GB</tspan></text>
-<text x="510" y="313" font-size="18" fill="#e1e5de">圧縮モデルのファイル容量</text>
-<text x="864" y="270" font-size="48" font-weight="600" fill="#f5f3ec">262,144</text>
-<text x="864" y="313" font-size="18" fill="#e1e5de">最大コンテキスト</text>
-<text x="48" y="380" font-size="17" fill="#bcc5bb">思考なし・2回平均・エンジン 0.1.4。入力処理を除く。容量は最速モデル本体。</text>
+<text x="34" y="57" font-size="34" font-weight="700" letter-spacing="2" fill="#e2c888">YASAKANI</text>
+<text x="966" y="53" text-anchor="end" font-size="21" fill="#d3dad2">Qwen3.8-27B · 文脈上限 262,144 トークン</text>
+<path d="M34 77H966M34 217H966M34 294H966" stroke="#455047"/>
+<g font-size="25" fill="#c5cdc5">
+<text x="34" y="118">モデル</text>
+<text x="599" y="118" text-anchor="end">本体ファイル容量</text>
+<text x="966" y="118" text-anchor="end">JSONL 編集の生成速度</text>
+</g>
+<g id="quality-model" fill="#e2c888" font-weight="650">
+<text x="34" y="177" font-size="38">品質モデル</text>
+<text x="35" y="201" font-size="20" fill="#d3c7a9">推奨</text>
+<text x="599" y="185" text-anchor="end" font-size="52">12.37<tspan font-size="28"> GB</tspan></text>
+<text x="966" y="185" text-anchor="end" font-size="52">2,243<tspan font-size="28"> tok/s</tspan></text>
+</g>
+<g id="fastest-model" fill="#f5f3ec" font-weight="600">
+<text x="34" y="268" font-size="38">最速モデル</text>
+<text x="599" y="271" text-anchor="end" font-size="50">10.31<tspan font-size="28"> GB</tspan></text>
+<text x="966" y="271" text-anchor="end" font-size="50">2,298<tspan font-size="28"> tok/s</tspan></text>
+</g>
+<text x="34" y="331" font-size="21" fill="#c5cdc5">RTX 5090 1枚・v0.1.4・思考なし。入力処理を除いた生成速度の2回平均。</text>
 </g></svg>
