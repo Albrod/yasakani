@@ -296,6 +296,36 @@ yasakani serve --model-dir D:\models\qwen38-quality --dll D:\yasakani\yskn.dll
 The details (the model folder, supported request fields, the loop guard, the self-check) are in [python/README.md](python/README.md).
 To build `yskn.dll` yourself, see [BUILDING.md](BUILDING.md); common questions are in [docs/FAQ.md](docs/FAQ.md).
 
+## Community conversions
+
+Files that other people made with the converter in [tools/convert/](tools/convert/). They are **not checked or maintained by this
+project**; the person named below keeps them working, and a conversion may be removed from this list in a release where it has fallen
+behind.
+
+**Arete-27B** (by [@audreyt](https://github.com/audreyt)): a community conversion of [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B),
+Nous Research's fine-tune of Qwen3.8-27B, made with the quality model's settings and reusing its draft model unchanged. Files:
+[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) at revision
+`659effb`; the SHA-256 of every file is in its `SHA256SUMS` (model file `arete_quality.yskn`, 12,365,242,368 bytes,
+`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`).
+
+```bat
+hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
+yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
+```
+
+Then use it as in [Quick start](#quick-start) with `--model-dir D:\models\arete-quality`. Measured by the converter's author on an
+RTX 5090:
+
+* Closeness to its own BF16 original (`tools/quality/`, 20 thinking windows, KV5 cache, measured with 0.1.3): KL divergence 0.0116,
+  same most likely token 95.64%. The quality model, measured the same way against Qwen3.8-27B: 0.0126 and 95.35%.
+* With 0.1.4: `yasakani verify` 11 of 11 files, `yasakani selfcheck` 3 of 3 (the same outputs as with 0.1.3). Tokens per look-ahead
+  pass: prose 2.40, thinking 2.48, code 4.68, CSV to JSON 15.04. On thinking text that is fewer than the quality model (2.48 against
+  3.24 in the author's run of both on the same card with 0.1.3), so expect it to be slower there than the speed tables above.
+* Nous Research's Propaganda_Eval (803 prompts), with the converted file and BF16 Arete-27B graded by the same judge: answers scored
+  as containing propaganda 9 (1.12%) against 1 (0.12%) for BF16 (paired difference +1.0 points, 95% interval +0.25 to +1.74); mean
+  fact score 2.873 against 2.929 of 5, no measurable difference. One sample per prompt, a different serving engine for each model,
+  and a different judge from Nous's; the numbers, settings and per-prompt grades are on the model card.
+
 ## Use it as an agent
 
 `yasakani-harness-0.1.0.zip` on the [release page](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5) opens an agent screen in your browser, run by the model
