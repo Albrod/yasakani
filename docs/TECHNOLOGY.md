@@ -117,7 +117,7 @@ we got when we ran it again. This is how it works.
 The calibration text is 96 windows of WikiText and 96 windows of **the model's own thinking transcripts**. Thinking text is included
 because this model spends most of its output on thinking. With the output-side statistics and the thinking text together, and with the
 same size and the same format, the KL on thinking text fell to 0.58 times that of our earlier conversion (quality model, 0.0210 to 0.0122).
-On general web text it rose by 3 to 10%. This choice is why the quality table in the README is measured on thinking text.
+On general web text it rose by 3 to 10%. This choice is why the quality numbers in the README are measured on thinking text.
 The 20 thinking transcripts used for that measurement were not used for the statistics.
 
 ### 3.3 The helper model
