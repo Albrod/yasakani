@@ -91,6 +91,11 @@
   .link { background: none; border: 0; padding: 0; color: var(--ink2); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
   .local { margin-left: auto; color: var(--dim); }
 
+  .upd { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 8px 24px; background: var(--panel2); border-bottom: 1px solid var(--line); font-size: 15px; }
+  .upd[hidden] { display: none; }
+  .upd button.go { background: var(--accent-fill); color: var(--on-accent); border: 0; border-radius: 6px; padding: 4px 16px; font-weight: 700; cursor: pointer; }
+  .upd button[disabled] { opacity: 0.45; cursor: default; }
+
   footer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 24px; font-size: 15px; display: flex; flex-wrap: wrap; gap: 4px 20px; align-items: baseline; }
   footer strong { color: var(--accent); font-size: 17px; }
   footer a { color: var(--ink); text-underline-offset: 3px; }
@@ -115,6 +120,7 @@
   <div class="model" id="model"></div>
   <div class="meter" title="tokens per second"><span class="num" id="num">–</span><span class="unit">tok/s</span><span class="what" id="what"></span></div>
 </header>
+<div class="upd" id="upd" hidden><span id="upd_text"></span><button class="go" id="upd_go" type="button"></button><button class="link" id="upd_later" type="button"></button></div>
 <main id="main"><div class="col" id="log"></div></main>
 <div class="composer"><div class="col">
   <div class="row">
@@ -150,6 +156,9 @@ const TEXT = {
     stopped: '止めました。', cut: '上限の長さに達したので、ここで止まりました。',
     err_net: 'サーバーに届きませんでした。起動ファイルの黒い画面が開いたままか確かめて、もう一度送ってください。',
     err_http: 'サーバーが断りました（{c}）: {m}',
+    upd: '新しい版 {v} があります', upd_go: '更新する', upd_later: 'あとで',
+    upd_wait: '更新しています。終わると、このページは自動で戻ります（エンジンとモデルの読み込みで数分かかることがあります）。',
+    upd_fail: '更新を始められませんでした（{m}）。', upd_lost: 'まだ戻りません。黒い画面に出ているアドレスを開いてください。',
     sup: [['strong', '開発を応援してください'], ['a', 'CAMPFIRE のクラウドファンディング（2026 年 12 月 16 日まで）', 'support'], ['a', 'GitHub', 'repo']],
   },
   en: {
@@ -168,6 +177,9 @@ const TEXT = {
     stopped: 'Stopped.', cut: 'The length limit was reached, so it stopped here.',
     err_net: 'The server could not be reached. Check that the black quickstart window is still open, then send again.',
     err_http: 'The server refused the request ({c}): {m}',
+    upd: 'New version {v} available', upd_go: 'Update', upd_later: 'Later',
+    upd_wait: 'Updating. This page comes back by itself when it is done (loading the engine and the model can take a few minutes).',
+    upd_fail: 'The update could not start ({m}).', upd_lost: 'The page has not come back yet. Open the address shown in the black window.',
     sup: [['strong', 'Like it?'], ['a', 'A star on GitHub helps', 'repo'], ['a', 'Crowdfunding on CAMPFIRE', 'support'], ['span', '(open to residents of Japan, until 16 Dec 2026)']],
   },
 };
@@ -408,13 +420,46 @@ async function poll() {
   showModel(h); setButton();
   setTimeout(poll, ready ? 15000 : 1500);
 }
+// 0.1.7: the launcher found a newer version.  The page itself asks nothing of GitHub; the button asks the launcher (this address),
+// with the one-time token of /webchat/config.  The launcher stops the server, updates and starts again on the same port.
+function showUpdate() {
+  const u = cfg.update;
+  if (!u || !cfg.update_token) return;
+  $('upd_text').textContent = t('upd', { v: u.version });
+  $('upd_go').textContent = L.upd_go; $('upd_later').textContent = L.upd_later;
+  $('upd').hidden = false;
+}
+$('upd_later').addEventListener('click', () => { $('upd').hidden = true; });
+$('upd_go').addEventListener('click', async () => {
+  if (busy) busy.abort();
+  $('upd_go').disabled = true;
+  try {
+    const r = await fetch('/webchat/update', { method: 'POST', headers: { 'X-Yasakani-Token': cfg.update_token }, cache: 'no-store' });
+    if (r.status !== 202) throw new Error('HTTP ' + r.status);
+  } catch (e) {
+    $('upd_text').textContent = t('upd_fail', { m: e.message }); $('upd_go').disabled = false; return;
+  }
+  cfg.update_token = null;
+  $('upd_go').hidden = true; $('upd_later').hidden = true; $('send').disabled = true;
+  $('upd_text').textContent = L.upd_wait;
+  const t0 = Date.now(), old = cfg.version;
+  (async function back() {
+    try {
+      const r = await fetch('/webchat/config', { cache: 'no-store' });
+      if (r.ok) { const c = await r.json(); if (c.version && c.version !== old) { location.reload(); return; } }
+    } catch (e) { /* not back yet */ }
+    if (Date.now() - t0 > 20 * 60 * 1000) { $('upd_text').textContent = L.upd_lost; return; }
+    setTimeout(back, 2000);
+  })();
+});
+
 (async function start() {
   try {
     const r = await fetch('/webchat/config', { cache: 'no-store' });
     if (r.ok) Object.assign(cfg, await r.json());
   } catch (e) { /* the defaults stay */ }
   if (cfg.lang && TEXT[cfg.lang]) L = TEXT[cfg.lang];
-  applyLanguage(); grow(); poll();
+  applyLanguage(); grow(); poll(); showUpdate();
 })();
 </script>
 </body>

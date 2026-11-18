@@ -14,6 +14,11 @@ Double-click START.cmd.  This script then
 The browser chat (chat.html) is served by this script on 127.0.0.1 only.  The script passes the requests of that page on to
 `yasakani serve`, which runs on this computer too.  Nothing is sent anywhere else.
 
+Updates (0.1.7): at most once a day, when the menu is shown, the script asks GitHub's API for the latest release (one HTTPS request
+without anything about this computer; it says so first, and --no-update-check turns it off).  Nothing is updated without a yes.  An
+update downloads the start files of that release, checks them against its SHA256SUMS.txt, keeps the current ones in backup/<version>/,
+puts the new ones in place and runs the new quickstart.py, which installs its own engine as usual.  --action rollback goes back.
+
 Everything is kept inside the folder this file is in.  Nothing is installed system-wide.
 Run it again any time: finished steps are skipped.
 
@@ -21,7 +26,9 @@ Apache License 2.0 - part of https://github.com/yasakani-dev/yasakani
 """
 import argparse
 import hashlib
+import hmac
 import http.client
+import io
 import json
 import os
 import re
@@ -44,6 +51,16 @@ REPO_URL = "https://github.com/yasakani-dev/yasakani"
 SUPPORT_URL = "https://camp-fire.jp/projects/992233/view"
 ENGINE_PORT, WEB_PORT = 8765, 8766      # `yasakani serve` and the browser chat; the next free ports are used if these are taken
 MAX_BODY = 16 << 20
+
+# ---- updates (0.1.7).  The check is one GET of the API below (5 s, no identifiers); the files come only from this repository's release
+# download URLs; the start files are the members of the quickstart zip (release.py: LICENSE + quickstart/*).
+UPDATE_API = "https://api.github.com/repos/yasakani-dev/yasakani/releases/latest"
+UPDATE_DOWNLOAD = REPO_URL + "/releases/download/"
+UPDATE_UA = "yasakani-quickstart"
+START_FILES = ("LICENSE", "README.txt", "START.cmd", "chat.html", "lookahead_check.py", "quickstart.py")
+MAX_START_FILE, MAX_START_ZIP, MAX_SUMS, MAX_API = 4 << 20, 16 << 20, 64 << 10, 1 << 20
+CHECK_EVERY = 24 * 3600
+UPDATE_RC = 75                      # run_web: the page asked for the update; the server is stopped
 PAGE_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
             "base-uri 'none'; form-action 'none'")
 MODELS = {
@@ -330,6 +347,66 @@ T = {
     },
     "bye": {"ja": "終了します。", "en": "Bye."},
     "stopped": {"ja": "中止しました。", "en": "Stopped."},
+    "menu_update": {
+        "ja": "  7) 新しい版を確かめる       （github.com に問い合わせます）\n",
+        "en": "  7) check for a new version     (asks github.com)\n",
+    },
+    "upd_line": {
+        "ja": "github.com に新しい版を問い合わせます（1 回だけ。このパソコンの情報は送りません。止めるときは --no-update-check）",
+        "en": "Asking github.com for a new version (one request; nothing about this PC is sent; --no-update-check turns this off)",
+    },
+    "upd_latest": {"ja": "最新の版です（{v}）。", "en": "This is the latest version ({v})."},
+    "upd_fail": {
+        "ja": "新しい版を確かめられませんでした（{e}）。このまま続けます。",
+        "en": "Could not check for a new version ({e}). Going on.",
+    },
+    "upd_found": {
+        "ja": "新しい版があります: {o} → {n}\n  {u}",
+        "en": "A new version is available: {o} -> {n}\n  {u}",
+    },
+    "upd_ask": {
+        "ja": "いま更新しますか？（モデルはそのまま使います） [y/N]: ",
+        "en": "Update now? (The models are kept.) [y/N]: ",
+    },
+    "upd_later": {
+        "ja": "更新しません。あとで更新するときは、メニューの 7 か START.cmd --action update です。",
+        "en": "Not updating. To update later, use 7 in the menu or START.cmd --action update.",
+    },
+    "upd_get": {"ja": "ダウンロード中: {u}", "en": "Downloading: {u}"},
+    "upd_sha_ok": {"ja": "SHA-256 は、その版の SHA256SUMS.txt の値と同じです。", "en": "The SHA-256 matches the release's SHA256SUMS.txt."},
+    "upd_bad": {
+        "ja": "更新をやめました: {e}\n今の版はそのままです。",
+        "en": "The update was stopped: {e}\nThe current version is unchanged.",
+    },
+    "upd_backup": {"ja": "今の起動ファイルを控えました: {p}", "en": "The current start files were copied to {p}"},
+    "upd_done": {
+        "ja": "起動ファイルを {n} に入れ替えました。新しい版を起動します（エンジンとパッケージは新しい版が入れ直します）。\n"
+              "元に戻すときは: START.cmd --action rollback",
+        "en": "The start files are now those of {n}. Starting the new version (it installs its own engine and package).\n"
+              "To go back: START.cmd --action rollback",
+    },
+    "upd_web": {
+        "ja": "チャットの画面から更新が頼まれました。サーバーを止めて更新します。",
+        "en": "The chat page asked for the update. Stopping the server and updating.",
+    },
+    "upd_off": {
+        "ja": "新しい版の自動の確認を止めました（--update-check で戻せます）。",
+        "en": "The automatic check for a new version is off now (--update-check turns it on again).",
+    },
+    "upd_on": {"ja": "新しい版の自動の確認を使います（1 日に 1 回まで）。", "en": "The automatic check for a new version is on (at most once a day)."},
+    "upd_dev": {
+        "ja": "開発用: 更新の問い合わせ先を {u} にしています（GitHub ではありません）。",
+        "en": "Development only: updates are looked up at {u} (not GitHub).",
+    },
+    "rb_none": {"ja": "戻せる控えがありません。", "en": "There is no backup to go back to."},
+    "rb_ask": {
+        "ja": "起動ファイルを {o} に戻しますか？ [y/N]: ",
+        "en": "Put the start files of {o} back? [y/N]: ",
+    },
+    "rb_done": {
+        "ja": "起動ファイルを {o} に戻しました。その版を起動します（エンジンとパッケージもその版のものに入れ直します）。",
+        "en": "The start files of {o} are back. Starting that version (it installs its own engine and package again).",
+    },
 }
 
 
@@ -565,6 +642,305 @@ def driver_verdict(driver, cuda=None):
     return "ok" if all(checks) else "old"
 
 
+# ------------------------------------------------------------------------------------------------------------------------ updates
+class UpdateError(Exception):
+    pass
+
+
+class UpdateSource:
+    """Where updates come from: GitHub's API for the latest release and this repository's download URLs.  ``dev_base`` (development
+    only, --update-dev-base) points both at a server on this computer, e.g. http://127.0.0.1:8900, for testing an update end to end."""
+
+    def __init__(self, dev_base=None):
+        self.dev = bool(dev_base)
+        if dev_base:
+            m = re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})/?", dev_base)
+            if not m:
+                raise UpdateError("--update-dev-base must be http://127.0.0.1:<port> (a server on this computer)")
+            base = "http://%s:%s/" % (m.group(1), m.group(2))
+            self.api = base + "repos/yasakani-dev/yasakani/releases/latest"
+            self.download = base + "yasakani-dev/yasakani/releases/download/"
+            self.base = base.rstrip("/")
+        else:
+            self.api, self.download, self.base = UPDATE_API, UPDATE_DOWNLOAD, None
+
+
+def parse_version(s):
+    """(0, 1, 10) from "0.1.10" or "v0.1.10"; None for anything else (pre-release tags such as v0.1.7-test1 included)."""
+    m = re.fullmatch(r"v?(\d{1,4})\.(\d{1,4})\.(\d{1,4})", str(s or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def is_newer(new, old):
+    a, b = parse_version(new), parse_version(old)
+    return a is not None and b is not None and a > b
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    """Release downloads redirect to GitHub's file host; follow https redirects only (http only to this computer in development)."""
+
+    def __init__(self, dev):
+        self.dev = dev
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not (newurl.startswith("https://") or (self.dev and re.match(r"http://(127\.0\.0\.1|localhost|\[::1\]):\d+/", newurl))):
+            raise UpdateError("refused a redirect to " + newurl.split("?", 1)[0])
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_bytes(url, limit, timeout, dev=False):
+    """GET ``url`` with a generic User-Agent and nothing else about this computer; at most ``limit`` bytes."""
+    req = urllib.request.Request(url, headers={"User-Agent": UPDATE_UA, "Accept": "application/vnd.github+json, */*"})
+    opener = urllib.request.build_opener(_Redirects(dev))
+    with opener.open(req, timeout=timeout) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise UpdateError("the answer is larger than %d bytes" % limit)
+    return data
+
+
+def fetch_latest(src, timeout=5):
+    """The latest release: {"version", "tag", "page", "assets"}; raises on any problem.  Drafts and pre-releases are refused."""
+    try:
+        j = json.loads(fetch_bytes(src.api, MAX_API, timeout, src.dev).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise UpdateError("the answer of the release API is not JSON")
+    if not isinstance(j, dict):
+        raise UpdateError("the answer of the release API is not a release")
+    tag = j.get("tag_name")
+    if j.get("draft") or j.get("prerelease"):
+        raise UpdateError("the latest release is a pre-release")
+    v = parse_version(tag)
+    if not (isinstance(tag, str) and tag.startswith("v") and v):
+        raise UpdateError("the latest release has an unexpected tag")
+    assets = {}
+    for x in j.get("assets") or []:
+        if isinstance(x, dict) and isinstance(x.get("name"), str) and isinstance(x.get("browser_download_url"), str):
+            assets[x["name"]] = x["browser_download_url"]
+    version = "%d.%d.%d" % v
+    return {"version": version, "tag": tag, "page": REPO_URL + "/releases/tag/" + tag, "assets": assets}
+
+
+def release_url(src, rel, name):
+    """The download URL of ``name`` in that release.  Only URLs under this repository's download path of that tag are used."""
+    base = src.download + rel["tag"] + "/"
+    url = (rel.get("assets") or {}).get(name) or base + name
+    if url != base + name:
+        raise UpdateError("refused a download URL outside %s: %s" % (base, url))
+    return url
+
+
+def parse_sums(text):
+    out = {}
+    for line in text.splitlines():
+        m = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](\S+)", line.strip())
+        if m:
+            out[m.group(2)] = m.group(1).lower()
+    return out
+
+
+def check_start_zip(data, version):
+    """The members of a quickstart zip -> {name: bytes}.  Refused: anything but plain files at the top whose names are START_FILES
+    (no folders, no paths), duplicates, encrypted or too large members, a zip without quickstart.py and START.cmd, or a quickstart.py
+    of another version."""
+    if len(data) > MAX_START_ZIP:
+        raise UpdateError("the zip is too large")
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise UpdateError("not a zip file")
+    out = {}
+    with z:
+        infos = z.infolist()
+        if len(infos) > len(START_FILES):
+            raise UpdateError("the zip has too many members")
+        for m in infos:
+            if m.filename not in START_FILES or m.filename in out:
+                raise UpdateError("unexpected member in the zip: %r" % m.filename)
+            if m.is_dir() or m.flag_bits & 0x1 or m.file_size > MAX_START_FILE:
+                raise UpdateError("member not allowed: %r" % m.filename)
+            with z.open(m) as f:
+                b = f.read(MAX_START_FILE + 1)
+            if len(b) > MAX_START_FILE or len(b) != m.file_size:
+                raise UpdateError("member not allowed: %r" % m.filename)
+            out[m.filename] = b
+    for need in ("quickstart.py", "START.cmd"):
+        if need not in out:
+            raise UpdateError("the zip has no " + need)
+    if ('QS_VERSION = "%s"' % version).encode("ascii") not in out["quickstart.py"]:
+        raise UpdateError("quickstart.py in the zip is not version " + version)
+    return out
+
+
+def download_update(ui, src, rel):
+    """Downloads and checks the start files of ``rel`` -> {name: bytes}.  Nothing on disk changes."""
+    zname = "yasakani-quickstart-%s.zip" % rel["version"]
+    zurl, surl = release_url(src, rel, zname), release_url(src, rel, "SHA256SUMS.txt")
+    ui.say("upd_get", u=surl)
+    sums = parse_sums(fetch_bytes(surl, MAX_SUMS, 30, src.dev).decode("ascii", "replace"))
+    if zname not in sums:
+        raise UpdateError("SHA256SUMS.txt of %s does not list %s" % (rel["tag"], zname))
+    ui.say("upd_get", u=zurl)
+    data = fetch_bytes(zurl, MAX_START_ZIP, 60, src.dev)
+    got = hashlib.sha256(data).hexdigest()
+    if got != sums[zname]:
+        raise UpdateError("the SHA-256 of %s differs from SHA256SUMS.txt (expected %s, got %s)" % (zname, sums[zname], got))
+    ui.say("upd_sha_ok")
+    return check_start_zip(data, rel["version"])
+
+
+def _write_files(folder, files):
+    """Writes every file as <name>.new first, then renames them over the old ones.  START.cmd may be the batch file that is running:
+    START.cmd runs this script from inside one ( ... ) block, which cmd.exe has read completely before it runs it, so a new START.cmd
+    does not change what the running one does after this script ends."""
+    for n, b in files.items():
+        with open(os.path.join(folder, n + ".new"), "wb") as f:
+            f.write(b)
+    for n in files:
+        os.replace(os.path.join(folder, n + ".new"), os.path.join(folder, n))
+
+
+def install_start_files(folder, files, old_version=None):
+    """Copies the current start files to backup/<old_version>/ and puts ``files`` in their place.  -> the backup folder.  If a file
+    cannot be replaced, the files of the backup are put back."""
+    old_version = old_version or QS_VERSION
+    if not parse_version(old_version):
+        raise UpdateError("bad version " + old_version)
+    bdir = os.path.join(folder, "backup", old_version)
+    tmp = bdir + ".tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    kept = []
+    for n in START_FILES:
+        p = os.path.join(folder, n)
+        if os.path.isfile(p):
+            shutil.copy2(p, os.path.join(tmp, n))
+            kept.append(n)
+    with open(os.path.join(tmp, "backup.json"), "w", encoding="utf-8") as f:
+        json.dump({"version": old_version, "files": kept, "made": int(time.time())}, f, indent=1)
+    if os.path.isdir(bdir):
+        shutil.rmtree(bdir)
+    os.replace(tmp, bdir)
+    try:
+        _write_files(folder, files)
+    except OSError:
+        restore = {}
+        for n in kept:
+            with open(os.path.join(bdir, n), "rb") as f:
+                restore[n] = f.read()
+        _write_files(folder, restore)
+        raise
+    return bdir
+
+
+def read_backup(folder, version):
+    """The files of backup/<version>/ -> {name: bytes}; raises when there is no usable backup."""
+    if not parse_version(version):
+        raise UpdateError("bad version")
+    bdir = os.path.join(folder, "backup", version)
+    try:
+        with open(os.path.join(bdir, "backup.json"), encoding="utf-8") as f:
+            man = json.load(f)
+    except (OSError, ValueError):
+        raise UpdateError("no backup of " + version)
+    out = {}
+    for n in man.get("files") or []:
+        if n not in START_FILES:
+            raise UpdateError("unexpected file in the backup: %r" % n)
+        p = os.path.join(bdir, n)
+        if os.path.getsize(p) > MAX_START_FILE:
+            raise UpdateError("file too large in the backup: %r" % n)
+        with open(p, "rb") as f:
+            out[n] = f.read()
+    if "quickstart.py" not in out or "START.cmd" not in out:
+        raise UpdateError("the backup of %s is not complete" % version)
+    return out
+
+
+def check_disabled(a, st, environ=None):
+    env = os.environ if environ is None else environ
+    return bool(getattr(a, "no_update_check", False)) or env.get("YASAKANI_NO_UPDATE_CHECK", "") not in ("", "0") \
+        or st.get("update_check") is False
+
+
+def update_check(ui, st, save, src, force=False, now=None, disabled=False):
+    """The check of the menu (at most once a day) or, with ``force``, of the menu item and --action update.  -> the newer release
+    or None.  Never raises: a failed check prints one line and goes on."""
+    now = time.time() if now is None else now
+    if disabled and not force:
+        return None
+    last = st.get("update_checked") or 0
+    if not force and 0 <= now - last < CHECK_EVERY:
+        c = st.get("update_latest")
+        if isinstance(c, dict) and is_newer(c.get("version"), QS_VERSION) and c.get("version") != st.get("update_skip") \
+                and parse_version(c.get("tag")):
+            return {"version": c["version"], "tag": c["tag"], "page": REPO_URL + "/releases/tag/" + c["tag"], "assets": {}}
+        return None
+    print(ui.t("upd_line"), flush=True)
+    st["update_checked"] = now
+    try:
+        rel = fetch_latest(src)
+    except Exception as e:  # noqa: BLE001 - offline, timeout, refused, rate limit, ...: never stop the launcher for it
+        if hasattr(e, "close"):
+            e.close()                                   # an HTTPError holds the answer
+        save()
+        ui.say("upd_fail", e=str(e) if isinstance(e, UpdateError) else type(e).__name__)
+        return None
+    st["update_latest"] = {"version": rel["version"], "tag": rel["tag"]}
+    save()
+    if not is_newer(rel["version"], QS_VERSION) or (not force and rel["version"] == st.get("update_skip")):
+        if force or not is_newer(rel["version"], QS_VERSION):
+            ui.say("upd_latest", v=QS_VERSION)
+        return None
+    return rel
+
+
+def run_quickstart(folder, args):
+    """Runs the quickstart.py of ``folder`` (the new one after an update) with the system Python that runs this one."""
+    print(flush=True)
+    return subprocess.call([sys.executable, os.path.join(folder, "quickstart.py")] + list(args))
+
+
+def apply_update(ui, folder, rel, src, yes, after_args, st, save):
+    """Asks (unless ``yes``), downloads, checks, backs up, replaces, then runs the new quickstart.py.  -> its exit code, 9 when the
+    update failed (nothing changed), None when the answer was no."""
+    ui.say("upd_found", o=QS_VERSION, n=rel["version"], u=rel["page"])
+    if not yes and ask(ui.t("upd_ask"), "n").lower() not in ("y", "yes"):
+        ui.say("upd_later")
+        return None
+    try:
+        files = download_update(ui, src, rel)
+        bdir = install_start_files(folder, files)
+    except Exception as e:  # noqa: BLE001 - network, checksum, zip, disk: the current version stays
+        ui.say("upd_bad", e=str(e) if isinstance(e, UpdateError) else "%s: %s" % (type(e).__name__, e))
+        return 9
+    st["update_backup"] = {"version": QS_VERSION, "from": rel["version"]}
+    st.pop("update_skip", None)
+    save()
+    ui.say("upd_backup", p=bdir)
+    ui.say("upd_done", n=rel["version"])
+    return run_quickstart(folder, after_args)
+
+
+def apply_rollback(ui, folder, st, save, yes, after_args):
+    b = st.get("update_backup") or {}
+    try:
+        files = read_backup(folder, b.get("version", ""))
+    except UpdateError:
+        ui.say("rb_none")
+        return 1
+    if not yes and ask(ui.t("rb_ask", o=b["version"]), "n").lower() not in ("y", "yes"):
+        ui.say("stopped")
+        return 1
+    _write_files(folder, files)
+    st.pop("update_backup", None)
+    if b.get("from"):
+        st["update_skip"] = b["from"]                 # the daily check does not offer that version again (the menu item still does)
+    save()
+    ui.say("rb_done", o=b["version"])
+    return run_quickstart(folder, after_args)
+
+
 # ---------------------------------------------------------------------------------------------------------------- browser chat
 def port_is_free(port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -602,13 +978,37 @@ class LocalServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def make_web_handler(page, conf, engine_port, web_port):
+class UpdateRequest:
+    """The update button of the chat page (0.1.7).  It exists only when this launcher found a newer version.  The page gets the
+    one-time ``token`` from /webchat/config (which only pages of this address can read) and sends it in the X-Yasakani-Token header
+    of a POST to /webchat/update; the request must also name this address in Host and Origin.  The token works once."""
+
+    HEADER = "X-Yasakani-Token"
+
+    def __init__(self, rel):
+        self.rel = rel
+        self.token = hashlib.sha256(os.urandom(32)).hexdigest()
+        self.event = threading.Event()
+        self._lock = threading.Lock()
+
+    def take(self, token):
+        with self._lock:
+            if not self.token or not token or not hmac.compare_digest(self.token.encode(), token.encode("utf-8", "replace")):
+                return False
+            self.token = None
+            return True
+
+
+def make_web_handler(page, conf, engine_port, web_port, update=None):
     """The handler of the browser chat: the page, its settings, and three paths passed on to `yasakani serve`.
 
     Like `yasakani serve`, it answers only requests that name this address in ``Host`` and, if they carry an ``Origin``, come from
-    this address - so a web page of another site that is open in the browser cannot talk to the model through it."""
+    this address - so a web page of another site that is open in the browser cannot talk to the model through it.  With ``update``
+    (an UpdateRequest) it also answers POST /webchat/update; without it that path does not exist."""
     own = ("127.0.0.1:%d" % web_port, "localhost:%d" % web_port)
     origins = tuple("http://" + h for h in own)
+    if update is not None:
+        conf = dict(conf, update={"version": update.rel["version"], "page": update.rel["page"]}, update_token=update.token)
     conf_bytes = json.dumps(conf).encode("utf-8")
 
     class Handler(BaseHTTPRequestHandler):
@@ -710,6 +1110,8 @@ def make_web_handler(page, conf, engine_port, web_port):
             why = self._refused()
             if why:
                 return self._error(403, "forbidden: " + why, "forbidden", close=True)
+            if update is not None and self.path.split("?", 1)[0] == "/webchat/update":
+                return self._update()
             if self.path.split("?", 1)[0] != "/v1/chat/completions":
                 return self._error(404, "not found", "not_found", close=True)
             try:
@@ -719,6 +1121,24 @@ def make_web_handler(page, conf, engine_port, web_port):
             if n < 0 or n > MAX_BODY:
                 return self._error(413, "request body too large or length missing", "invalid_request_error", close=True)
             self._relay("POST", "/v1/chat/completions", self.rfile.read(n))
+
+        def _update(self):
+            if (self.headers.get("Origin") or "").lower() not in origins:      # browsers send Origin with every POST of fetch()
+                return self._error(403, "forbidden: origin", "forbidden", close=True)
+            try:
+                n = int(self.headers.get("Content-Length", "") or 0)
+            except ValueError:
+                n = -1
+            if n < 0 or n > 4096:
+                return self._error(413, "request body too large", "invalid_request_error", close=True)
+            if n:
+                self.rfile.read(n)
+            if not update.take(self.headers.get(UpdateRequest.HEADER)):
+                return self._error(403, "forbidden: token", "forbidden", close=True)
+            self._send(202, "application/json; charset=utf-8",
+                       json.dumps({"status": "updating", "version": update.rel["version"]}).encode("utf-8"), close=True)
+            self.wfile.flush()
+            update.event.set()
 
     return Handler
 
@@ -835,7 +1255,27 @@ def web_selftest(web_port):
     return good
 
 
-def run_web(ui, a, vpy, env, mdir, dll, model):
+def wait_for_stop(proc, update, poll=0.2):
+    """Waits until Enter is pressed in this window, the server ends, or the page asked for the update (-> "update").  Enter is read
+    with msvcrt, not input(): a thread left waiting in input() would take the first line typed into the next quickstart.py."""
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+    tty = sys.stdin is not None and sys.stdin.isatty()
+    while True:
+        if update is not None and update.event.is_set():
+            return "update"
+        if proc.poll() is not None:
+            return "ended"
+        if tty and msvcrt is not None:
+            while msvcrt.kbhit():
+                if msvcrt.getwch() in ("\r", "\n"):
+                    return "enter"
+        time.sleep(poll)
+
+
+def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None):
     page_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat.html")
     if not os.path.isfile(page_path):
         ui.say("web_nopage", p=page_path)
@@ -843,7 +1283,9 @@ def run_web(ui, a, vpy, env, mdir, dll, model):
     with open(page_path, "rb") as f:
         page = f.read()
     eport = pick_port(ENGINE_PORT)
-    wport = pick_port(WEB_PORT, avoid=(eport,))
+    wport = pick_port(getattr(a, "web_port", None) or WEB_PORT, avoid=(eport,))
+    a.web_port_used = wport
+    update = UpdateRequest(update_rel) if update_rel else None
     ui.say("web_boot")
     proc = subprocess.Popen([vpy, "-m", "yasakani", "serve", "--model-dir", mdir, "--dll", dll, "--port", str(eport)], env=env)
     httpd = None
@@ -852,7 +1294,7 @@ def run_web(ui, a, vpy, env, mdir, dll, model):
             ui.say("web_fail")
             return 7
         conf = {"lang": ui.lang, "model": "custom" if a.model_dir else model, "version": QS_VERSION, "repo": REPO_URL, "support": SUPPORT_URL}
-        httpd = LocalServer(("127.0.0.1", wport), make_web_handler(page, conf, eport, wport))
+        httpd = LocalServer(("127.0.0.1", wport), make_web_handler(page, conf, eport, wport, update))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         url = "http://127.0.0.1:%d/" % wport
         if a.web_test:
@@ -864,12 +1306,12 @@ def run_web(ui, a, vpy, env, mdir, dll, model):
             except Exception:  # noqa: BLE001 - the address is printed above
                 pass
         try:
-            if sys.stdin is not None and sys.stdin.isatty():
-                input()
-            else:
-                proc.wait()
-        except (EOFError, KeyboardInterrupt):
-            pass
+            why = wait_for_stop(proc, update)
+        except KeyboardInterrupt:
+            why = "enter"
+        if why == "update":
+            ui.say("upd_web")
+            return UPDATE_RC
         return 0
     finally:
         if httpd is not None:
@@ -890,9 +1332,18 @@ def main(argv=None):
     ap.add_argument("--model-dir", help="use this model folder instead of downloading one")
     ap.add_argument("--engine-zip", help="use this engine zip instead of downloading it (its SHA-256 is still checked)")
     ap.add_argument("--home", help="where to keep everything (default: the folder of this file)")
-    ap.add_argument("--action", choices=("menu", "bench", "compare", "web", "chat", "serve", "none"), default="menu",
+    ap.add_argument("--action", choices=("menu", "bench", "compare", "web", "chat", "serve", "none", "update", "rollback"),
+                    default="menu",
                     help="what to do after the checks (default: show the menu); compare = look-ahead on and off, "
-                         "web = chat in the browser")
+                         "web = chat in the browser; update = look for a new version now and install it after a yes "
+                         "(with --yes without asking); rollback = put back the start files of the version before the last update")
+    ap.add_argument("--no-update-check", action="store_true",
+                    help="turn the automatic check for a new version off (kept in quickstart_state.json)")
+    ap.add_argument("--update-check", action="store_true", help="turn the automatic check for a new version on again")
+    ap.add_argument("--update-dev-base", metavar="URL",
+                    help="development only: look for updates at http://127.0.0.1:<port> (a test server on this computer) "
+                         "instead of GitHub")
+    ap.add_argument("--web-port", type=int, help="with the browser chat: the port to try first (an update keeps the page's port)")
     ap.add_argument("--no-browser", action="store_true", help="with the browser chat: do not open a browser window")
     ap.add_argument("--web-test", action="store_true", help="start the browser chat, check it once and stop")
     ap.add_argument("--lang", choices=("ja", "en"), help="language of the messages (default: the Windows display language)")
@@ -930,6 +1381,46 @@ def main(argv=None):
     state_path = os.path.join(home, "quickstart_state.json")
     st = load_state(state_path)
     n = 7
+
+    def save():
+        save_state(state_path, st)
+
+    # updates: the folder of the start files, where they come from, and the arguments the next quickstart.py gets
+    qs_dir = os.path.dirname(os.path.abspath(__file__))
+    st["quickstart_dir"] = qs_dir                       # `yasakani update` finds the launcher through this
+    if a.no_update_check or a.update_check:
+        st["update_check"] = not a.no_update_check
+        ui.say("upd_off" if a.no_update_check else "upd_on")
+    save()
+    try:
+        src = UpdateSource(a.update_dev_base)
+    except UpdateError as e:
+        print(e)
+        return 2
+    if src.dev:
+        ui.say("upd_dev", u=src.base)
+
+    def after_args(action, web_port=None):
+        out = ["--action", action, "--lang", ui.lang]
+        for flag, val in (("--home", a.home), ("--model-dir", a.model_dir), ("--update-dev-base", a.update_dev_base)):
+            if val:
+                out += [flag, val]
+        for flag, on in (("--skip-checks", a.skip_checks), ("--skip-driver-check", a.skip_driver_check), ("--yes", a.yes),
+                         ("--no-browser", a.no_browser or action == "web")):
+            if on:
+                out.append(flag)
+        if web_port:
+            out += ["--web-port", str(web_port)]
+        return out
+
+    if a.action == "update":                            # before the checks of this computer: they are the new version's job
+        rel = update_check(ui, st, save, src, force=True)
+        if not rel:
+            return 0
+        rc = apply_update(ui, qs_dir, rel, src, a.yes, after_args("none"), st, save)
+        return 0 if rc is None else rc
+    if a.action == "rollback":
+        return apply_rollback(ui, qs_dir, st, save, a.yes, after_args("none"))
 
     # 1. this computer
     ui.step(1, n, "s_check")
@@ -1135,16 +1626,38 @@ def main(argv=None):
     ui.step(7, n, "s_menu")
     print(ui.t("support", u=SUPPORT_URL, r=REPO_URL))
     action = a.action
+    pending = None                                      # a newer release this launcher knows of (offered once, then in the chat page)
+    if action == "menu":
+        print()
+        pending = update_check(ui, st, save, src, disabled=check_disabled(a, st))
+        if pending:
+            rc = apply_update(ui, qs_dir, pending, src, a.yes, after_args("menu"), st, save)
+            if rc is not None:
+                return rc
     while True:
         if action == "menu":
-            pick = ask(ui.t("menu"), "6")
-            cmd = {"1": "bench", "2": "compare", "3": "web", "4": "chat", "5": "serve"}.get(pick)
+            m = ui.t("menu")
+            i = m.rfind("\n")                           # the update item goes after the last item, above the prompt line
+            pick = ask(m[:i + 1] + ui.t("menu_update") + m[i + 1:], "6")
+            cmd = {"1": "bench", "2": "compare", "3": "web", "4": "chat", "5": "serve", "7": "update"}.get(pick)
         else:
             cmd = None if action == "none" else action
         if not cmd:
             break
+        if cmd == "update":
+            rel = update_check(ui, st, save, src, force=True)
+            if rel:
+                rc = apply_update(ui, qs_dir, rel, src, a.yes, after_args("menu"), st, save)
+                if rc is not None:
+                    return rc
+            continue
         if cmd == "web":
-            rc = run_web(ui, a, vpy, env, mdir, dll, model)
+            rc = run_web(ui, a, vpy, env, mdir, dll, model, pending)
+            if rc == UPDATE_RC:                         # the button of the page: that is the yes
+                rc = apply_update(ui, qs_dir, pending, src, True, after_args("web", a.web_port_used), st, save)
+                if rc != 9:
+                    return 0 if rc is None else rc
+                pending, rc = None, 0                   # the update failed and nothing changed: back to the menu
             if rc and action != "menu":
                 return rc
         elif cmd == "compare":

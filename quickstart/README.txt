@@ -34,6 +34,12 @@ START.cmd がすること
     やめるときは、このフォルダーを消すだけです。
   - 配布ファイルにはコード署名がありません。Windows が警告を出したら、発行元と入手先を確かめたうえで実行してください。
   - もう一度 START.cmd をダブルクリックすると、済んだ手順は飛ばして続きから始まります。
+  - 新しい版の確認：1 日に 1 回、メニューを開くときに github.com に問い合わせます（問い合わせる前に表示します。
+    送るのは最新の版を聞くリクエスト 1 回だけで、このパソコンの情報は送りません）。新しい版があれば、変える前に聞きます。
+    更新すると今の起動ファイルを backup フォルダーに控え、エンジンとパッケージを入れ直します（モデルはそのまま）。
+    今すぐ確かめる：メニューの 7 か START.cmd --action update
+    前の版に戻す：START.cmd --action rollback
+    確認を止める：START.cmd --no-update-check（戻すときは --update-check）
   - 手で入れる手順と、くわしい説明は https://github.com/yasakani-dev/yasakani にあります。
 
 English
@@ -68,6 +74,11 @@ Good to know
   - Everything is kept inside this folder; nothing is installed system-wide. To remove it, delete the folder.
   - The files are not code-signed. If Windows shows a warning, check the publisher and the source before you run them.
   - Double-click START.cmd again any time: finished steps are skipped.
+  - New versions: once a day, when the menu opens, START.cmd asks github.com for the latest version (it says so first;
+    one request, nothing about this computer is sent). If there is a newer one, it asks before it changes anything.
+    An update copies the current start files to the backup folder and installs the engine and the package again
+    (the models are kept). Check now: 7 in the menu or START.cmd --action update. Go back: START.cmd --action rollback.
+    Turn the check off: START.cmd --no-update-check (on again: --update-check).
   - The manual steps and the full documentation are at https://github.com/yasakani-dev/yasakani
 
 License: Apache License 2.0 (see the repository).

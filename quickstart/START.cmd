@@ -19,8 +19,11 @@ echo.
 pause
 exit /b 1
 :run
-%PY% "%~dp0quickstart.py" %*
-set "RC=%ERRORLEVEL%"
-echo.
-pause
-exit /b %RC%
+rem The lines in brackets are read as one block before they run, so an update can replace this file while it runs.
+(
+  %PY% "%~dp0quickstart.py" %*
+  call set "RC=%%ERRORLEVEL%%"
+  echo.
+  pause
+  call exit /b %%RC%%
+)
