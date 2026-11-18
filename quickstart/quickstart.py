@@ -14,7 +14,7 @@ Double-click START.cmd.  This script then
 The browser chat (chat.html) is served by this script on 127.0.0.1 only.  The script passes the requests of that page on to
 `yasakani serve`, which runs on this computer too.  Nothing is sent anywhere else.
 
-Updates (0.1.7): at most once a day, when the menu is shown, the script asks GitHub's API for the latest release (one HTTPS request
+Updates: at most once a day, when the menu is shown, the script asks GitHub's API for the latest release (one HTTPS request
 without anything about this computer; it says so first, and --no-update-check turns it off).  Nothing is updated without a yes.  An
 update downloads the start files of that release, checks them against its SHA256SUMS.txt, keeps the current ones in backup/<version>/,
 puts the new ones in place and runs the new quickstart.py, which installs its own engine as usual.  --action rollback goes back.
@@ -52,7 +52,7 @@ SUPPORT_URL = "https://camp-fire.jp/projects/992233/view"
 ENGINE_PORT, WEB_PORT = 8765, 8766      # `yasakani serve` and the browser chat; the next free ports are used if these are taken
 MAX_BODY = 16 << 20
 
-# ---- updates (0.1.7).  The check is one GET of the API below (5 s, no identifiers); the files come only from this repository's release
+# ---- updates.  The check is one GET of the API below (5 s, no identifiers); the files come only from this repository's release
 # download URLs; the start files are the members of the quickstart zip (release.py: LICENSE + quickstart/*).
 UPDATE_API = "https://api.github.com/repos/yasakani-dev/yasakani/releases/latest"
 UPDATE_DOWNLOAD = REPO_URL + "/releases/download/"
@@ -800,9 +800,11 @@ def _write_files(folder, files):
         os.replace(os.path.join(folder, n + ".new"), os.path.join(folder, n))
 
 
-def install_start_files(folder, files, old_version=None):
+def install_start_files(folder, files, old_version=None, before_replace=None):
     """Copies the current start files to backup/<old_version>/ and puts ``files`` in their place.  -> the backup folder.  If a file
-    cannot be replaced, the files of the backup are put back."""
+    cannot be replaced, the files of the backup are put back.  ``before_replace`` is called once the backup is complete and before
+    the first file is replaced (apply_update saves the pointer to the backup there, so --action rollback works after an
+    interrupted update)."""
     old_version = old_version or QS_VERSION
     if not parse_version(old_version):
         raise UpdateError("bad version " + old_version)
@@ -821,14 +823,17 @@ def install_start_files(folder, files, old_version=None):
     if os.path.isdir(bdir):
         shutil.rmtree(bdir)
     os.replace(tmp, bdir)
+    if before_replace is not None:
+        before_replace(bdir)
     try:
         _write_files(folder, files)
-    except OSError:
+    except OSError as e:
         restore = {}
         for n in kept:
             with open(os.path.join(bdir, n), "rb") as f:
                 restore[n] = f.read()
         _write_files(folder, restore)
+        e.restored = True                               # the old start files are back in place
         raise
     return bdir
 
@@ -908,18 +913,36 @@ def apply_update(ui, folder, rel, src, yes, after_args, st, save):
     if not yes and ask(ui.t("upd_ask"), "n").lower() not in ("y", "yes"):
         ui.say("upd_later")
         return None
+    had, before = "update_backup" in st, st.get("update_backup")
+
+    def keep_pointer(bdir):
+        # saved before the first start file is replaced: if the update stops halfway, --action rollback finds the backup
+        st["update_backup"] = {"version": QS_VERSION, "from": rel["version"]}
+        save()
+
     try:
         files = download_update(ui, src, rel)
-        bdir = install_start_files(folder, files)
+        bdir = install_start_files(folder, files, before_replace=keep_pointer)
     except Exception as e:  # noqa: BLE001 - network, checksum, zip, disk: the current version stays
+        if st.get("update_backup") != before and getattr(e, "restored", False):   # the old files are back: keep the earlier pointer
+            if had:
+                st["update_backup"] = before
+            else:
+                st.pop("update_backup", None)
+            save()
         ui.say("upd_bad", e=str(e) if isinstance(e, UpdateError) else "%s: %s" % (type(e).__name__, e))
         return 9
-    st["update_backup"] = {"version": QS_VERSION, "from": rel["version"]}
     st.pop("update_skip", None)
     save()
     ui.say("upd_backup", p=bdir)
     ui.say("upd_done", n=rel["version"])
     return run_quickstart(folder, after_args)
+
+
+def update_answered(a):
+    """--yes answers the update question only together with --action update.  The daily check at the menu and the menu item
+    always ask, also when the launcher runs with --yes (for example after an update, which passes --yes on)."""
+    return bool(getattr(a, "yes", False)) and getattr(a, "action", None) == "update"
 
 
 def apply_rollback(ui, folder, st, save, yes, after_args):
@@ -979,7 +1002,7 @@ class LocalServer(ThreadingHTTPServer):
 
 
 class UpdateRequest:
-    """The update button of the chat page (0.1.7).  It exists only when this launcher found a newer version.  The page gets the
+    """The update button of the chat page.  It exists only when this launcher found a newer version.  The page gets the
     one-time ``token`` from /webchat/config (which only pages of this address can read) and sends it in the X-Yasakani-Token header
     of a POST to /webchat/update; the request must also name this address in Host and Origin.  The token works once."""
 
@@ -1347,7 +1370,7 @@ def main(argv=None):
     ap.add_argument("--no-browser", action="store_true", help="with the browser chat: do not open a browser window")
     ap.add_argument("--web-test", action="store_true", help="start the browser chat, check it once and stop")
     ap.add_argument("--lang", choices=("ja", "en"), help="language of the messages (default: the Windows display language)")
-    ap.add_argument("--yes", action="store_true", help="answer yes to questions")
+    ap.add_argument("--yes", action="store_true", help="answer yes to questions (the update question only with --action update)")
     ap.add_argument("--skip-checks", action="store_true", help="do not run info / verify / selfcheck")
     ap.add_argument("--skip-driver-check", action="store_true",
                     help="do not stop when the NVIDIA driver is older than 580 (the engine will most likely not start)")
@@ -1417,7 +1440,7 @@ def main(argv=None):
         rel = update_check(ui, st, save, src, force=True)
         if not rel:
             return 0
-        rc = apply_update(ui, qs_dir, rel, src, a.yes, after_args("none"), st, save)
+        rc = apply_update(ui, qs_dir, rel, src, update_answered(a), after_args("none"), st, save)
         return 0 if rc is None else rc
     if a.action == "rollback":
         return apply_rollback(ui, qs_dir, st, save, a.yes, after_args("none"))
@@ -1631,7 +1654,7 @@ def main(argv=None):
         print()
         pending = update_check(ui, st, save, src, disabled=check_disabled(a, st))
         if pending:
-            rc = apply_update(ui, qs_dir, pending, src, a.yes, after_args("menu"), st, save)
+            rc = apply_update(ui, qs_dir, pending, src, update_answered(a), after_args("menu"), st, save)
             if rc is not None:
                 return rc
     while True:
@@ -1647,7 +1670,7 @@ def main(argv=None):
         if cmd == "update":
             rel = update_check(ui, st, save, src, force=True)
             if rel:
-                rc = apply_update(ui, qs_dir, rel, src, a.yes, after_args("menu"), st, save)
+                rc = apply_update(ui, qs_dir, rel, src, update_answered(a), after_args("menu"), st, save)
                 if rc is not None:
                     return rc
             continue

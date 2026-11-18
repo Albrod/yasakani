@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""0.1.7: the update of the quickstart (check, download, checks, backup, rollback, START.cmd while it runs, the button of the chat
+"""The update of the quickstart (check, download, checks, backup, rollback, START.cmd while it runs, the button of the chat
 page) and `yasakani update`.  No GPU and no real network: a fake release server on 127.0.0.1 stands in for GitHub."""
 import contextlib
 import hashlib
@@ -387,6 +387,122 @@ class DownloadTests(Base):
         rc, calls, out = self.run_update(d, rel)
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(calls), 1)
+
+    def test_pointer_saved_before_the_first_file_is_replaced(self):
+        """An update that stops while the start files are replaced (the window closed, the PC turned off) can be undone with
+        --action rollback: the pointer to the backup is in the saved state before any start file changes."""
+        d = self.folder()
+        old = {n: (d / n).read_bytes() for n in QS.START_FILES}
+        self.gh.publish("9.9.9", files={"quickstart.py": b'QS_VERSION = "9.9.9"\n', "START.cmd": b"new start\r\n",
+                                        "chat.html": b"<p>new</p>"})
+        rel = self.fetch()
+        saved_states = []
+        state_file = self.tmp / "quickstart_state.json"
+
+        def save():
+            state_file.write_text(json.dumps(self.st), encoding="utf-8")
+            saved_states.append(json.loads(state_file.read_text(encoding="utf-8")))
+
+        seen = []
+        orig_write = QS._write_files
+
+        def write_then_stop(folder, files):
+            # what is on disk at the moment the first start file would be replaced
+            seen.append(json.loads(state_file.read_text(encoding="utf-8")))
+            first = next(iter(files))
+            os.replace(self._new_file(folder, first, files[first]), os.path.join(folder, first))
+            raise KeyboardInterrupt                       # stops halfway: one file is new, the others are old
+
+        QS._write_files = write_then_stop
+        try:
+            with self.quiet(), self.assertRaises(KeyboardInterrupt):
+                QS.apply_update(self.ui, str(d), rel, self.src, True, [], self.st, save)
+        finally:
+            QS._write_files = orig_write
+        self.assertEqual(seen, [{"update_backup": {"version": QS.QS_VERSION, "from": "9.9.9"}}])
+        # a new run of the launcher reads the saved state and goes back
+        st = json.loads(state_file.read_text(encoding="utf-8"))
+        calls = []
+        orig = QS.run_quickstart
+        QS.run_quickstart = lambda f, args: calls.append(list(args)) or 0
+        try:
+            with self.quiet():
+                rc = QS.apply_rollback(self.ui, str(d), st, lambda: None, True, ["--action", "none"])
+        finally:
+            QS.run_quickstart = orig
+        self.assertEqual(rc, 0)
+        for n in QS.START_FILES:
+            self.assertEqual((d / n).read_bytes(), old[n], n)
+
+    def _new_file(self, folder, name, data):
+        p = os.path.join(folder, name + ".new")
+        with open(p, "wb") as f:
+            f.write(data)
+        return p
+
+    def test_failed_replace_keeps_the_earlier_pointer(self):
+        """When a start file cannot be replaced and the old files are put back, the pointer of an earlier update stays."""
+        d = self.folder()
+        earlier = {"version": "0.0.1", "from": QS.QS_VERSION}
+        self.st["update_backup"] = dict(earlier)
+        self.gh.publish("9.9.9", files={"quickstart.py": b'QS_VERSION = "9.9.9"\n', "START.cmd": b"new start\r\n"})
+        rel = self.fetch()
+        orig_write = QS._write_files
+        calls = []
+
+        def fail_once(folder, files):
+            calls.append(sorted(files))
+            if len(calls) == 1:
+                raise PermissionError("in use")
+            return orig_write(folder, files)
+
+        QS._write_files = fail_once
+        try:
+            rc, _, out = self.run_update(d, rel)
+        finally:
+            QS._write_files = orig_write
+        self.assertEqual(rc, 9, out)
+        self.assertEqual(len(calls), 2)                   # the try and the restore
+        self.assertEqual(self.st["update_backup"], earlier)
+        self.assertEqual((d / "START.cmd").read_bytes(), b"old START.cmd")
+
+
+class YesTests(Base):
+    """--yes answers the update question only with --action update; the check at the menu always asks."""
+
+    def test_rule(self):
+        A = SimpleNamespace
+        self.assertTrue(QS.update_answered(A(yes=True, action="update")))
+        self.assertFalse(QS.update_answered(A(yes=True, action="menu")))
+        self.assertFalse(QS.update_answered(A(yes=True, action="web")))
+        self.assertFalse(QS.update_answered(A(yes=False, action="update")))
+
+    def test_menu_asks_with_yes(self):
+        d = self.folder()
+        self.gh.publish("9.9.9")
+        with self.quiet():
+            rel = QS.fetch_latest(self.src)
+        asked = []
+        orig_ask = QS.ask
+        QS.ask = lambda prompt, default="": asked.append(prompt) or "n"
+        try:
+            with self.quiet():
+                rc = QS.apply_update(self.ui, str(d), rel, self.src, QS.update_answered(SimpleNamespace(yes=True, action="menu")),
+                                     [], self.st, self.save)
+        finally:
+            QS.ask = orig_ask
+        self.assertIsNone(rc)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual((d / "START.cmd").read_bytes(), b"old START.cmd")
+
+    def test_every_call_in_main_follows_the_rule(self):
+        """In main(), each apply_update gets update_answered(a), except the chat page's button (its press is the yes)."""
+        import ast
+        tree = ast.parse(Path(QS.__file__).read_text(encoding="utf-8"))
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        yes_args = [ast.unparse(c.args[4]) for c in ast.walk(main)
+                    if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "apply_update"]
+        self.assertEqual(sorted(yes_args), ["True", "update_answered(a)", "update_answered(a)", "update_answered(a)"])
 
 
 @unittest.skipUnless(sys.platform == "win32", "cmd.exe is Windows only")
