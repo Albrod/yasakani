@@ -304,6 +304,12 @@ Run the quickstart above first; then unpack the harness zip into the quickstart 
 
 What it does, what was checked and what was not: [harness/HARNESS_README.txt](harness/HARNESS_README.txt).
 
+For the **pi coding agent**, [Arete-27B-pi-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-pi-YASAKANI-quality/tree/7a0670eaa25753ed82aa1e31f1d943d6ff582be0)
+is a community conversion of Nous Research's Arete-27B with the harness-hub pi adapter merged before quantization.
+The model card has the pi setup and the author's RTX 5090 results: `verify` matched all 11 files, `selfcheck` passed 3/3,
+and the quality tools measured KL 0.01127 and 95.57% top-1 agreement against the merged BF16 checkpoint (20 windows, KV5).
+The YASAKANI project does not check or maintain this conversion.
+
 ## How it works, briefly
 
 * A file format of its own for the compressed model, and a runtime built around it. Compression and computation are designed together, so
