@@ -16,7 +16,7 @@ YASAKANI は Windows PC の RTX 1枚で Qwen3.8-27B を動かす推論エンジ�
 
 ![RTX 5090 1枚・1件ずつ・思考なし。自作の JSONL 編集（60行のうち1行だけ直して全行を返す）で、推奨の品質モデル（本体 12.37 GB）は 2,243 tok/s、最速モデル（本体 10.31 GB）は 2,298 tok/s。v0.1.4・2026年11月15日・2回の平均・入力処理を除く。文脈上限 262,144 トークン。](docs/assets/hero-ja.svg)
 
-JSONL 編集は自作の課題です。60行の JSONL のうち1行だけ直し、全行を返します。答えのほとんどは入力の写しです。tok/s は1秒あたりに生成したトークン数です。思考なしは、答えの前に考えを書き出さない設定です。条件は RTX 5090 1枚・1件ずつ・思考なし・v0.1.4（2026年11月15日）・2回の平均・入力処理を除く、です。ほかの GPU では遅くなります。
+JSONL 編集は自作の課題です。60行の JSONL のうち1行だけ直し、全行を返します。答えのほとんどは入力の写しです。tok/s は1秒あたりに生成したトークン数です。思考なしは、答えの前に考えを書き出さない設定です。測った条件は RTX 5090 1枚・1件ずつ・思考なし・v0.1.4（2026年11月15日）・2回の平均です。入力の読み込みは含みません。ほかの GPU では遅くなります。
 
 普段使いには**品質モデル**をおすすめします。予測が元のモデルにいちばん近いモデルです。ファイルの小ささと、多くの課題での速さを優先するなら**最速モデル**を選んでください。[品質モデルの配布ページ](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) · [最速モデルの配布ページ](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)
 
@@ -41,31 +41,6 @@ Windows 11（64 ビット）、Python 3.10 以上、NVIDIA ドライバー 580 �
 3. メニューでブラウザーのチャットかターミナルを選び、質問を入力します。別のアプリから使うときはサーバーを起動し、アプリの接続先を `http://127.0.0.1:8765/v1` にします。
 
 ターミナルでは `/effort medium` と入力すると思考が短くなり、`/think off` で思考がオフになります。[手動インストール](python/README.md#install) · [API の使い方](python/README.md#the-server)
-
-## コミュニティの変換
-
-[tools/convert/](tools/convert/) の変換器でほかの人が作ったファイルです。**このプロジェクトは確かめておらず、保守もしていません**。
-動く状態に保つのは下に名前のある人です。新しい版に追いつかなくなった変換は、その版でこの一覧から外すことがあります。
-
-**Arete-27B**（作成：[@audreyt](https://github.com/audreyt)）：Nous Research が Qwen3.8-27B をファインチューンした [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B) を、
-コミュニティで変換したものです。品質モデルと同じ設定で作り、品質モデルの下書きモデルをそのまま使います。ファイルは
-[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) のリビジョン `659effb` です。
-全ファイルの SHA-256 はその `SHA256SUMS` にあります（モデルファイル `arete_quality.yskn`、12,365,242,368 バイト、
-`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`）。
-
-```bat
-hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
-yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
-```
-
-そのあとは [使いはじめ](#使いはじめ) と同じように `--model-dir D:\models\arete-quality` を付けて使います。次の値は、この変換を作った人が RTX 5090 で測ったものです。
-
-* 元の BF16 の Arete-27B との近さ（`tools/quality/`、思考文 20 本、KV5 のキャッシュ、0.1.3 で測定）：KL 0.0116、第 1 候補一致率 95.64%。
-  品質モデルを同じ方法で Qwen3.8-27B と比べた値は 0.0126 と 95.35% です。
-* 0.1.4 で：`yasakani verify` は 11 ファイル中 11 ファイル、`yasakani selfcheck` は 3 件中 3 件が合格（出力は 0.1.3 と同じ）。
-  先読みの 1 回の計算で進んだトークン数は、文章 2.40・思考あり 2.48・コード 4.68・CSV → JSON 15.04 です。思考文では品質モデルより少なく、作った人が同じカードと 0.1.3 で両方を測ると 2.48 対 3.24 でした。
-  そのため思考文では、速さの表の値より遅くなると考えてください。
-* そのほかの評価は、設定と注意点とともに[モデルカード](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9)にあります。
 
 <a name="速さ"></a>
 
@@ -134,6 +109,31 @@ yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dl
 <a name="長い文脈"></a>
 
 文脈上限の262,144トークン分を確保すると、GPU メモリの使用量は品質モデルで約21.2 GiB、最速モデルで約19.1 GiB でした。補助モデルの分も含みます。長文での品質は128Kまで測っています。[KV5 の長文測定](docs/MEASUREMENTS.ja.md#最速モデルのkv5独自圧縮のキーバリューキャッシュ)
+
+## コミュニティの変換
+
+[tools/convert/](tools/convert/) の変換器でほかの人が作ったファイルです。**このプロジェクトは確かめておらず、保守もしていません**。
+動く状態に保つのは下に名前のある人です。新しい版に追いつかなくなった変換は、その版でこの一覧から外すことがあります。
+
+**Arete-27B**（作成：[@audreyt](https://github.com/audreyt)）：Nous Research が Qwen3.8-27B をファインチューンした [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B) を、
+コミュニティで変換したものです。品質モデルと同じ設定で作り、品質モデルの下書きモデルをそのまま使います。ファイルは
+[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) のリビジョン `659effb` です。
+全ファイルの SHA-256 はその `SHA256SUMS` にあります（モデルファイル `arete_quality.yskn`、12,365,242,368 バイト、
+`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`）。
+
+```bat
+hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
+yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
+```
+
+そのあとは [使いはじめ](#使いはじめ) と同じように `--model-dir D:\models\arete-quality` を付けて使います。次の値は、この変換を作った人が RTX 5090 で測ったものです。
+
+* 元の BF16 の Arete-27B との近さ（`tools/quality/`、思考文 20 本、KV5 のキャッシュ、0.1.3 で測定）：KL 0.0116、第 1 候補一致率 95.64%。
+  品質モデルを同じ方法で Qwen3.8-27B と比べた値は 0.0126 と 95.35% です。
+* 0.1.4 で：`yasakani verify` は 11 ファイル中 11 ファイル、`yasakani selfcheck` は 3 件中 3 件が合格（出力は 0.1.3 と同じ）。
+  先読みの 1 回の計算で進んだトークン数は、文章 2.40・思考あり 2.48・コード 4.68・CSV → JSON 15.04 です。思考文では品質モデルより少なく、作った人が同じカードと 0.1.3 で両方を測ると 2.48 対 3.24 でした。
+  そのため思考文では、上の速さの表の値より遅くなると考えてください。
+* そのほかの評価は、設定と注意点とともに[モデルカード](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9)にあります。
 
 <a name="仕組みかんたんに"></a>
 <a name="ドキュメントと開発参加"></a>

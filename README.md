@@ -42,33 +42,6 @@ You need 64-bit Windows 11, Python 3.10 or later, NVIDIA driver 580 or later, th
 
 In terminal chat, type `/effort medium` to make the model think for a shorter time, or `/think off` to turn thinking off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
 
-## Community conversions
-
-Files that other people made with the converter in [tools/convert/](tools/convert/). They are **not checked or maintained by this
-project**; the person named below keeps them working, and a conversion may be removed from this list in a release where it has fallen
-behind.
-
-**Arete-27B** (by [@audreyt](https://github.com/audreyt)): a community conversion of [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B),
-Nous Research's fine-tune of Qwen3.8-27B, made with the quality model's settings and reusing its draft model unchanged. Files:
-[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) at revision
-`659effb`; the SHA-256 of every file is in its `SHA256SUMS` (model file `arete_quality.yskn`, 12,365,242,368 bytes,
-`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`).
-
-```bat
-hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
-yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
-```
-
-Then use it as in [Quick start](#quick-start) with `--model-dir D:\models\arete-quality`. Measured by the author of this conversion on an
-RTX 5090:
-
-* Closeness to its own BF16 original (`tools/quality/`, 20 thinking windows, KV5 cache, measured with 0.1.3): KL divergence 0.0116,
-  same most likely token 95.64%. The quality model, measured the same way against Qwen3.8-27B: 0.0126 and 95.35%.
-* With 0.1.4: `yasakani verify` 11 of 11 files, `yasakani selfcheck` 3 of 3 (the same outputs as with 0.1.3). Tokens per look-ahead
-  pass: prose 2.40, thinking 2.48, code 4.68, CSV to JSON 15.04. On thinking text that is fewer than the quality model (2.48 against
-  3.24 in the author's run of both on the same card with 0.1.3), so expect it to be slower there than the speed tables above.
-* Further evaluations, with their settings and caveats, are on the [model card](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9).
-
 <a name="speed"></a>
 
 ## Speed and quality
@@ -136,6 +109,33 @@ The quality model picks the same most likely next token as the original BF16 mod
 <a name="long-contexts"></a>
 
 With room reserved for the maximum context of 262,144 tokens, GPU memory use was about 21.2 GiB with the quality model and 19.1 GiB with the fastest model. This includes the helper model. We measured long-context quality up to 128K tokens. [KV5 measurements](docs/MEASUREMENTS.md#kv5-the-compressed-key-value-cache-with-the-fastest-model)
+
+## Community conversions
+
+Files that other people made with the converter in [tools/convert/](tools/convert/). They are **not checked or maintained by this
+project**; the person named below keeps them working, and a conversion may be removed from this list in a release where it has fallen
+behind.
+
+**Arete-27B** (by [@audreyt](https://github.com/audreyt)): a community conversion of [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B),
+Nous Research's fine-tune of Qwen3.8-27B, made with the quality model's settings and reusing its draft model unchanged. Files:
+[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) at revision
+`659effb`; the SHA-256 of every file is in its `SHA256SUMS` (model file `arete_quality.yskn`, 12,365,242,368 bytes,
+`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`).
+
+```bat
+hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
+yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
+```
+
+Then use it as in [Quick start](#quick-start) with `--model-dir D:\models\arete-quality`. Measured by the author of this conversion on an
+RTX 5090:
+
+* Closeness to its own BF16 original (`tools/quality/`, 20 thinking windows, KV5 cache, measured with 0.1.3): KL divergence 0.0116,
+  same most likely token 95.64%. The quality model, measured the same way against Qwen3.8-27B: 0.0126 and 95.35%.
+* With 0.1.4: `yasakani verify` 11 of 11 files, `yasakani selfcheck` 3 of 3 (the same outputs as with 0.1.3). Tokens per look-ahead
+  pass: prose 2.40, thinking 2.48, code 4.68, CSV to JSON 15.04. On thinking text that is fewer than the quality model (2.48 against
+  3.24 in the author's run of both on the same card with 0.1.3), so expect it to be slower there than the speed tables above.
+* Further evaluations, with their settings and caveats, are on the [model card](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9).
 
 <a name="how-it-works-briefly"></a>
 <a name="documentation-and-contributions"></a>
