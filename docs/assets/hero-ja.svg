@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="356" viewBox="0 0 1000 356" role="img" aria-labelledby="title desc" xml:lang="ja">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="380" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc" xml:lang="ja">
 <title id="title">YASAKANI の品質モデルと最速モデル</title>
-<desc id="desc">RTX 5090 1枚での JSONL 編集（思考なし）。推奨の品質モデルは本体 12.37 GB で 2,243 tok/s、最速モデルは本体 10.31 GB で 2,298 tok/s。文脈上限は 262,144 トークン。</desc>
-<rect width="1000" height="356" rx="16" fill="#131714"/>
+<desc id="desc">RTX 5090 1枚・1件ずつ・思考なし。自作の JSONL 編集（60行のうち1行だけ直して全行を返す）で、推奨の品質モデル（本体 12.37 GB）は 2,243 tok/s、最速モデル（本体 10.31 GB）は 2,298 tok/s。v0.1.4・2026年11月15日・2回の平均・入力処理を除く。文脈上限 262,144 トークン。</desc>
+<rect width="1000" height="380" rx="16" fill="#131714"/>
 <path d="M18 3H982" stroke="#d9bb77" stroke-width="4"/>
 <g font-family="Segoe UI, Noto Sans JP, Yu Gothic, sans-serif">
 <text x="34" y="57" font-size="34" font-weight="700" letter-spacing="2" fill="#e2c888">YASAKANI</text>
@@ -23,5 +23,6 @@
 <text x="599" y="271" text-anchor="end" font-size="50">10.31<tspan font-size="28"> GB</tspan></text>
 <text x="966" y="271" text-anchor="end" font-size="50">2,298<tspan font-size="28"> tok/s</tspan></text>
 </g>
-<text x="34" y="331" font-size="21" fill="#c5cdc5">RTX 5090 1枚・v0.1.4・思考なし。入力処理を除いた生成速度の2回平均。</text>
+<text x="34" y="330" font-size="21" fill="#c5cdc5">自作の JSONL 編集・RTX 5090 1枚・1件ずつ・思考なし</text>
+<text x="34" y="360" font-size="21" fill="#c5cdc5">v0.1.4（2026年11月15日）・2回の平均・入力処理を除く生成速度</text>
 </g></svg>

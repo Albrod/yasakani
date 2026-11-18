@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="356" viewBox="0 0 1000 356" role="img" aria-labelledby="title desc" xml:lang="en">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="380" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc" xml:lang="en">
 <title id="title">YASAKANI quality and fastest models</title>
-<desc id="desc">On one RTX 5090 with thinking off, the recommended quality model (12.37 GB) generated 2,243 tok/s on JSONL edits. The fastest model (10.31 GB) generated 2,298 tok/s. Maximum context is 262,144 tokens.</desc>
-<rect width="1000" height="356" rx="16" fill="#131714"/>
+<desc id="desc">One RTX 5090, one request at a time, thinking off. On our own JSONL edit task (return 60 JSONL lines with one record changed) the recommended quality model (12.37 GB) wrote 2,243 tok/s and the fastest model (10.31 GB) 2,298 tok/s. v0.1.4, November 15, 2026, mean of 2 runs, prompt reading excluded. Context up to 262,144 tokens.</desc>
+<rect width="1000" height="380" rx="16" fill="#131714"/>
 <path d="M18 3H982" stroke="#d9bb77" stroke-width="4"/>
 <g font-family="Segoe UI, Noto Sans JP, Yu Gothic, sans-serif">
 <text x="34" y="57" font-size="34" font-weight="700" letter-spacing="2" fill="#e2c888">YASAKANI</text>
@@ -23,5 +23,6 @@
 <text x="599" y="271" text-anchor="end" font-size="50">10.31<tspan font-size="28"> GB</tspan></text>
 <text x="966" y="271" text-anchor="end" font-size="50">2,298<tspan font-size="28"> tok/s</tspan></text>
 </g>
-<text x="34" y="331" font-size="21" fill="#c5cdc5">One RTX 5090 · v0.1.4 · thinking off · two-run mean of generation speed, excluding prefill.</text>
+<text x="34" y="330" font-size="21" fill="#c5cdc5">Our own JSONL edit task · one RTX 5090 · one request at a time · thinking off</text>
+<text x="34" y="360" font-size="21" fill="#c5cdc5">v0.1.4 (Nov 15, 2026) · mean of 2 runs · generation only, prompt excluded</text>
 </g></svg>
