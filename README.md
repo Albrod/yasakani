@@ -4,7 +4,7 @@ English · [日本語](README.ja.md)
 
 <a name="what-it-is"></a>
 
-YASAKANI runs Qwen3.8-27B on a Windows PC with one NVIDIA RTX GPU. The developer has tested it on the RTX 5090 only. After setup you can chat and edit code offline, or connect your development tools to its OpenAI-compatible API.
+YASAKANI is an engine that runs the Qwen3.8-27B language model on a Windows PC with one NVIDIA RTX GPU. The developer has tested it on the RTX 5090 only. After setup you can chat and edit code offline. You can also connect your own development tools through its OpenAI-compatible API.
 
 **[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.6/yasakani-quickstart-0.1.6.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.6/fast_live_uncut.mp4)
 
@@ -16,9 +16,9 @@ YASAKANI runs Qwen3.8-27B on a Windows PC with one NVIDIA RTX GPU. The developer
 
 ![One RTX 5090, one request at a time, thinking off. On our own JSONL edit task (return 60 JSONL lines with one record changed) the recommended quality model (12.37 GB) wrote 2,243 tok/s and the fastest model (10.31 GB) 2,298 tok/s. v0.1.4, November 15, 2026, mean of 2 runs, prompt reading excluded. Context up to 262,144 tokens.](docs/assets/hero-en.svg)
 
-JSONL edit is our own task: the model returns 60 JSONL lines with one record changed, so almost all of the answer copies the input. One RTX 5090, one request at a time, thinking off, v0.1.4 (November 15, 2026), mean of 2 runs, prompt reading excluded. Other GPUs are slower.
+JSONL edit is our own task. The model gets 60 JSONL lines, changes one record and returns all the lines, so almost all of the answer is a copy of the input. tok/s means tokens generated per second. Thinking off means the model answers without first writing out its reasoning. Conditions: one RTX 5090, one request at a time, thinking off, v0.1.4 (November 15, 2026), mean of 2 runs, prompt reading excluded. Other GPUs are slower.
 
-Choose the **quality model** for everyday use and predictions closest to the original model. Choose the **fastest model** for its smaller file and higher speed in most tasks. [Quality model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) · [Fastest model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)
+For everyday use, choose the **quality model**. Its predictions are the closest to the original model. Choose the **fastest model** if you want a smaller file and higher speed in most tasks. [Quality model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) · [Fastest model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)
 
 | Your GPU | Model choice | Windows testing |
 |---|---|---|
@@ -26,21 +26,21 @@ Choose the **quality model** for everyday use and predictions closest to the ori
 | RTX 3090, 3090 Ti, or 4090 (24 GB) | Quality or fastest | Built for these cards; not tested or tuned by the developer |
 | Listed RTX 40 and 50 series cards (16 GB) | Fastest, with context sized to free memory | Built for these cards; not tested or tuned by the developer |
 
-All speed numbers in this repository are from the RTX 5090. Other cards are slower, and their speed and operation are not guaranteed. The wide copy passes behind the edit numbers are used on compute capability 12.x (RTX 50 series) only, and were measured on the RTX 5090 only. RTX 30 and 40 cards check at most 16 copied tokens per pass, so the edit speedup of 0.1.4 does not apply to them.
+All speed numbers in this repository were measured on the RTX 5090. Other cards are slower. We do not guarantee their speed or that they work. The edit numbers are high because one pass of the model checks many tokens copied from the input. The engine does this only on compute capability 12.x (RTX 50 series), and we measured it only on the RTX 5090. RTX 30 and 40 cards check at most 16 copied tokens per pass, so the 0.1.4 edit speedup does not apply to them.
 
 Contributors have tested a Linux build from source. AMD and Mac are future targets. [GPU list and requirements](docs/FAQ.md#which-gpus-which-systems) · [Build on Linux](BUILDING.md#linux-building-from-source)
 
-**Several GPUs:** one process uses one GPU. `--device N` picks GPU N as `yasakani info` and nvidia-smi number them. With 0.1.5, `--device 1` on a PC with two GPUs could stop with `graph instantiate failed` ([#20](https://github.com/yasakani-dev/yasakani/issues/20)); 0.1.6 has a fix for this, but it has not yet been tried on a PC with two GPUs.
+**Several GPUs:** one process uses one GPU. `--device N` picks GPU N as `yasakani info` and nvidia-smi number them. With 0.1.5, `--device 1` on a PC with two GPUs could stop with `graph instantiate failed` ([#20](https://github.com/yasakani-dev/yasakani/issues/20)). 0.1.6 includes a fix. We have not yet tried it on a PC with two GPUs.
 
 ## Quick start
 
 You need 64-bit Windows 11, Python 3.10 or later, NVIDIA driver 580 or later, the Visual C++ 2015–2022 x64 runtime, and 20 GB of free disk space.
 
 1. Extract the v0.1.6 Windows quickstart ZIP to a path with only English letters and digits, such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.6)
-2. Open **`START.cmd`** and choose a model. The launcher downloads the engine and model files, verifies them, and runs the GPU self-check.
-3. Select browser or terminal chat and enter your first prompt. To use another app, start the server and point the client at `http://127.0.0.1:8765/v1`.
+2. Open **`START.cmd`** and choose a model. On the first run it downloads the engine and model files, checks them, and runs a GPU self-check.
+3. In the menu, choose browser chat or terminal chat, then type your first prompt. To use YASAKANI from another app, start the server and set the app's API address to `http://127.0.0.1:8765/v1`.
 
-In terminal chat, enter `/effort medium` for a shorter thinking phase or `/think off` to turn it off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
+In terminal chat, type `/effort medium` to make the model think for a shorter time, or `/think off` to turn thinking off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
 
 ## Community conversions
 
@@ -73,7 +73,7 @@ RTX 5090:
 
 ## Speed and quality
 
-All engines generated one request at a time on the same PC with one stock RTX 5090 (600 W). The fastest model led the eight other engines in all seven categories, using filtered means with thinking off and the best run per task with thinking on. The big gaps are in our own three tasks: two edits whose answers mostly copy the input, and one long, very regular JSONL output. With thinking off they are 1.8 to 4.6 times the next engine (code edit: 2,025 tok/s with v0.1.4 on November 15, against 441 tok/s for MegaCapybara 1.39 Tiny on November 3). On the 12 published prompts the fastest model is 1.1 to 1.5 times the next engine. Three of those 12 (CUDA code, TypeScript code, the English mystery story) are not compared, because its answer fell into a repetition loop or made an unrequested tool call.
+The fastest model was faster than each of the eight other engines in all seven categories. All engines ran on the same PC with one stock RTX 5090 (600 W) and generated one request at a time. With thinking off we compare means that leave out repetition loops and similar failures. With thinking on we compare the best run per task. The big gaps are in our own three tasks. Two are edits whose answers mostly copy the input, and one is a long, very regular JSONL output. On these, with thinking off, the fastest model is 1.8 to 4.6 times as fast as the next engine (code edit: 2,025 tok/s with v0.1.4 on November 15, against 441 tok/s for MegaCapybara 1.39 Tiny on November 3). On the 12 published prompts it is 1.1 to 1.5 times as fast as the next engine. Three of those 12 (CUDA code, TypeScript code, the English mystery story) are left out of the comparison. On them the fastest model's answer fell into a repetition loop or made a tool call that was not asked for.
 
 <a name="what-014-changed"></a>
 
@@ -84,14 +84,14 @@ All engines generated one request at a time on the same PC with one stock RTX 50
 | fastest model | 1,210 → 2,025 (1.67×) | 1,125 → 2,298 (2.04×) | 1,141 → 2,099 (1.84×) | 0.96 to 1.00× |
 | quality model | 1,128 → 2,008 (1.78×) | 1,146 → 2,243 (1.96×) | 1,096 → 2,056 (1.88×) | 0.97 to 1.01× |
 
-The answers were the same text, except one 0.1.2 run that changed part-way (the rare change fixed in 0.1.3). 0.1.5 and 0.1.6 have the same GPU code. [Details](docs/MEASUREMENTS.md#speed-thinking-off)
+Both versions gave the same answer text, with one exception: in one 0.1.2 run the text changed part-way through. That was the rare problem fixed in 0.1.3. 0.1.5 and 0.1.6 have the same GPU code as 0.1.4. [Details](docs/MEASUREMENTS.md#speed-thinking-off)
 
-To measure your own PC, run `yasakani bench`. `yasakani bench --edit` runs the three edit tasks above (the code edit, the JSONL edit and the long JSONL edit) and prints the speed, the tokens per pass and whether each answer is the expected one. [How to measure the edit speed](docs/FAQ.md#how-do-i-measure-the-edit-speed-on-my-pc)
+To measure the speed on your own PC, run `yasakani bench`. To run the three edit tasks above (the code edit, the JSONL edit and the long JSONL edit), run `yasakani bench --edit`. It prints the speed, the tokens per pass (how many tokens one pass of the model produced) and whether each answer is the expected one. [How to measure the edit speed](docs/FAQ.md#how-do-i-measure-the-edit-speed-on-my-pc)
 
 <details>
 <summary>See all seven categories with thinking off and on</summary>
 
-**Thinking off** uses the two-run mean for each task, excluding repetition loops and unrequested tool calls by the same rule for all engines. YASAKANI was measured again on November 15 with v0.1.4 (0.1.5 and 0.1.6 have the same GPU code). Numbers are generation tok/s, excluding prompt processing.
+**Thinking off:** the mean of two runs per task. Runs with a repetition loop or an unrequested tool call are left out, by the same rule for all engines. YASAKANI was measured again on November 15 with v0.1.4 (0.1.5 and 0.1.6 have the same GPU code). Numbers are generation tok/s, without prompt processing.
 
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|
@@ -106,7 +106,7 @@ To measure your own PC, run `yasakani bench`. `yasakani bench --edit` runs the t
 | llama.cpp b11700 | 242 | 133 | 232 | 337 | 244 | 360 | 362 |
 | TensorFold 0.6.6 | 181 | 104 | 172 | 405 | 383 | 408 | 261 |
 
-**Thinking on** takes the fastest run per task and averages within each category. YASAKANI was measured on November 8 with the engine of 0.1.0 to 0.1.2 (the build of November 7), using five runs per task; it was not measured again with 0.1.4. The other engines had two.
+**Thinking on:** the fastest run of each task, averaged within each category. YASAKANI was measured on November 8 with the engine of 0.1.0 to 0.1.2 (the build of November 7), with five runs per task. It was not measured again with 0.1.4. The other engines had two runs per task.
 
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|
@@ -127,30 +127,30 @@ The other engines were measured on November 3 and 6. Each engine used its own we
 
 <a name="one-edit-start-to-finish"></a>
 
-In the uncut November 8 recording, the fastest model edited a Python file and returned the full file **5.56 seconds** after submission. The edited code matched the original program’s behavior on 17,701 test inputs. [Recording and verification records](bench/20261108/demo/)
+In the uncut November 8 recording, the fastest model edited a Python file and returned the whole file **5.56 seconds** after the request was sent. On 17,701 test inputs, the edited code gave the same results as the original program. [Recording and verification records](bench/20261108/demo/)
 
 <a name="quality"></a>
 
-On 20 held-out thinking texts (20,460 positions), the quality model chose the same most likely next token as the original BF16 model at **95.24%** of positions (KL 0.0122), and the fastest model at **93.01%** (KL 0.0304). The similarly sized GSQ-RCO IQ3_S agreed at 93.64%. These were measured on November 8 with a research build and an FP16 KV cache. Measured again on November 14 with the released engine (0.1.0 to 0.1.2) and its KV5 cache: 95.35% (KL 0.0126) and 92.98% (KL 0.0309). This is agreement with the original model on thinking text, not task accuracy, and the models are not identical to the original. [Quality results for 13 configurations and methodology](docs/MEASUREMENTS.md#quality-on-thinking-text) · [Measure it yourself](tools/quality/)
+The quality model picks the same most likely next token as the original BF16 model at **95.24%** of positions, and the fastest model at **93.01%**. The test used 20 thinking texts that were not used in the conversion (20,460 positions). KL divergence measures how far the predicted probabilities are from the original model's; lower is closer. It was 0.0122 for the quality model and 0.0304 for the fastest model. The similarly sized GSQ-RCO IQ3_S agreed at 93.64%. These numbers are from November 8, with a research build and an FP16 KV cache. Measured again on November 14 with the released engine (0.1.0 to 0.1.2) and its KV5 cache, the results were 95.35% (KL 0.0126) and 92.98% (KL 0.0309). This measures agreement with the original model on thinking text, not task accuracy. The models are not identical to the original. [Quality results for 13 configurations and methodology](docs/MEASUREMENTS.md#quality-on-thinking-text) · [Measure it yourself](tools/quality/)
 
 <a name="long-contexts"></a>
 
-With the maximum context of 262,144 tokens reserved, GPU memory use including the helper model was about 21.2 GiB for the quality model and 19.1 GiB for the fastest. Long-context quality was measured up to 128K tokens. [KV5 measurements](docs/MEASUREMENTS.md#kv5-the-compressed-key-value-cache-with-the-fastest-model)
+With room reserved for the maximum context of 262,144 tokens, GPU memory use was about 21.2 GiB with the quality model and 19.1 GiB with the fastest model. This includes the helper model. We measured long-context quality up to 128K tokens. [KV5 measurements](docs/MEASUREMENTS.md#kv5-the-compressed-key-value-cache-with-the-fastest-model)
 
 <a name="how-it-works-briefly"></a>
 <a name="documentation-and-contributions"></a>
 
 ## Development and support
 
-YASAKANI’s weight format and GPU kernels were designed together. During edits the main model can verify spans copied from the input in one pass, which cuts the time spent writing unchanged lines. [Technical notes](docs/TECHNOLOGY.md) · [File format](docs/FORMAT.md) · [Conversion tools](tools/convert/)
+YASAKANI’s weight format and GPU kernels were designed together. In an edit, the main model checks a whole span copied from the input in one pass. This cuts the time spent writing out unchanged lines. [Technical notes](docs/TECHNOLOGY.md) · [File format](docs/FORMAT.md) · [Conversion tools](tools/convert/)
 
 <a name="use-it-as-an-agent"></a>
 
-Build from source, report a result from your GPU, or try the optional browser agent, which needs 24 GB of GPU memory and bundles an older server. [Build guide](BUILDING.md) · [Contribute](CONTRIBUTING.md) · [Agent setup](harness/HARNESS_README.txt)
+You can build from source and report results from your GPU. You can also try the optional browser agent. It needs 24 GB of GPU memory and comes with an older version of the server. [Build guide](BUILDING.md) · [Contribute](CONTRIBUTING.md) · [Agent setup](harness/HARNESS_README.txt)
 
 <a name="support"></a>
 
-This engine was developed in Japan. Support goes toward test hardware and development time, starting with 24 GB and 16 GB RTX cards. Backers who opt in are credited in the repository and in the startup credits of a later release. [CAMPFIRE for backers in Japan](https://camp-fire.jp/projects/992233/view) · [GitHub Sponsors](https://github.com/sponsors/yasakani-dev)
+This engine was developed in Japan. Support pays for test hardware and development time, first for 24 GB and 16 GB RTX cards. Backers who ask to be listed are credited in the repository and in the startup credits of a later release. [CAMPFIRE for backers in Japan](https://camp-fire.jp/projects/992233/view) · [GitHub Sponsors](https://github.com/sponsors/yasakani-dev)
 
 <a name="license"></a>
 
