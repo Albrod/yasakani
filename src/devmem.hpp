@@ -11,6 +11,7 @@ cudaError_t tracked_malloc(void** p, size_t n);
 cudaError_t tracked_free(void* p);
 cudaError_t tracked_malloc_host(void** p, size_t n);
 cudaError_t tracked_free_host(void* p);
+cudaError_t copy_weight_to_device(void* dst, const void* src, size_t bytes);
 void* devmem_owner();
 void devmem_set_owner(void* owner);
 size_t devmem_release(void* owner);           

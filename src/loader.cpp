@@ -13,7 +13,13 @@ static float h2f_host(uint16_t u) { __half h = *reinterpret_cast<__half*>(&u); r
 static void load_check(cudaError_t e, const char* what) {
   if (e != cudaSuccess) throw std::runtime_error(std::string("loading the model: ") + what + " failed (" + cudaGetErrorString(e) + "); is there enough free GPU memory?");
 }
-template <class T2> static T2* dev_copy(const void* src, size_t bytes) { T2* d = nullptr; load_check(cudaMalloc(&d, bytes), "cudaMalloc"); load_check(cudaMemcpy(d, src, bytes, cudaMemcpyHostToDevice), "cudaMemcpy"); return d; }
+template <class T2> static T2* dev_copy(const void* src, size_t bytes) {
+  T2* d = nullptr;
+  load_check(cudaMalloc(&d, bytes), "cudaMalloc");
+  try { load_check(copy_weight_to_device(d, src, bytes), "weight upload"); }
+  catch (...) { cudaFree(d); throw; }
+  return d;
+}
 template <class T2> static T2* dev_zero(size_t bytes) { T2* d = nullptr; load_check(cudaMalloc(&d, bytes), "cudaMalloc"); load_check(cudaMemset(d, 0, bytes), "cudaMemset"); return d; }
 
 uint16_t* Model::upload_vector(const std::string& name, int n) { const VectorDesc& v = c.vector(name); if (v.n != n) throw std::runtime_error("vector size mismatch: " + name); return dev_copy<uint16_t>(c.at<uint16_t>(v.off), (size_t)n * 2); }

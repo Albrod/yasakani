@@ -191,6 +191,11 @@ DevTensor Engine35::up(const std::string& name, int force_workers, const Contain
   if (pooled) shared_weights_->tensors.emplace(cache_key, t);
   return t;
 }
+static void upload_weight35(void* dst, const void* src, size_t bytes) {
+  const cudaError_t e = copy_weight_to_device(dst, src, bytes);
+  if (e != cudaSuccess) throw std::runtime_error(std::string("Engine35: weight upload failed: ") + cudaGetErrorString(e));
+}
+
 uint16_t* Engine35::vec(const std::string& name, size_t n, const Container* src, bool host) {
   const Container& C = src ? *src : m_.c; const VectorDesc& v = C.vector(name);
   if ((size_t)v.n != n || v.dtype != "bf16") throw std::runtime_error("qwen3_5 vector " + name + ": expected bf16 [" + std::to_string(n) + "]");
@@ -200,7 +205,9 @@ uint16_t* Engine35::vec(const std::string& name, size_t n, const Container* src,
     void* d = nullptr; if (cudaHostGetDevicePointer(&d, h, 0) != cudaSuccess) throw std::runtime_error("Engine35: no device pointer for " + name);
     return static_cast<uint16_t*>(d); }
   uint16_t* d = nullptr; if (cudaMalloc(&d, n * 2) != cudaSuccess) throw std::runtime_error("Engine35: out of memory (" + name + ")");
-  cudaMemcpy(d, C.at<uint16_t>(v.off), n * 2, cudaMemcpyHostToDevice); return d;
+  try { upload_weight35(d, C.at<uint16_t>(v.off), n * 2); }
+  catch (...) { cudaFree(d); throw; }
+  return d;
 }
 void Engine35::ensure_part(size_t floats) {                          
   if (floats <= part_floats_) return;
@@ -320,10 +327,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
         throw std::runtime_error("qwen3_5 engine: unsupported coded embedding (role embedding, row layout, L 12, zero start, H512 input rotation)");
       emb_K_ = d.bits;
       emb_codes_ = static_cast<uint32_t*>(shared35_buffer(shared_weights_, "embedding/codes", nwords * 4, [&](void* p) {
-        if (cudaMemcpy(p, m_.c.at<uint32_t>(d.stream_off), nwords * 4, cudaMemcpyHostToDevice) != cudaSuccess)
-          throw std::runtime_error("shared embedding upload failed"); }));
-      emb_lut_ = dz35<uint16_t>((size_t)4096 * 2 * 2); cudaMemcpy(emb_lut_, m_.c.at<uint16_t>(d.lut_off), (size_t)4096 * 2 * 2, cudaMemcpyHostToDevice);
-      emb_sc_ = dz35<uint16_t>((size_t)V_ * 2); cudaMemcpy(emb_sc_, m_.c.at<uint16_t>(d.scale_off), (size_t)V_ * 2, cudaMemcpyHostToDevice);
+        upload_weight35(p, m_.c.at<uint32_t>(d.stream_off), nwords * 4); }));
+      emb_lut_ = dz35<uint16_t>((size_t)4096 * 2 * 2); upload_weight35(emb_lut_, m_.c.at<uint16_t>(d.lut_off), (size_t)4096 * 2 * 2);
+      emb_sc_ = dz35<uint16_t>((size_t)V_ * 2); upload_weight35(emb_sc_, m_.c.at<uint16_t>(d.scale_off), (size_t)V_ * 2);
       const std::vector<int8_t> sg = sign_stream_rule(d.rot_in.rule, d.rot_in.sign_seed, d.rot_in.sign_offset, (size_t)H_);
       emb_sg_ = dz35<int8_t>((size_t)H_); cudaMemcpy(emb_sg_, sg.data(), (size_t)H_, cudaMemcpyHostToDevice);
       emb_rows_ = dz35<uint16_t>((size_t)Pmax_ * H_ * 2); emb_iota_ = dz35<int>((size_t)Pmax_ * 4); launch_q35_iota(emb_iota_, Pmax_, st_);
@@ -334,9 +340,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
           throw std::runtime_error("qwen3_5 engine: unsupported residual embedding table");
         const bool third = t.name == "embed_tokens.res2";
         uint32_t*& codes = third ? emb3_codes_ : emb2_codes_; uint16_t*& lut = third ? emb3_lut_ : emb2_lut_; uint16_t*& sc = third ? emb3_sc_ : emb2_sc_;
-        (third ? emb3_K_ : emb2_K_) = t.bits; codes = dz35<uint32_t>(nw2 * 4); cudaMemcpy(codes, m_.c.at<uint32_t>(t.stream_off), nw2 * 4, cudaMemcpyHostToDevice);
-        lut = dz35<uint16_t>((size_t)4096 * 2 * 2); cudaMemcpy(lut, m_.c.at<uint16_t>(t.lut_off), (size_t)4096 * 2 * 2, cudaMemcpyHostToDevice);
-        sc = dz35<uint16_t>((size_t)V_ * 2); cudaMemcpy(sc, m_.c.at<uint16_t>(t.scale_off), (size_t)V_ * 2, cudaMemcpyHostToDevice); }
+        (third ? emb3_K_ : emb2_K_) = t.bits; codes = dz35<uint32_t>(nw2 * 4); upload_weight35(codes, m_.c.at<uint32_t>(t.stream_off), nw2 * 4);
+        lut = dz35<uint16_t>((size_t)4096 * 2 * 2); upload_weight35(lut, m_.c.at<uint16_t>(t.lut_off), (size_t)4096 * 2 * 2);
+        sc = dz35<uint16_t>((size_t)V_ * 2); upload_weight35(sc, m_.c.at<uint16_t>(t.scale_off), (size_t)V_ * 2); }
       if (emb3_codes_ && !emb2_codes_) throw std::runtime_error("qwen3_5 engine: embed_tokens.res2 needs embed_tokens.res");
       emb_coded_ = true; }
     else emb_ = vec("embed_tokens", (size_t)V_ * H_, nullptr, emb_host_ != 0); }   
@@ -2293,7 +2299,7 @@ void Engine35::load_draft(const std::string& path, const std::string&) {
   T.L.ln1 = vec("mtp.input_layernorm", H_, C); T.L.ln2 = vec("mtp.post_attention_layernorm", H_, C);
   T.en = vec("mtp.pre_fc_norm_embedding", H_, C); T.hn = vec("mtp.pre_fc_norm_hidden", H_, C); T.norm = vec("mtp.norm", H_, C);
   { const VectorDesc& v = C->vector("mtp.head_ids"); if (v.dtype != "i32" || v.n != T.nsub) throw std::runtime_error("load_draft: mtp.head_ids");
-    cudaMalloc(&T.ids, (size_t)T.nsub * 4); cudaMemcpy(T.ids, C->at<int32_t>(v.off), (size_t)T.nsub * 4, cudaMemcpyHostToDevice); }
+    T.ids = dz35<int>((size_t)T.nsub * 4); upload_weight35(T.ids, C->at<int32_t>(v.off), (size_t)T.nsub * 4); }
   if (kv8_) { T.L.k8 = dz35<int8_t>((size_t)Q35_KVH * max_ctx_ * Q35_HD); T.L.v8 = dz35<int8_t>((size_t)Q35_KVH * max_ctx_ * Q35_HD);
               T.L.ks = dz35<float>((size_t)Q35_KVH * max_ctx_ * 4); T.L.vs = dz35<float>((size_t)Q35_KVH * max_ctx_ * 4); }
   else { T.L.kc = dz35<uint16_t>((size_t)Q35_KVH * max_ctx_ * Q35_HD * 2); T.L.vc = dz35<uint16_t>((size_t)Q35_KVH * max_ctx_ * Q35_HD * 2); }
@@ -2644,7 +2650,7 @@ void Engine35::load_bdraft(const std::string& path) {
       if (!own) { bdr_.csub.open(s); C = &bdr_.csub; hn = "mtp.head"; in = "mtp.head_ids"; }
       bdr_.hsub = up(hn, C->tensor(hn).cols / 512, C); bdr_.nsub = bdr_.hsub.dev.N;
       const VectorDesc& v = C->vector(in); if (v.dtype != "i32" || v.n != bdr_.nsub) throw std::runtime_error("load_bdraft: " + in);
-      bdr_.sub_ids = dz35<int>((size_t)bdr_.nsub * 4); cudaMemcpy(bdr_.sub_ids, C->at<int32_t>(v.off), (size_t)bdr_.nsub * 4, cudaMemcpyHostToDevice);
+      bdr_.sub_ids = dz35<int>((size_t)bdr_.nsub * 4); upload_weight35(bdr_.sub_ids, C->at<int32_t>(v.off), (size_t)bdr_.nsub * 4);
       const char* o = std::getenv("YSKN_BDR_SUB_ON"); bdr_.sub_on = (o && o[0]) ? std::atoi(o) : 1; } }
   { 
     
