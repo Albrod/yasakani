@@ -19,6 +19,7 @@
 
 #include "kvq_fast.hpp"
 #include <cstdlib>
+#include <stdexcept>
 namespace yskn {
 struct TbFastSmem {
   float red[8];
@@ -248,4 +249,139 @@ void launch_tb_fast(const TbFastArgs& A, cudaStream_t st) {
   if (A.stage & 2) tbf_sel_kernel<<<A.nrow, 256, 0, st>>>(A);
 }
 TbHost& tbf_host() { static TbHost h; return h; }
+
+// ---- multi-stream pass (experimental): the kernels above for the rows of several streams.  A row's position and its INT8 container
+// come from the stream tables (TbFastMs); a staged row reads the shared staging rows as above.  The kernels above are not changed.
+__device__ __forceinline__ TbRow tbf_row_ms(const TbFastArgs& A, const TbFastMs& X, const int rj, const int d) {
+  TbRow R;
+  const int tok = A.tok0 + (rj >> 3), kind = (rj >> 2) & 1, kvh = rj & 3, sl = X.slot[tok];
+  R.pos = X.pos[tok]; R.g = (A.layer * 4 + kvh) * 2 + kind;
+  const int stg = kind ? A.stg_v : A.stg_k;
+  if (stg) { R.q8 = kind ? A.q8_1 : A.q8_0; R.qs = kind ? A.qs_1 : A.qs_0; }
+  else     { R.q8 = kind ? X.q8_1[sl] : X.q8_0[sl]; R.qs = kind ? X.qs_1[sl] : X.qs_0[sl]; }   // the stream's own container
+  R.kind = kind;
+  R.row = (size_t)kvh * A.max_ctx + R.pos;
+  R.cap = stg != 0;
+  const size_t irow = stg ? (size_t)kvh * stg + tok : R.row;
+  R.y = __fmul_rn((float)R.q8[irow * 256 + d], R.qs[irow]);
+  return R;
+}
+
+__global__ void __launch_bounds__(256) tbf_vit_ms_kernel(TbFastArgs A, TbFastMs X) {
+  __shared__ TbFastSmem S;
+  const int d = threadIdx.x, nm = A.nm;
+  const int job = blockIdx.x, rj = job / (nm * 4), rem = job - rj * (nm * 4), mi = rem >> 2, c = rem & 3;
+  const unsigned char* b = A.blob;
+  const TbRow R = tbf_row_ms(A, X, rj, d);
+  const TbG P = tbf_group(b, R.g);
+  if (!P.okg || R.pos < P.guard || P.mode != 0 || (A.k3_only && (P.kk == 4 || P.kk == 5))) return;
+  const TbPre Q = tbf_pre(S.red, b, P, R.y);
+  const unsigned to = tb_u32(b + P.off_t + 4u * (unsigned)P.tix);
+  const float gain = tb_f32(b + to + 4);
+  if (b[to] != 8 || b[to + 2] != 64 || b[to + 3] != 8 || tb_u16(b + 16) != 256) __trap();
+  const int ci_s = (int)(short)tb_u16(b + to + 12 + 2 * d);
+  S.cdec[d] = tb_cdec(ci_s, gain);
+  S.r[d] = Q.r;
+  float s = tb_f16r(__fmul_rn(Q.rms, tb_f32(b + P.off_m + 4u * (unsigned)mi))); if (s == 0.f) s = 1.f;
+  if ((d >> 6) == c) {
+    const float t = rintf(__fmul_rn(__fdiv_rn(Q.r, s), 256.f));
+    S.xi[d & 63] = (int)fminf(fmaxf(t, -2048.f), 2048.f);
+  }
+  unsigned char* const so = A.scr + ((size_t)rj * nm + mi) * 256 + c * 64;
+  float* const wo = reinterpret_cast<float*>(A.scr + TBF_W_OFS) + ((size_t)rj * nm + mi) * 8 + 2 * c;
+  switch (P.kk) {
+    case 3: tbf_chain<3>(S, ci_s, s, c, so, wo); break;
+    case 4: tbf_chain<4>(S, ci_s, s, c, so, wo); break;
+    case 5: tbf_chain<5>(S, ci_s, s, c, so, wo); break;
+    default: __trap();
+  }
+}
+
+__global__ void __launch_bounds__(256) tbf_sel_ms_kernel(TbFastArgs A, TbFastMs X) {
+  __shared__ float red[8];
+  __shared__ unsigned char fld[256];
+  const int d = threadIdx.x, nm = A.nm, rj = blockIdx.x;
+  const unsigned char* b = A.blob;
+  const TbRow R = tbf_row_ms(A, X, rj, d);
+  const TbG P = tbf_group(b, R.g);
+  float x = R.y;
+  int field = 0, kb = 4; float psc = 1.f; unsigned pc = 0u; bool pack = false;
+  if (P.okg && R.pos >= P.guard) {
+    const TbPre Q = tbf_pre(red, b, P, R.y);
+    float xq = Q.r;
+    if (P.mode == 1) {
+      const float am = tbf_max(red, fabsf(Q.r));
+      float s7 = __fdiv_rn(am, 7.f); if (s7 == 0.f) s7 = 1.f;
+      float q = rintf(__fdiv_rn(Q.r, s7)); q = fminf(fmaxf(q, -7.f), 7.f); xq = __fmul_rn(q, s7);
+      field = (int)q + 8; psc = s7; kb = 4; pack = true;
+    } else if (P.mode == 0) {
+      const float* const W = reinterpret_cast<const float*>(A.scr + TBF_W_OFS) + (size_t)rj * nm * 8;
+      float best_e = 0.f; int best = 0; bool have = false;
+      for (int mi = 0; mi < nm; ++mi) {
+        float e = 0.f;
+        #pragma unroll
+        for (int w = 0; w < 8; ++w) e = __fadd_rn(e, W[mi * 8 + w]);
+        if (!have || e < best_e) { have = true; best_e = e; best = mi; }
+      }
+      float s = tb_f16r(__fmul_rn(Q.rms, tb_f32(b + P.off_m + 4u * (unsigned)best))); if (s == 0.f) s = 1.f;
+      const unsigned to = tb_u32(b + P.off_t + 4u * (unsigned)P.tix);
+      const float gain = tb_f32(b + to + 4);
+      const int st = A.scr[((size_t)rj * nm + best) * 256 + d];
+      const int ci = (int)(short)tb_u16(b + to + 12 + 2 * st);
+      xq = __fmul_rn(tb_cdec(ci, gain), s);
+      field = st & ((1 << P.kk) - 1); psc = s; kb = P.kk; pack = true;
+    }
+    x = xq;
+    if (P.m > 0) x = __fadd_rn(x, __fmul_rn(Q.cj0, Q.uj0));
+    if (P.m > 1) x = __fadd_rn(x, __fmul_rn(Q.cj1, Q.uj1));
+    if (P.has_mu) x = __fadd_rn(x, Q.mud);
+    pc = (unsigned)__half_as_ushort(__float2half_rn(Q.cj0)) | ((unsigned)__half_as_ushort(__float2half_rn(Q.cj1)) << 16);
+  }
+  const int sl = X.slot[A.tok0 + (rj >> 3)];                                // the row's stream: its packed stream and scales
+  unsigned char* const payb = R.kind ? (X.pay1 ? X.pay1[sl] : nullptr) : (X.pay0 ? X.pay0[sl] : nullptr);
+  if (payb && pack) {
+    float* const scl = R.kind ? X.scl1[sl] : X.scl0[sl];
+    unsigned* const sdst = scl ? nullptr : (R.kind ? A.pk_side1 : A.pk_side) + 2 * R.row;
+    fld[d] = (unsigned char)field;
+    __syncthreads();
+    if (d < 8 * kb) {
+      unsigned w = 0u;
+      for (int i = 0; i < 32; ++i) { const int g = 32 * d + i; const int e = g / kb, jb = g - e * kb; w |= (((unsigned)fld[e] >> (kb - 1 - jb)) & 1u) << (31 - i); }
+      reinterpret_cast<unsigned*>(payb + R.row * (size_t)A.pk_stride)[d] = w;
+    }
+    if (d == 0) { if (scl) scl[R.row] = psc; else { sdst[0] = __float_as_uint(psc); sdst[1] = pc; } }
+  }
+  if (!R.cap) kvx_store(x, R.q8, R.qs, R.row, d);
+}
+
+__global__ void __launch_bounds__(128) tbf2_vit_ms_kernel(TbFastArgs A, TbFastMs X) {
+  __shared__ __align__(16) unsigned char vsm[4 * sizeof(Vit2Smem<4>)];
+  const int lane = threadIdx.x & 31, wi = threadIdx.x >> 5;
+  const int per_row = A.nm * 2;
+  const int wid = blockIdx.x * 4 + wi;
+  if (wid >= A.nrow * per_row) return;
+  const int rj = wid / per_row, rem = wid - rj * per_row, mi = rem >> 1, cp = rem & 1;
+  const unsigned char* const b = A.blob;
+  const TbRow R = tbf_row_ms(A, X, rj, lane);
+  const TbG P = tbf_group(b, R.g);
+  if (!P.okg || R.pos < P.guard || P.mode != 0) return;
+  unsigned char* const wsm = vsm + wi * sizeof(Vit2Smem<4>);
+  switch (P.kk) {
+    case 4: if (cp) tbf2_work<4, 1>(A, wsm, rj, mi, lane, P, R); else tbf2_work<4, 0>(A, wsm, rj, mi, lane, P, R); break;
+    case 5: if (cp) tbf2_work<5, 1>(A, wsm, rj, mi, lane, P, R); else tbf2_work<5, 0>(A, wsm, rj, mi, lane, P, R); break;
+    default: break;
+  }
+}
+
+void launch_tb_fast_ms(const TbFastArgs& A, const TbFastMs& X, cudaStream_t st) {
+  if (A.nrow <= 0) return;
+  if (A.yin || !X.pos || !X.slot) throw std::runtime_error("launch_tb_fast_ms: needs the stream tables (and no row input)");
+  if (A.has_cdq && (A.stage & 1)) {
+    if ((A.has_cdq & 2) && !A.vit2_off && tbf_vit2_env()) {
+      tbf2_vit_ms_kernel<<<(A.nrow * A.nm * 2 + 3) / 4, 128, 0, st>>>(A, X);
+      if (A.has_cdq & 4) { TbFastArgs L = A; L.k3_only = 1; tbf_vit_ms_kernel<<<L.nrow * L.nm * 4, 256, 0, st>>>(L, X); }
+    } else tbf_vit_ms_kernel<<<A.nrow * A.nm * 4, 256, 0, st>>>(A, X);
+  }
+  if (A.stage & 2) tbf_sel_ms_kernel<<<A.nrow, 256, 0, st>>>(A, X);
+}
 } 

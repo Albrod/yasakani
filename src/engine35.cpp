@@ -2,6 +2,7 @@
 // Copyright (c) 2026 the YASAKANI authors
 #include "engine35.hpp"
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <filesystem>
@@ -121,6 +122,24 @@ template <class T2> static T2* dz35(size_t bytes) { T2* p = nullptr; if (cudaMal
                                                     cudaMemset(p, 0, bytes); cudaDeviceSynchronize(); return p; }
 
 static constexpr int PIN_HB = 22900;
+static constexpr int PIN_MST = 22832;                                     // the tokens of the rows of a multi-stream pass, read back
+static constexpr int MS_ROWS = 16;                                       // rows of a multi-stream pass at most (all GPUs)
+// device tables of the multi-stream drafter: arrays of 16 ints (block rows, groups, draft rows; then the context rows)
+static constexpr int MSD_TL = 0, MSD_POS = 16, MSD_GRP = 32, MSD_GB0 = 48, MSD_GLEN = 64, MSD_GSLOT = 80, MSD_GTOK = 96, MSD_GD0 = 112, MSD_DROW = 128,
+                     MSD_GCPL = 144, MSD_CROW = 160, MSD_CPOS = 176, MSD_CSLOT = 192, MSD_N = 208;   // GCPL: per group, the draft temperature (cpl)
+namespace {
+// the device and pinned buffers that one step of ms_bind makes: freed again unless the step completes and takes them (taken = true),
+// so that a failed bind leaves nothing half made (the next bind makes it again)
+struct MsNew {
+  std::vector<void*> dev, host; bool taken = false;
+  template <class T> T* d(size_t bytes) { T* p = dz35<T>(bytes); dev.push_back((void*)p); return p; }
+  template <class T> T* h(size_t bytes) {
+    T* p = nullptr; if (cudaMallocHost(&p, bytes) != cudaSuccess) throw std::runtime_error("ms_bind: no pinned staging memory");
+    host.push_back((void*)p); return p; }
+  MsNew() = default; MsNew(const MsNew&) = delete; MsNew& operator=(const MsNew&) = delete;
+  ~MsNew() { if (taken) return; for (void* p : dev) cudaFree(p); for (void* p : host) cudaFreeHost(p); }
+};
+}
 static constexpr int PIN_IDS = 0, PIN_AM = 2048, PIN_TI = 4096, PIN_TG = 20480, PIN_VT = 22528, PIN_GT = 22800, PIN_N = 23040, PINF_TV = 0, PINF_NLL = 16384, PINF_N = 18432;
 
 
@@ -406,6 +425,13 @@ Engine35::~Engine35() {
   for (auto& kv : pgraph_) cudaGraphExecDestroy(kv.second);
   for (auto& kv : mtp_.graphs) cudaGraphExecDestroy(kv.second);
   for (auto& kv : rgraph_) cudaGraphExecDestroy(kv.second);
+  for (auto& kv : ms_graph_) cudaGraphExecDestroy(kv.second);
+  for (auto& kv : ms_dgraph_) cudaGraphExecDestroy(kv.second);
+  for (auto& kv : ms_cgraph_) cudaGraphExecDestroy(kv.second);
+  if (msd_h_) cudaFreeHost(msd_h_);
+  if (msd_hseed_) cudaFreeHost(msd_hseed_);
+  if (ms_hgrp_) cudaFreeHost(ms_hgrp_);
+  if (ms_hprm_) cudaFreeHost(ms_hprm_);
   if (h_pin_) cudaFreeHost(h_pin_);
   if (h_pinf_) cudaFreeHost(h_pinf_);
   snap_free();
@@ -610,6 +636,7 @@ void Engine35::drop_pass_graphs() {
   rp_launch(); cudaStreamSynchronize(st2_); replay_fence(); cudaStreamSynchronize(st_);
   for (auto& kv : pgraph_) cudaGraphExecDestroy(kv.second);
   pgraph_.clear();
+  ms_drop_graphs();
   if (gexec_) { cudaGraphExecDestroy(gexec_); gexec_ = nullptr; }
   if (gexec_alt_) { cudaGraphExecDestroy(gexec_alt_); gexec_alt_ = nullptr; }
   for (auto& kv : mtp_.graphs) cudaGraphExecDestroy(kv.second);
@@ -841,10 +868,13 @@ void Engine35::attn_block(Q35Layer& Y, int M, const int* dpos, int* slices) {
     }
 #endif
     if (pf_on(2, M)) X.pf = pf_of({&Y.o}, -1.0);                          
+    if (ms_now_) ms_attn_post(Y, X);                                     // multi-stream pass: its own kernels
+    else {
     if (wk_now_) launch_wk_attn_post(X, d_wk_, st_); else launch_q35_attn_post(X, st_);
 #if YSKN_KVX_MODE == 3
     if (X.tb && X.k8 && X.v8) launch_tb_requant(X, st_);                  
 #endif
+    }
   }
   const bool fa = fa_ && M > HM_; const int sp = atx_ ? atx_splits_ : (fa ? fa_splits_ : splits_);   
   const bool kz = kz_ && atx_ && Y.k8;                                    
@@ -854,13 +884,15 @@ void Engine35::attn_block(Q35Layer& Y, int M, const int* dpos, int* slices) {
     if (!ks(16384)) { Q35AttnArgs AT{q16_, Y.kc, Y.vc, max_ctx_, M, dpos, sp, pm_, pl_, pacc_, 1}; AT.k8 = Y.k8; AT.v8 = Y.v8; AT.ks = Y.ks; AT.vs = Y.vs; AT.kv_fp16 = kv_fp16_;
                       if (atx_ && atx_long_ > 0 && sp != atx_short_) { AT.splits_short = atx_short_; AT.long_len = atx_long_; }
                       AT.vsp = atx_vsp_;
-                      if (kz) launch_q35_kz(AT, wk_now_ ? d_wk_ : nullptr, st_);
+                      if (ms_now_) ms_attention(Y, AT, cap_ord, kz);         // multi-stream pass: its own kernels
+                      else if (kz) launch_q35_kz(AT, wk_now_ ? d_wk_ : nullptr, st_);
                       else if (atx_) { if (cap_ord >= 0) launch_q35_atx_pk(AT, wk_now_ ? d_wk_ : nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AT, wk_now_ ? d_wk_ : nullptr, st_); }
                       else if (wk_now_) launch_wk_attention(AT, d_wk_, st_);
                       else if (fa) launch_q35_fa(AT, st_); else launch_q35_attention(AT, st_); }
     if (!ks(16384)) { Q35CombineArgs CB{pm_, pl_, pacc_, sp, M, gate16_, Y.o.signs_in, qx_, alpha_}; CB.lo = lo_now_ ? 1 : 0;
                       if (atx_ && atx_long_ > 0 && sp != atx_short_) { CB.d_pos = dpos; CB.wk = wk_now_ ? d_wk_ : nullptr; CB.splits_short = atx_short_; CB.long_len = atx_long_; }
-                      if (kz) launch_q35_kz_combine(CB, kdbg, st_); else launch_q35_combine(CB, st_); }
+                      if (ms_now_) launch_q35_combine_ms(CB, ms_pos_, st_);
+                      else if (kz) launch_q35_kz_combine(CB, kdbg, st_); else launch_q35_combine(CB, st_); }
   } else if (S) {                                                       
     launch_q35_pos_slices(dpos, slices, (M + Mmax_ - 1) / Mmax_, Mmax_, st_);
     for (int s = 0; s < M; s += Mmax_) {
@@ -926,10 +958,15 @@ void Engine35::layer(int l, int M, int n_commit) {
     } else if (S && fuse_ab && !ks(256)) launch_q35_ab(AB, st_);
     const bool keep = opt_kconv_ && M <= HM_;                         
     float *cq = keep ? Y.tq : gq_, *ck = keep ? Y.tk : gk_, *cv = keep ? Y.tv : gv_, *cb = keep ? Y.tbeta : gbeta_, *cg = keep ? Y.tg : gg_;
+    if (ms_now_) { if (!keep) throw std::runtime_error("multi-stream pass: needs the kept conv outputs (set_opt 5)");
+                   const MsKeep& K = ms_keep_[ms_par_][(size_t)l]; cq = K.tq; ck = K.tk; cv = K.tv; cb = K.tbeta; cg = K.tg; }   // this pass's set (never Y.tq..)
     if (S && !ks(1024)) { const Q35ConvArgs CA{pmx, Y.conv, Y.hist, pab, Y.A_log, Y.dt_bias, M, n_commit, cq, ck, cv, cb, cg};
-                          if (wk_now_) launch_wk_conv(CA, d_wk_, st_); else launch_q35_conv(CA, st_); }
+                          if (ms_now_) launch_q35_conv_ms(CA, Q35ConvMs{ms_rows(), ms_tab_[l].hist}, st_);
+                          else if (wk_now_) launch_wk_conv(CA, d_wk_, st_); else launch_q35_conv(CA, st_); }
     if (S && !ks(2048)) { const Q35StateArgs SA{cq, ck, cv, cb, cg, Y.S, M, n_commit, core_, pmx, Y.hist};
-                          if (wk_now_) launch_wk_state(SA, d_wk_, st_); else launch_q35_state(SA, st_); }
+                          if (ms_now_) { const MsKeep& Kp = ms_keep_[ms_par_ ^ 1][(size_t)l];   // the accepted rows of the pass before
+                                         launch_q35_state_ms(SA, Q35StateMs{ms_rows(), ms_tab_[l].S, ms_tab_[l].hist, Kp.tk, Kp.tv, Kp.tbeta, Kp.tg}, st_); }
+                          else if (wk_now_) launch_wk_state(SA, d_wk_, st_); else launch_q35_state(SA, st_); }
     if (S && !ks(4096)) launch_q35_gdn_out(Q35GdnOutArgs{core_, z_, Y.gnorm, eps_, M, Y.out.signs_in, qx_, alpha_, lo_now_ ? 1 : 0}, st_);
     if (pf_on(4, M)) next_pf_ = pf_of({&Y.gate, &Y.up}, l2pf_mb_[0]);
     gemv_res(Y.out, M, Y.ln2, Y.gate.signs_in, nullptr);
@@ -953,14 +990,16 @@ void Engine35::head_slice(int row0, int rows, bool advance, bool topk, bool nll)
   if (xsmc_) { AA.us = us_; AA.rr = S_ + (size_t)row0 * Q35_SST; AA.xsm_eps = eps_; AA.xsm_nb = H_ / 512; AA.xsm_stride = Q35_SST; AA.xsm_n = (float)H_; }
   if (advance && !smp_) { AA.adv_pos = d_pos_; AA.adv_tok = d_toks_; AA.adv_greedy = 1; }
   launch_argmax(AA, st_);
-  if (smp_) {                                                         
+  // sampling: this engine's setting; in a multi-stream pass the slots' (rows of slots with temperature 0 keep the argmax above)
+  const bool smp = ms_now_ ? ms_smp_now_ : smp_ != 0;
+  if (smp) {
     Q35SmpArgs KA{logits_, V_, rows, row0, d_next8_ + row0, d_pos_, wk_now_ ? d_wk_ : nullptr, d_smp_, kj_val_, kj_idx_, kj_cnt_};
     if (advance) { KA.adv_pos = d_pos_; KA.adv_tok = d_toks_; }
-    if (topk && q35_smp2_on()) { KA.top_val = top_val_ + (size_t)row0 * 8; KA.top_idx = top_idx_ + (size_t)row0 * 8; }   
-    if (k20_on_ && q35_smp2_on()) { KA.topk_val = d_k20v_ + (size_t)row0 * Q35_SMP_K; KA.topk_idx = d_k20i_ + (size_t)row0 * Q35_SMP_K; }   
-    launch_q35_smp(KA, st_);
+    if (topk && q35_smp2_on()) { KA.top_val = top_val_ + (size_t)row0 * 8; KA.top_idx = top_idx_ + (size_t)row0 * 8; }
+    if (k20_on_ && q35_smp2_on()) { KA.topk_val = d_k20v_ + (size_t)row0 * Q35_SMP_K; KA.topk_idx = d_k20i_ + (size_t)row0 * Q35_SMP_K; }
+    if (ms_now_) launch_q35_smp_ms(KA, ms_pos_, ms_prm_, st_); else launch_q35_smp(KA, st_);
   }
-  if (topk && !(smp_ && q35_smp2_on())) { TopkArgs TA{logits_, V_, tk_val_, tk_idx_, top_val_ + (size_t)row0 * 8, top_idx_ + (size_t)row0 * 8, rows}; TA.cnt = tk_cnt_; launch_topk8(TA, st_); }
+  if (topk && !(smp && q35_smp2_on())) { TopkArgs TA{logits_, V_, tk_val_, tk_idx_, top_val_ + (size_t)row0 * 8, top_idx_ + (size_t)row0 * 8, rows}; TA.cnt = tk_cnt_; launch_topk8(TA, st_); }
   if (nll) launch_nll(NllArgs{logits_, V_, d_target8_ + row0, d_nll8_ + row0, blk_max_, blk_sum_, rows}, st_);
 }
 // The output layer of a pass of 17..64 rows: one exact-sum GEMV of all rows, then the same per-16-row argmax / sampling / top-8 / NLL
@@ -1088,21 +1127,25 @@ void Engine35::set_opt(int key, int value) {
   else if (key == 4) opt_mtp_log_ = value;
   else if (key == 6) opt_lfrow_ = value;
   else if (key == 8) { if (value != fa_) {                         
+                         ms_drop_graphs();
                          for (auto& kv : pgraph_) cudaGraphExecDestroy(kv.second);
                          pgraph_.clear(); if (gexec_) { cudaGraphExecDestroy(gexec_); gexec_ = nullptr; } if (gexec_alt_) { cudaGraphExecDestroy(gexec_alt_); gexec_alt_ = nullptr; }
                          for (auto& kv : mtp_.graphs) cudaGraphExecDestroy(kv.second); mtp_.graphs.clear(); }
                        fa_ = value; }
-  else if (key == 9) { if (value != atx_) std::swap(gexec_, gexec_alt_);   
+  else if (key == 9) { if (value != atx_) { std::swap(gexec_, gexec_alt_); ms_drop_graphs(); }   
                        atx_ = value; }
   else if (key == 14) { if (value != opt_flow_) {                  
+                         ms_drop_graphs();
                          for (auto& kv : pgraph_) cudaGraphExecDestroy(kv.second);
                          pgraph_.clear(); if (gexec_) { cudaGraphExecDestroy(gexec_); gexec_ = nullptr; } if (gexec_alt_) { cudaGraphExecDestroy(gexec_alt_); gexec_alt_ = nullptr; } }
                        opt_flow_ = value; flow_prepare(); }
   else if (key == 7) { if (value != opt_fin_) {                     
+                         ms_drop_graphs();
                          for (auto& kv : pgraph_) cudaGraphExecDestroy(kv.second);
                          pgraph_.clear(); if (gexec_) { cudaGraphExecDestroy(gexec_); gexec_ = nullptr; } if (gexec_alt_) { cudaGraphExecDestroy(gexec_alt_); gexec_alt_ = nullptr; } }
                        opt_fin_ = value; }
-  else if (key == 5) { if (value != opt_kconv_ && gexec_) { cudaGraphExecDestroy(gexec_); gexec_ = nullptr; }
+  else if (key == 5) { if (value != opt_kconv_) ms_drop_graphs();
+                       if (value != opt_kconv_ && gexec_) { cudaGraphExecDestroy(gexec_); gexec_ = nullptr; }
                        if (value != opt_kconv_ && gexec_alt_) { cudaGraphExecDestroy(gexec_alt_); gexec_alt_ = nullptr; }   
                        opt_kconv_ = value; }
   else if (key == 25) { if (value != l2pf_) drop_pass_graphs(); l2pf_ = value; }   
@@ -1140,19 +1183,719 @@ void Engine35::set_opt(int key, int value) {
   else throw std::runtime_error("set_opt: unknown key " + std::to_string(key));
 }
 
+// ---- multi-stream pass (experimental) ---------------------------------------------------------------------------------------
+// Rows of several streams ride in one pass of this engine.  A stream slot is a light slot (only the state containers of a stream)
+// or, for tests, an engine that shares the weights.  A stream has one or more rows next to each other in the pass: its last token
+// (certain) and, after it, draft tokens.  The first row is committed inside the pass.  The caller then says how many drafts the pass
+// confirmed (ms_commit); those rows go into the stream's recurrent state at the start of the next pass (or in ms_flush), in the
+// order a replay would apply them.  The kernels that carry state (the recurrent state and its history, the KV containers) get the
+// buffers of the row's stream from tables; everything else is the ordinary pass with M rows.  A pass has at most 16 rows (MS_ROWS):
+// the 16-row kernels and the kept conv outputs; wider passes take other kernels that know nothing of streams.
+static uint64_t fnv_words(uint64_t h, const std::vector<uint8_t>& b);
+// the graphs of the multi-stream pass and of its drafter (they hold the addresses and the settings they were captured with)
+void Engine35::ms_drop_graphs() {
+  for (auto& kv : ms_graph_) cudaGraphExecDestroy(kv.second);
+  ms_graph_.clear();
+  for (auto& kv : ms_dgraph_) cudaGraphExecDestroy(kv.second);
+  ms_dgraph_.clear();
+  for (auto& kv : ms_cgraph_) cudaGraphExecDestroy(kv.second);
+  ms_cgraph_.clear();
+}
+// the attention post (rope, the KV store of each row into its stream's containers, the KV encode) and the attention of a pass
+void Engine35::ms_attn_post(Q35Layer& Y, const Q35AttnPostArgs& X) {
+  const MsTab& T = ms_tab_[(size_t)(&Y - L_.data())];
+  Q35AttnPostMs XM; XM.ms = ms_rows(); XM.k8 = T.k8; XM.ks = T.ks; XM.v8 = T.v8; XM.vs = T.vs; XM.kp = T.kp; XM.kps = T.kps; XM.vp = T.vp; XM.vps = T.vps;
+  launch_q35_attn_post_ms(X, XM, st_);
+#if YSKN_KVX_MODE == 3
+  if (X.tb && X.k8 && X.v8) launch_tb_requant_ms(X, XM, st_);
+#endif
+}
+void Engine35::ms_attention(Q35Layer& Y, const Q35AttnArgs& AT, int cap_ord, bool kz) {
+  if (cap_ord < 0 || kz || !atx_) throw std::runtime_error("multi-stream pass: needs packed KV with ATX attention");
+  const MsTab& T = ms_tab_[(size_t)(&Y - L_.data())];
+  Q35PkMs X; X.ms = ms_rows(); X.kp = T.kp; X.kps = T.kps; X.vp = T.vp; X.vps = T.vps; X.v8 = T.v8; X.vs = T.vs;
+  launch_q35_atx_pk_ms(AT, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, X, st_);
+}
+void Engine35::ms_bind(Engine35* const* eng, int n, int n_light) {
+  if (n < 0 || n_light < 0 || n + n_light < 1 || n + n_light > 64) throw std::runtime_error("ms_bind: 1..64 streams");
+  if (n > 0 && !eng) throw std::runtime_error("ms_bind: no engine list");
+  { std::string why; if (ms_unsupported(&why)) throw std::runtime_error("ms_bind: " + why); }
+  for (int i = 0; i < n; ++i) { Engine35* e = eng[i];
+    if (!e || e->shared_weights_ != shared_weights_ || e->max_ctx_ != max_ctx_ || e->nlayers_ != nlayers_ || e->tbcap_ != tbcap_ || e->tbcap_kb_ != tbcap_kb_ ||
+        e->visual_on_ || e->mtp_.on || e->kv8_ != kv8_ || e->kv_fp16_ != kv_fp16_)
+      throw std::runtime_error("ms_bind: every stream must be an engine of the same model file, context size and settings in this process");
+    for (int j = 0; j < i; ++j) if (eng[j] == e) throw std::runtime_error("ms_bind: an engine is listed twice");
+    if (e == this) throw std::runtime_error("ms_bind: the carrier cannot be one of its own streams");
+    for (int l = 0; l < nlayers_; ++l) { const Q35Layer& A = L_[l]; const Q35Layer& B = e->L_[l];
+      if (A.full != B.full || !A.kp != !B.kp || !A.vp != !B.vp || !A.k8 != !B.k8 || !A.v8 != !B.v8) throw std::runtime_error("ms_bind: the layer containers differ"); }
+  }
+  if (ms_ns_ > 0) ms_flush();                                              // rows the old streams accepted go into their states first
+  rp_launch(); cudaStreamSynchronize(st2_); replay_fence(); cudaStreamSynchronize(st_);
+  for (int i = 0; i < n; ++i) { Engine35* e = eng[i]; e->rp_launch(); cudaStreamSynchronize(e->st2_); e->replay_fence(); cudaStreamSynchronize(e->st_); }
+  DevMemScope dm_scope(this);
+  // From here the binding is made again.  Until it is complete there is none: an error below leaves the engine without a binding
+  // (the light slots keep their states), and the next ms_bind makes what is missing.  A step below takes its buffers only when it has
+  // made all of them (MsNew).
+  ms_ns_ = 0; ms_eng_.clear(); ms_open_ = false; ms_dtoks_ = false; ms_ctx_pending_ = false; ms_dlay_.clear();
+  live_drop();                                                             // a new binding: no read continues what this engine held
+  const size_t light0 = ms_light_.size(), ring0 = ms_dring_.size();        // slots made before this call keep their states
+  try {
+  if (!ms_rows_) {                                                         // per-row tables, staging, the two sets of kept conv outputs
+    MsNew A;
+    int32_t* const hgrp = A.h<int32_t>((size_t)3 * HM_ * 4);
+    Q35SmpParams* const hprm = A.h<Q35SmpParams>((size_t)HM_ * sizeof(Q35SmpParams));
+    int* const rows = A.d<int>((size_t)6 * HM_ * 4); int* const grp = A.d<int>((size_t)3 * HM_ * 4);
+    Q35SmpParams* const prm = A.d<Q35SmpParams>((size_t)HM_ * sizeof(Q35SmpParams));
+    std::vector<MsKeep> keep[2];
+    for (int p = 0; p < 2; ++p) {
+      keep[p].assign((size_t)nlayers_, MsKeep{});
+      for (int l = 0; l < nlayers_; ++l) if (!L_[l].full) { MsKeep& K = keep[p][(size_t)l];
+        K.tq = A.d<float>((size_t)HM_ * Q35_GK * Q35_GD * 4); K.tk = A.d<float>((size_t)HM_ * Q35_GK * Q35_GD * 4);
+        K.tv = A.d<float>((size_t)HM_ * Q35_Z * 4); K.tbeta = A.d<float>((size_t)HM_ * Q35_GV * 4); K.tg = A.d<float>((size_t)HM_ * Q35_GV * 4); } }
+    ms_keep_[0].swap(keep[0]); ms_keep_[1].swap(keep[1]); A.taken = true;
+    ms_hgrp_ = hgrp; ms_hprm_ = hprm; ms_grp_ = grp; ms_prm_ = prm;
+    ms_rows_ = rows; ms_pos_ = rows; ms_slot_ = rows + HM_; ms_tl_ = rows + 2 * HM_; ms_len_ = rows + 3 * HM_; ms_pend0_ = rows + 4 * HM_; ms_pendn_ = rows + 5 * HM_;
+  }
+  while ((int)ms_light_.size() < n_light) {                                // light slots: the containers an engine holds for its own stream
+    MsNew A; MsLight X; X.L.assign((size_t)nlayers_, MsLay{}); X.smp = MsSmp{smp_, smp_p_};
+    const size_t rows = (size_t)Q35_KVH * max_ctx_, pkb = (size_t)32 * tbcap_kb_;
+    for (int l = 0; l < nlayers_; ++l) { const Q35Layer& Y = L_[l]; MsLay& Z = X.L[(size_t)l];
+      if (!Y.full) { Z.S = A.d<float>((size_t)Q35_GV * Q35_GD * Q35_GD * 4); Z.hist = A.d<uint16_t>((size_t)3 * Q35_CONV * 2); continue; }
+      if (Y.kp) { Z.kp = A.d<uint8_t>(rows * pkb); Z.kps = A.d<float>(rows * 4); } else { Z.k8 = A.d<int8_t>(rows * Q35_HD); Z.ks = A.d<float>(rows * 4); }
+      if (Y.vp) { Z.vp = A.d<uint8_t>(rows * pkb); Z.vps = A.d<float>(rows * 4); } else { Z.v8 = A.d<int8_t>(rows * Q35_HD); Z.vs = A.d<float>(rows * 4); } }
+    ms_light_.push_back(std::move(X)); A.taken = true;
+  }
+  const int nt = n + n_light;
+  if (nt > ms_cap_) {                                                    // new tables: the pass graphs hold the old addresses
+    ms_drop_graphs();
+    MsNew A;
+    const int cap = std::max(nt, 16); const size_t b = (size_t)cap * sizeof(void*);
+    std::vector<MsTab> tab((size_t)nlayers_, MsTab{});
+    for (int l = 0; l < nlayers_; ++l) { MsTab& T = tab[(size_t)l]; const Q35Layer& Y = L_[l];
+      if (!Y.full) { T.S = A.d<float*>(b); T.hist = A.d<uint16_t*>(b); continue; }
+      if (Y.kp) { T.kp = A.d<uint8_t*>(b); T.kps = A.d<float*>(b); } else { T.k8 = A.d<int8_t*>(b); T.ks = A.d<float*>(b); }
+      if (Y.vp) { T.vp = A.d<uint8_t*>(b); T.vps = A.d<float*>(b); } else { T.v8 = A.d<int8_t*>(b); T.vs = A.d<float*>(b); } }
+    std::vector<const uint16_t*> mx; std::vector<uint16_t**> ht;         // per recurrent layer: the mixed rows of a pass, the history table
+    for (int l = 0; l < nlayers_; ++l) if (!L_[l].full) { mx.push_back(L_[l].pmix); ht.push_back(tab[(size_t)l].hist); }
+    const uint16_t** const mixed = ms_mixed_tab_ ? ms_mixed_tab_ : A.d<const uint16_t*>(mx.size() * sizeof(void*));
+    uint16_t*** const hist = ms_hist_tab_ ? ms_hist_tab_ : A.d<uint16_t**>(ht.size() * sizeof(void*));
+    if (cudaMemcpy(mixed, mx.data(), mx.size() * sizeof(void*), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(hist, ht.data(), ht.size() * sizeof(void*), cudaMemcpyHostToDevice) != cudaSuccess) throw std::runtime_error("ms_bind: table upload failed");
+    A.taken = true;
+    for (MsTab& T : ms_tab_)                                             // the old tables: no graph holds them any more
+      for (void* p : {(void*)T.S, (void*)T.hist, (void*)T.k8, (void*)T.ks, (void*)T.v8, (void*)T.vs, (void*)T.kp, (void*)T.kps, (void*)T.vp, (void*)T.vps})
+        if (p) cudaFree(p);
+    ms_tab_.swap(tab); ms_ngdn_ = (int)mx.size(); ms_mixed_tab_ = mixed; ms_hist_tab_ = hist; ms_cap_ = cap;
+  }
+  auto lay = [&](int i, int l) -> MsLay {
+    if (i >= n) return ms_light_[(size_t)(i - n)].L[(size_t)l];
+    const Q35Layer& Y = eng[i]->L_[l]; MsLay Z; Z.S = Y.S; Z.hist = Y.hist; Z.kp = Y.kp; Z.kps = Y.kps; Z.vp = Y.vp; Z.vps = Y.vps; Z.k8 = Y.k8; Z.ks = Y.ks; Z.v8 = Y.v8; Z.vs = Y.vs;
+    return Z; };
+  std::vector<void*> v((size_t)nt);
+  auto put = [&](void* dst) { if (cudaMemcpy(dst, v.data(), (size_t)nt * sizeof(void*), cudaMemcpyHostToDevice) != cudaSuccess) throw std::runtime_error("ms_bind: table upload failed"); };
+  for (int l = 0; l < nlayers_; ++l) { MsTab& T = ms_tab_[l];
+    if (T.S)    { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).S;    put(T.S); }
+    if (T.hist) { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).hist; put(T.hist); }
+    if (T.kp)   { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).kp;   put(T.kp); }
+    if (T.kps)  { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).kps;  put(T.kps); }
+    if (T.vp)   { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).vp;   put(T.vp); }
+    if (T.vps)  { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).vps;  put(T.vps); }
+    if (T.k8)   { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).k8;   put(T.k8); }
+    if (T.ks)   { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).ks;   put(T.ks); }
+    if (T.v8)   { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).v8;   put(T.v8); }
+    if (T.vs)   { for (int i = 0; i < nt; ++i) v[(size_t)i] = lay(i, l).vs;   put(T.vs); }
+  }
+  msd_ok_ = false;
+  if (bdr_.on) {                                                         // the drafter: its rings per stream slot
+    const size_t RB = (size_t)8 * 2048 * 128 * 2;                        // one ring: 8 heads x 2048 positions x 128 values of 16 bit
+    while ((int)ms_dring_.size() < n_light) {
+      MsNew A; MsRing X; for (int i = 0; i < 5; ++i) { X.rk[i] = A.d<uint16_t>(RB); X.rv[i] = A.d<uint16_t>(RB); }
+      ms_dring_.push_back(X); A.taken = true; }
+    if (!msd_tab_) {
+      MsNew A; int* const tab = A.d<int>((size_t)MSD_N * 4); unsigned long long* const seed = A.d<unsigned long long>((size_t)16 * 8);
+      int32_t* const h = A.h<int32_t>((size_t)MSD_N * 4); unsigned long long* const hs = A.h<unsigned long long>((size_t)16 * 8);
+      A.taken = true; msd_tab_ = tab; msd_seed_ = seed; msd_h_ = h; msd_hseed_ = hs; }
+    if (nt > msd_cap_) {
+      ms_drop_graphs();
+      MsNew A; const int cap = std::max(nt, 16); uint16_t** rk[5]; uint16_t** rv[5];
+      for (int i = 0; i < 5; ++i) { rk[i] = A.d<uint16_t*>((size_t)cap * sizeof(void*)); rv[i] = A.d<uint16_t*>((size_t)cap * sizeof(void*)); }
+      A.taken = true;
+      for (int i = 0; i < 5; ++i) { if (msd_rk_[i]) cudaFree(msd_rk_[i]); if (msd_rv_[i]) cudaFree(msd_rv_[i]); msd_rk_[i] = rk[i]; msd_rv_[i] = rv[i]; }
+      msd_cap_ = cap; }
+    bool all = true; for (int i = 0; i < n; ++i) all = all && eng[i]->bdr_.on;
+    if (all) {
+      for (int i = 0; i < 5; ++i) {
+        for (int s = 0; s < nt; ++s) v[(size_t)s] = s < n ? (void*)eng[s]->bdr_.rk[i] : (void*)ms_dring_[(size_t)(s - n)].rk[i];
+        put(msd_rk_[i]);
+        for (int s = 0; s < nt; ++s) v[(size_t)s] = s < n ? (void*)eng[s]->bdr_.rv[i] : (void*)ms_dring_[(size_t)(s - n)].rv[i];
+        put(msd_rv_[i]); }
+      msd_ok_ = true; }
+  }
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("ms_bind: ") + cudaGetErrorString(e));
+  ms_last_acc_.assign((size_t)nt, 0);
+  ms_eng_.assign(eng, eng + n); ms_esmp_.assign((size_t)n, MsSmp{smp_, smp_p_});   // engine slots: this engine's sampling (light slots keep theirs)
+  ms_pend_.assign((size_t)nt, MsPend{}); ms_last_r0_.assign((size_t)nt, -1); ms_last_len_.assign((size_t)nt, 0); ms_last_toks_.clear(); ms_last_am_.clear();
+  ms_ns_ = nt;
+  } catch (...) {
+    // out of memory (device or pinned host memory).  The slots this call made hold no stream yet and no table or graph uses them (there
+    // is no binding): give their memory back, so that a smaller binding fits.  The runtime keeps the error as the last error of this
+    // thread, and the next call that reads it (a pass, the next ms_bind) would fail on it: clear it (errors that stick stay anyway).
+    for (size_t i = light0; i < ms_light_.size(); ++i) for (MsLay& Z : ms_light_[i].L)
+      for (void* p : {(void*)Z.S, (void*)Z.hist, (void*)Z.kp, (void*)Z.kps, (void*)Z.vp, (void*)Z.vps, (void*)Z.k8, (void*)Z.ks, (void*)Z.v8, (void*)Z.vs})
+        if (p) cudaFree(p);
+    if (ms_light_.size() > light0) ms_light_.resize(light0);
+    for (size_t i = ring0; i < ms_dring_.size(); ++i)
+      for (int k = 0; k < 5; ++k) { if (ms_dring_[i].rk[k]) cudaFree(ms_dring_[i].rk[k]); if (ms_dring_[i].rv[k]) cudaFree(ms_dring_[i].rv[k]); }
+    if (ms_dring_.size() > ring0) ms_dring_.resize(ring0);
+    if (cudaPeekAtLastError() == cudaErrorMemoryAllocation) cudaGetLastError();
+    throw;
+  }
+}
+// copy the state of an engine (its recurrent states, histories and the KV rows below its position) into a light slot
+void Engine35::ms_load(int slot, Engine35* src) {
+  const int ne = (int)ms_eng_.size();
+  if (slot < ne || slot >= ms_ns_) throw std::runtime_error("ms_load: not a light stream slot of the current binding");
+  if (!src || src->shared_weights_ != shared_weights_ || src->max_ctx_ != max_ctx_ || src->nlayers_ != nlayers_ || src->tbcap_ != tbcap_ ||
+      src->tbcap_kb_ != tbcap_kb_ || src->kv8_ != kv8_ || src->kv_fp16_ != kv_fp16_)
+    throw std::runtime_error("ms_load: the source must be an engine of the same model file, context size and settings in this process");
+  // the streams of a pass share this engine's position table (rope_): a source that reads image input has other positions
+  if (src->visual_on_) throw std::runtime_error("ms_load: the source engine has image input on (a multi-stream pass takes text only)");
+  if (src->mtp_.on) throw std::runtime_error("ms_load: the source engine has the built-in draft head loaded");
+  if (src->last_M_ != 0) throw std::runtime_error("ms_load: the source engine has a verify pass that is not committed");
+  for (int i = 0; i < ne; ++i) if (ms_eng_[(size_t)i] == src && ms_pend_[(size_t)i].n > 0) ms_settle(std::vector<int>(1, i));   // a bound stream: its accepted rows first
+  // drafts that ms_draft made for the next pass and that include this slot belong to the stream that leaves it: drop them, so that
+  // ms_step without tokens cannot run the old stream's last token at the new stream's position
+  if (ms_dtoks_ && std::find(ms_dlay_.begin(), ms_dlay_.end(), slot) != ms_dlay_.end()) { cudaStreamSynchronize(st_); ms_dtoks_ = false; ms_dlay_.clear(); }
+  src->rp_launch(); cudaStreamSynchronize(src->st2_); src->replay_fence(); cudaStreamSynchronize(src->st_);
+  replay_fence(); cudaStreamSynchronize(st_);
+  MsLight& X = ms_light_[(size_t)(slot - ne)]; const size_t pos = (size_t)src->pos_, pkb = (size_t)32 * tbcap_kb_;
+  auto cp = [&](void* d, const void* s, size_t bytes) { if (bytes) cudaMemcpyAsync(d, s, bytes, cudaMemcpyDeviceToDevice, st_); };
+  for (int l = 0; l < nlayers_; ++l) { const Q35Layer& Y = src->L_[l]; MsLay& Z = X.L[(size_t)l];
+    if (!Y.full) { cp(Z.S, Y.S, (size_t)Q35_GV * Q35_GD * Q35_GD * 4); cp(Z.hist, Y.hist, (size_t)3 * Q35_CONV * 2); continue; }
+    if (!Y.kp != !Z.kp || !Y.vp != !Z.vp) throw std::runtime_error("ms_load: the layer containers differ");
+    for (int kh = 0; kh < Q35_KVH; ++kh) { const size_t r = (size_t)kh * max_ctx_;
+      if (Y.kp) { cp(Z.kp + r * pkb, Y.kp + r * pkb, pos * pkb); cp(Z.kps + r, Y.kps + r, pos * 4); }
+      else      { cp(Z.k8 + r * Q35_HD, Y.k8 + r * Q35_HD, pos * Q35_HD); cp(Z.ks + r, Y.ks + r, pos * 4); }
+      if (Y.vp) { cp(Z.vp + r * pkb, Y.vp + r * pkb, pos * pkb); cp(Z.vps + r, Y.vps + r, pos * 4); }
+      else      { cp(Z.v8 + r * Q35_HD, Y.v8 + r * Q35_HD, pos * Q35_HD); cp(Z.vs + r, Y.vs + r, pos * 4); } } }
+  // what the drafter remembers of the stream.  A source without the drafter has no memory to give: the slot's is cleared (zeros), so
+  // that the memory of the stream that used the slot before is never read.  The ids do not depend on it (a pass gives the same token
+  // at every position whatever the drafts were); only how many drafts the first passes confirm does.
+  if (bdr_.on && (size_t)(slot - ne) < ms_dring_.size()) {
+    const size_t RB = (size_t)8 * 2048 * 128 * 2; MsRing& R = ms_dring_[(size_t)(slot - ne)];
+    for (int i = 0; i < 5; ++i) {
+      if (src->bdr_.on) { cp(R.rk[i], src->bdr_.rk[i], RB); cp(R.rv[i], src->bdr_.rv[i], RB); }
+      else { cudaMemsetAsync(R.rk[i], 0, RB, st_); cudaMemsetAsync(R.rv[i], 0, RB, st_); } } }
+  cudaStreamSynchronize(st_);
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("ms_load: ") + cudaGetErrorString(e));
+  X.pos = (int)pos; ms_pend_[(size_t)slot] = MsPend{};
+  X.smp = MsSmp{src->smp_, src->smp_p_};                                   // the stream goes on with the sampling it was read with
+  if ((size_t)slot < ms_last_r0_.size()) { ms_last_r0_[(size_t)slot] = -1; ms_last_len_[(size_t)slot] = 0; }   // its rows of the last pass were the stream's before
+  if ((size_t)slot < ms_last_acc_.size()) ms_last_acc_[(size_t)slot] = 0;
+  // what ms_unload needs to know of the stream's start (see MsLight), then: the stream lives in the slot now, so no read continues
+  // the source's live sequence (it would go on from a point the stream has left)
+  X.out = false; X.ring = bdr_.on && src->bdr_.on; X.src_self = src == this; X.src_tick = sh_tick_; X.src_known = src->snap_live_ok();
+  if (X.src_known) X.src_ids = src->snap_live(); else X.src_ids.clear();
+  X.load_pos = (int)pos; X.tail.clear();
+  // the stream's frontier: the token the source emitted last (known with its live sequence; else the first pass sets it)
+  X.front = X.src_known ? src->snap_front() : -1; X.filled = true;
+  live_drop(); if (src != this) src->live_drop();
+}
+// The inverse of ms_load: this engine takes the stream of a light slot, so that its own entries (yskn_spec_generate: a read of ids +
+// more tokens, the frontier form) continue it, and ms_load can move it back.  What this engine had is overwritten: its recurrent states
+// and histories, its KV rows below the slot's position, its drafter memory (cleared when the slot has none from its source) and its
+// sampling (the slot's, as set_opt would set it); its own pending work goes first (a replay still running) or is dropped (a verify pass
+// that is not committed).  Its saved states (prompt snapshots) are kept only when they were taken on the KV
+// rows the slot copied from this engine: taken before the slot's ms_load from this engine (and not taken again since), at a position
+// inside the tokens this engine held then.  The others are dropped (a later read cannot restore them: it restores another state or
+// reads from the start, which is slower and may cut its passes elsewhere; see yskn_ms.h).  Last, the live sequence becomes ids:
+// nothing after this point moves sh_epoch_.  ids is checked token by token: the tail against the rows the slot took in its passes,
+// the head against the source's live sequence at the load.  When the source had none, the head cannot be checked: then the live
+// sequence stays dropped and no saved state stays (the next read is from the start; the frontier form is refused).
+void Engine35::ms_unload(int slot, const int32_t* ids, int n) {
+  const int ne = (int)ms_eng_.size();
+  if (ms_ns_ < 1) throw std::runtime_error("ms_unload: ms_bind first");
+  if (slot < ne || slot >= ms_ns_) throw std::runtime_error("ms_unload: not a light stream slot of the current binding");
+  MsLight& X = ms_light_[(size_t)(slot - ne)];
+  if (X.out) throw std::runtime_error("ms_unload: the slot's stream was moved to this engine already (ms_load a stream into the slot first)");
+  if (ms_open_) throw std::runtime_error("ms_unload: the last pass is not committed (call ms_commit first)");
+  if (X.pos < 1) throw std::runtime_error("ms_unload: the slot holds no tokens");
+  if (!ids || n != X.pos) throw std::runtime_error("ms_unload: ids must be the " + std::to_string(X.pos) + " tokens the slot holds (n = its position)");
+  if (X.load_pos < 0 || X.load_pos + (int)X.tail.size() != X.pos) throw std::runtime_error("ms_unload: the slot's token record does not match its position");
+  if (X.src_known && ((int)X.src_ids.size() != X.load_pos || !std::equal(X.src_ids.begin(), X.src_ids.end(), ids)))
+    throw std::runtime_error("ms_unload: ids do not start with the tokens the slot was loaded with");
+  if (!std::equal(X.tail.begin(), X.tail.end(), ids + X.load_pos))
+    throw std::runtime_error("ms_unload: ids do not end with the tokens of the slot's passes (ids must be the tokens the slot holds)");
+  if (visual_on_) throw std::runtime_error("ms_unload: image input is on (this engine's positions are those of a request with images)");
+  if (mtp_.on) throw std::runtime_error("ms_unload: the built-in draft head is loaded");
+  for (int l = 0; l < nlayers_; ++l) { const Q35Layer& Y = L_[l]; const MsLay& Z = X.L[(size_t)l];
+    if (Y.full && (!Y.kp != !Z.kp || !Y.vp != !Z.vp || !Y.k8 != !Z.k8 || !Y.v8 != !Z.v8)) throw std::runtime_error("ms_unload: the layer containers differ"); }
+  // a verify pass of this engine that is not committed is dropped (all it wrote is overwritten below, and its position is the slot's)
+  // the slot's own pending work: its accepted rows into its states; drafts made for a pass with rows of the slot are dropped
+  if (ms_ctx_pending_) { ms_ctx_push(ms_last_graph_); ms_ctx_pending_ = false; }
+  if (ms_pend_[(size_t)slot].n > 0) ms_settle(std::vector<int>(1, slot));
+  if (ms_dtoks_ && std::find(ms_dlay_.begin(), ms_dlay_.end(), slot) != ms_dlay_.end()) { cudaStreamSynchronize(st_); ms_dtoks_ = false; ms_dlay_.clear(); }
+  rp_launch(); cudaStreamSynchronize(st2_); replay_fence(); cudaStreamSynchronize(st_);   // this engine's own replay must not land afterwards
+  // From here this engine's KV rows change.  What a later read may continue is settled first, so that a failure below leaves no
+  // live sequence and no saved state that the rows no longer match (the kept states lie on rows the copy rewrites with equal bytes).
+  live_drop();
+  for (SnapSlot& sl : sh_slots_) if (sl.pos > 0 && !(X.src_self && X.src_known && sl.born <= X.src_tick && sl.pos <= (int)X.src_ids.size())) sl.pos = -1;
+  if (X.src_known) sh_seq_.assign(ids, ids + n); else sh_seq_.clear();   // (no saved state stays when the head is not known)
+  sh_last_ = -1;
+  const size_t pos = (size_t)X.pos, pkb = (size_t)32 * tbcap_kb_;
+  auto cp = [&](void* d, const void* s, size_t bytes) { if (bytes) cudaMemcpyAsync(d, s, bytes, cudaMemcpyDeviceToDevice, st_); };
+  for (int l = 0; l < nlayers_; ++l) { Q35Layer& Y = L_[l]; const MsLay& Z = X.L[(size_t)l];
+    if (!Y.full) { cp(Y.S, Z.S, (size_t)Q35_GV * Q35_GD * Q35_GD * 4); cp(Y.hist, Z.hist, (size_t)3 * Q35_CONV * 2); continue; }
+    for (int kh = 0; kh < Q35_KVH; ++kh) { const size_t r = (size_t)kh * max_ctx_;
+      if (Z.kp) { cp(Y.kp + r * pkb, Z.kp + r * pkb, pos * pkb); cp(Y.kps + r, Z.kps + r, pos * 4); }
+      else      { cp(Y.k8 + r * Q35_HD, Z.k8 + r * Q35_HD, pos * Q35_HD); cp(Y.ks + r, Z.ks + r, pos * 4); }
+      if (Z.vp) { cp(Y.vp + r * pkb, Z.vp + r * pkb, pos * pkb); cp(Y.vps + r, Z.vps + r, pos * 4); }
+      else      { cp(Y.v8 + r * Q35_HD, Z.v8 + r * Q35_HD, pos * Q35_HD); cp(Y.vs + r, Z.vs + r, pos * 4); } } }
+  if (bdr_.on) {                                                         // the drafter memory: the slot's, or none (zeros)
+    const size_t RB = (size_t)8 * 2048 * 128 * 2; const bool have = X.ring && (size_t)(slot - ne) < ms_dring_.size();
+    for (int i = 0; i < 5; ++i) {
+      if (have) { const MsRing& R = ms_dring_[(size_t)(slot - ne)]; cp(bdr_.rk[i], R.rk[i], RB); cp(bdr_.rv[i], R.rv[i], RB); }
+      else { cudaMemsetAsync(bdr_.rk[i], 0, RB, st_); cudaMemsetAsync(bdr_.rv[i], 0, RB, st_); } } }
+  pos_ = (int)pos; last_M_ = 0; pre_committed_ = false; launch_set_int(d_pos_, pos_, st_);
+  cudaStreamSynchronize(st_);
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("ms_unload: ") + cudaGetErrorString(e));
+  smp_assign(X.smp.on, X.smp.p);                                         // the stream goes on with its own sampling
+  if ((size_t)slot < ms_last_r0_.size()) { ms_last_r0_[(size_t)slot] = -1; ms_last_len_[(size_t)slot] = 0; }
+  if ((size_t)slot < ms_last_acc_.size()) ms_last_acc_[(size_t)slot] = 0;
+  X.out = true;
+  if (X.src_known) snap_note(ids, n, X.front);                             // else the live sequence stays dropped (see above)
+}
+// this engine's sampling, with the conversions and the graph handling of set_opt 10 (temperature; <= 0 = greedy), 11, 12, 13, 16, 29
+void Engine35::smp_assign(int on, const Q35SmpParams& p) {
+  rp_launch(); cudaStreamSynchronize(st2_); replay_fence();
+  if (on != smp_) { if (gexec_) { cudaGraphExecDestroy(gexec_); gexec_ = nullptr; } if (gexec_alt_) { cudaGraphExecDestroy(gexec_alt_); gexec_alt_ = nullptr; } }
+  smp_ = on ? 1 : 0; if (smp_) smp_p_.temp = p.temp;
+  smp_p_.top_p = p.top_p; smp_p_.top_k = p.top_k; smp_p_.seed = p.seed; smp_p_.version = p.version; smp_p_.min_p = p.min_p;   // pm stays this engine's
+  cudaStreamSynchronize(st_); cudaMemcpy(d_smp_, &smp_p_, sizeof(Q35SmpParams), cudaMemcpyHostToDevice);
+}
+// what a caller needs to plan the slots (yskn_ms_info in yskn_ms.h)
+int Engine35::ms_info(int64_t* out, int max_out) const {
+  int ng = 0; for (const Q35Layer& Y : L_) if (!Y.full) ++ng;
+  int64_t kvb = 0;                                                       // KV bytes of one position, all attention layers, K and V with their scales
+  for (const Q35Layer& Y : L_) if (Y.full) {
+    if (kv8_) kvb += (int64_t)Q35_KVH * (((Y.kp ? 32 * tbcap_kb_ : Q35_HD) + 4) + ((Y.vp ? 32 * tbcap_kb_ : Q35_HD) + 4));
+    else kvb += (int64_t)Q35_KVH * Q35_HD * 2 * 2; }
+  const int64_t RB = (int64_t)8 * 2048 * 128 * 2;
+  const int64_t rec = (int64_t)ng * ((int64_t)Q35_GV * Q35_GD * Q35_GD * 4 + (int64_t)3 * Q35_CONV * 2);
+  const int64_t v[] = {1, ms_unsupported(nullptr), kv8_ ? (tbcap_ ? 5 : 8) : 16, tbcap_ ? tbcap_kb_ : 0, kvb, rec + (bdr_.on ? 10 * RB : 0),
+                       max_ctx_, MS_ROWS, 64, bdr_.on ? 1 : 0, bdr_.sk_a ? 1 : 0, (int64_t)ms_light_.size(), ms_ns_,
+                       rec + (bdr_.on ? 10 * RB : 0) + (mtp_.on ? (int64_t)H_ * 2 : 0), sh_max_};
+  const int nv = (int)(sizeof v / sizeof v[0]), k = std::max(0, std::min(nv, max_out));
+  for (int i = 0; i < k; ++i) out[i] = v[i];
+  return k;
+}
+int Engine35::ms_slot_pos(int slot) {
+  if (slot < 0 || slot >= ms_ns_) throw std::runtime_error("ms_slot_pos: no such stream slot");
+  return ms_posr(slot);
+}
+int Engine35::ms_slot_hash(int slot, uint64_t* out, int max_out) {
+  const int ne = (int)ms_eng_.size();
+  if (slot < 0 || slot >= ms_ns_) throw std::runtime_error("ms_slot_hash: no such stream slot");
+  if (ms_pend_[(size_t)slot].n > 0) ms_settle(std::vector<int>(1, slot));
+  if (slot < ne) return ms_eng_[(size_t)slot]->state_hash(out, max_out);
+  replay_fence(); cudaStreamSynchronize(st_);
+  const MsLight& X = ms_light_[(size_t)(slot - ne)]; const size_t pos = (size_t)X.pos, pkb = (size_t)32 * tbcap_kb_;
+  std::vector<uint8_t> b; int n = 0; const uint64_t H0 = 0xcbf29ce484222325ull;
+  auto put = [&](uint64_t v) { if (n >= max_out) throw std::runtime_error("ms_slot_hash: output array too small"); out[n++] = v; };
+  auto dev = [&](uint64_t h, const void* p, size_t bytes) { b.resize(bytes); if (bytes) cudaMemcpy(b.data(), p, bytes, cudaMemcpyDeviceToHost); return fnv_words(h, b); };
+  put((uint64_t)X.pos);
+  for (int l = 0; l < nlayers_; ++l) { const MsLay& Z = X.L[(size_t)l];
+    if (!L_[l].full) { put(dev(H0, Z.S, (size_t)Q35_GV * Q35_GD * Q35_GD * 4)); put(dev(H0, Z.hist, (size_t)3 * Q35_CONV * 2)); continue; }
+    uint64_t hk = H0, hv = H0, hks = H0, hvs = H0;
+    for (int kh = 0; kh < Q35_KVH; ++kh) { const size_t r = (size_t)kh * max_ctx_;
+      if (Z.kp) { hk = dev(hk, Z.kp + r * pkb, pos * pkb); hks = dev(hks, Z.kps + r, pos * 4); }
+      else      { hk = dev(hk, Z.k8 + r * Q35_HD, pos * Q35_HD); hks = dev(hks, Z.ks + r, pos * 4); }
+      if (Z.vp) { hv = dev(hv, Z.vp + r * pkb, pos * pkb); hvs = dev(hvs, Z.vps + r, pos * 4); }
+      else      { hv = dev(hv, Z.v8 + r * Q35_HD, pos * Q35_HD); hvs = dev(hvs, Z.vs + r, pos * 4); } }
+    put(hk); put(hv); put(hks); put(hvs);
+  }
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("ms_slot_hash: ") + cudaGetErrorString(e));
+  return n;
+}
+// the seed of every slot (the rest of each slot's sampling stays)
+void Engine35::ms_seeds(const uint32_t* seeds, int n) {
+  if (ms_ns_ < 1 || n != ms_ns_ || !seeds) throw std::runtime_error("ms_seeds: one seed per bound stream");
+  for (int i = 0; i < n; ++i) ms_smpr(i).p.seed = (unsigned long long)seeds[i];
+}
+// The sampling of one slot, from its next ms_draft / ms_step on.  The values, their checks and their conversion are those of set_opt:
+// temperature x 1000 (key 10; <= 0 = greedy, the argmax), top-p x 1000 (11), top-k (12), min-p x 1000 (29), the sampler (16) and the
+// seed (13), so that a stream samples what this engine samples alone with the same settings.  Nothing changes when a value is refused.
+void Engine35::ms_set_sampling(int slot, int temp_x1000, int top_p_x1000, int top_k, int min_p_x1000, int sampler, uint32_t seed) {
+  if (ms_ns_ < 1) throw std::runtime_error("ms_set_sampling: ms_bind first");
+  if (slot < 0 || slot >= ms_ns_) throw std::runtime_error("ms_set_sampling: no such stream slot");
+  if (top_p_x1000 <= 0 || top_p_x1000 > 1000) throw std::runtime_error("ms_set_sampling: top-p x 1000 must be 1..1000");
+  if (top_k < 1 || top_k > Q35_SMP_K) throw std::runtime_error("ms_set_sampling: top-k must be 1..20");
+  if (min_p_x1000 < 0 || min_p_x1000 > 1000) throw std::runtime_error("ms_set_sampling: min-p x 1000 must be 0..1000");
+  if (sampler != 2 && sampler != 3) throw std::runtime_error("ms_set_sampling: the sampler must be 2 or 3");
+  MsSmp& z = ms_smpr(slot);
+  z.p.top_p = top_p_x1000 / 1000.0;                                        // set_opt 11
+  z.p.top_k = top_k;                                                       // set_opt 12
+  z.p.seed = (unsigned long long)seed;                                     // set_opt 13: (unsigned long long)(unsigned)value
+  z.p.version = sampler;                                                   // set_opt 16
+  z.p.min_p = min_p_x1000 / 1000.0;                                        // set_opt 29
+  z.on = temp_x1000 > 0 ? 1 : 0; if (z.on) z.p.temp = temp_x1000 / 1000.0;   // set_opt 10
+}
+// streams that accepted rows of the last pass and have no row in the next one: those rows go into their recurrent states now
+void Engine35::ms_settle(const std::vector<int>& slots) {
+  replay_fence();
+  for (size_t i0 = 0; i0 < slots.size(); i0 += (size_t)HM_) {
+    const int m = (int)std::min(slots.size() - i0, (size_t)HM_);
+    int32_t* const P = h_pin_ + PIN_TG; std::memset(P, 0, (size_t)6 * HM_ * 4);
+    for (int i = 0; i < m; ++i) { const int s = slots[i0 + (size_t)i]; P[HM_ + i] = s; P[4 * HM_ + i] = ms_pend_[(size_t)s].row0; P[5 * HM_ + i] = ms_pend_[(size_t)s].n; }
+    cudaMemcpyAsync(ms_rows_, P, (size_t)6 * HM_ * 4, cudaMemcpyHostToDevice, st_);
+    g_pdl_rows = m;
+    for (int l = 0; l < nlayers_; ++l) { Q35Layer& Y = L_[l]; if (Y.full) continue;
+      const MsKeep& K = ms_keep_[ms_par_ ^ 1][(size_t)l];                  // the rows are those of the last pass: the set the next pass does not write
+      const Q35StateArgs SA{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, m, 0, core_, Y.pmix, nullptr};
+      launch_q35_state_ms(SA, Q35StateMs{ms_rows(), ms_tab_[l].S, ms_tab_[l].hist, K.tk, K.tv, K.tbeta, K.tg}, st_); }
+    cudaStreamSynchronize(st_);
+    for (int i = 0; i < m; ++i) ms_pend_[(size_t)slots[i0 + (size_t)i]] = MsPend{};
+  }
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("ms_settle: ") + cudaGetErrorString(e));
+}
+// Finish the pending work of the streams, so that this engine can run anything else.  A pass that was not committed counts as
+// "no draft accepted" (a later ms_commit fails); drafts made for a pass that did not run are dropped (ms_step then needs toks).
+void Engine35::ms_flush() {
+  if (ms_ctx_pending_) { ms_ctx_push(ms_last_graph_); ms_ctx_pending_ = false; }   // read the capture of the last pass while it is there
+  ms_open_ = false; ms_dtoks_ = false;
+  std::vector<int> v; for (int s = 0; s < (int)ms_pend_.size(); ++s) if (ms_pend_[(size_t)s].n > 0) v.push_back(s);
+  if (!v.empty()) ms_settle(v);
+  cudaStreamSynchronize(st_);
+  for (Engine35* e : ms_eng_) { launch_set_int(e->d_pos_, e->pos_, e->st_); cudaStreamSynchronize(e->st_); }
+}
+// The settings the multi-stream pass is built for.  0 = all of them; else a code (the reason is written to *why):
+//   1 16-bit KV, 2 8-bit KV (KV5 off), 3 image input on, 4 built-in draft head, 5 attention settings, 6 exact-sum GEMV off,
+//   7 debug skips, 8 kept conv outputs off, 9 no shared weights, 10 rows of a pass, 11 attention profile (environment)
+int Engine35::ms_unsupported(std::string* why, bool profile) const {
+  auto no = [&](int code, const std::string& s) { if (why) *why = s; return code; };
+  if (kv_fp16_ || !kv8_) return no(1, "the KV is kept in 16 bits (YSKN_Q35_KV_FP16=1 or YSKN_Q35_KV8=0); the multi-stream pass is built for KV5 (YSKN_TB_CAP=1) only");
+  if (!tbcap_) return no(2, "the KV is kept in 8 bits (YSKN_TB_CAP=0); the multi-stream pass is built for KV5 (YSKN_TB_CAP=1) only: serve one request at a time");
+  if (visual_on_) return no(3, "image input is on (the streams share this engine's position table; a request with images runs alone)");
+  if (mtp_.on) return no(4, "the built-in draft head is loaded (the multi-stream pass drafts with the block drafter only)");
+  if (!atx_ || kz_) return no(5, "the attention settings are not the package's (YSKN_Q35_ATX=1, YSKN_Q35_PMATH unset)");
+  if (!xsm_ || xsm_part_) return no(6, "the exact-sum GEMV is off (YSKN_Q35_XSUM=1 and YSKN_Q35_XSM_PART=0 are needed)");
+  if (kskip_) return no(7, "a debug skip mask is set");
+  if (!opt_kconv_) return no(8, "the kept conv outputs are off (set_opt 5 = 0)");
+  if (!shared_weights_) return no(9, "needs shared weights (YSKN_Q35_SHARED_WEIGHTS=1)");
+  if (HM_ != MS_ROWS) return no(10, "the pass tables are made for 16 rows");
+  if (profile) {
+    // the attention kernel shapes of the single path that a stream row matches: YSKN_ATX_PKV=3 with YSKN_ATX_PK3_MMAX=2 (a pass of 1..2
+    // rows takes the table form, 3..16 rows the 4-row tiles).  Other values make the single path take other kernels for some passes.
+    auto env = [](const char* k, int d) { const char* v = std::getenv(k); return (v && v[0]) ? std::atoi(v) : d; };
+    if (env("YSKN_ATX_PKV", 3) != 3) return no(11, "YSKN_ATX_PKV is not 3 (the multi-stream pass is built for the settings of the Python package: set it to 3)");
+    if (env("YSKN_ATX_PK3_MMAX", 2) != 2) return no(11, "YSKN_ATX_PK3_MMAX is not 2 (the multi-stream pass is built for the settings of the Python package: unset it)");
+    const std::string w = q35_atx_pk_ms_unsupported(tbcap_kb_); if (!w.empty()) return no(11, w); }
+  return 0;
+}
+// settings of this engine that may change after ms_bind and that a multi-stream pass cannot follow
+void Engine35::ms_carrier_check(const char* what) const {
+  { std::string why; if (ms_unsupported(&why, false)) throw std::runtime_error(std::string(what) + ": " + why); }
+  if (last_M_ != 0) throw std::runtime_error(std::string(what) + ": this engine has a verify pass that is not committed");
+}
+// The first row of a light slot in a pass (checked before anything changes): the slot holds a stream (an ms_load filled it), and when
+// the stream's frontier (the token it emitted last) is known, the row's token is that token.  Another token would go into the stream's
+// KV as if the stream had emitted it (e.g. the token after drafts that were never committed), and its ids would differ from the
+// same request alone without any error.  toks == nullptr: the tokens of ms_draft, checked there.
+static void ms_check_first(const char* what, int slot, bool filled, int32_t front, const int32_t* toks, int r) {
+  if (!filled) throw std::runtime_error(std::string(what) + ": slot " + std::to_string(slot) + " holds no stream (ms_load one into it first)");
+  if (toks && front >= 0 && toks[r] != front)
+    throw std::runtime_error(std::string(what) + ": the first row of slot " + std::to_string(slot) + " is token " + std::to_string(toks[r]) +
+                             ", but its stream emitted " + std::to_string(front) + " last (the first row must be that token)");
+}
+void Engine35::ms_step(int M, const int32_t* slots, const int32_t* toks, int use_graph, int32_t* out_argmax, int32_t* top_ids, float* top_vals, int32_t* out_toks) {
+  if (ms_ns_ < 1) throw std::runtime_error("ms_step: ms_bind first");
+  if (M < 1 || M > MS_ROWS || M > HM_) throw std::runtime_error("ms_step: 1..16 rows");
+  if (!slots) throw std::runtime_error("ms_step: no slot array");
+  ms_carrier_check("ms_step");
+  const int ns = ms_ns_, ne = (int)ms_eng_.size();
+  std::vector<int> r0((size_t)ns, -1), len((size_t)ns, 0);
+  for (int r = 0; r < M; ++r) {
+    const int s = slots[r];
+    if (s < 0 || s >= ns) throw std::runtime_error("ms_step: no such stream slot");
+    if (s >= ne && ms_light_[(size_t)(s - ne)].out) throw std::runtime_error("ms_step: slot " + std::to_string(s) + " was moved to the carrier (ms_unload); ms_load a stream into it first");
+    if (r > 0 && slots[r - 1] == s) { ++len[(size_t)s]; continue; }
+    if (r0[(size_t)s] >= 0) throw std::runtime_error("ms_step: the rows of a stream must be next to each other");
+    r0[(size_t)s] = r; len[(size_t)s] = 1;
+    if (s >= ne) { const MsLight& X = ms_light_[(size_t)(s - ne)]; ms_check_first("ms_step", s, X.filled, X.front, toks, r); }
+  }
+  std::vector<int> settle;
+  for (int s = 0; s < ns; ++s) {
+    if (r0[(size_t)s] < 0) { if (ms_pend_[(size_t)s].n > 0) settle.push_back(s); continue; }
+    if (ms_posr(s) + len[(size_t)s] > max_ctx_) throw std::runtime_error("ms_step: context overflow");
+    if (s < ne) { Engine35* e = ms_eng_[(size_t)s];
+      if (e->rp_pending_ || e->rp_deferred_) { e->rp_launch(); cudaStreamSynchronize(e->st2_); e->replay_fence(); cudaStreamSynchronize(e->st_); } }
+  }
+  if (!settle.empty()) ms_settle(settle);
+  if (!toks && (!ms_dtoks_ || (int)ms_dlay_.size() != M || !std::equal(slots, slots + M, ms_dlay_.begin())))
+    throw std::runtime_error("ms_step: no tokens (give toks, or call ms_draft with the same rows first)");
+  if (toks && ms_dtoks_) cudaStreamSynchronize(st_);                       // the staging of ms_draft's tokens is rewritten below
+  int32_t* const P = h_pin_ + PIN_TG;
+  bool smp = false;                                                        // a row of this pass samples
+  for (int r = 0; r < HM_; ++r) {
+    if (r >= M) { for (int k = 0; k < 6; ++k) P[k * HM_ + r] = 0; ms_hprm_[r] = Q35SmpParams{0.0, 1.0, 1, 0, 0ull}; continue; }
+    const int s = slots[r], tl = r - r0[(size_t)s];
+    if (toks) h_pin_[PIN_IDS + r] = toks[r];
+    P[r] = ms_posr(s) + tl; P[HM_ + r] = s; P[2 * HM_ + r] = tl; P[3 * HM_ + r] = tl == 0 ? len[(size_t)s] : 0;
+    P[4 * HM_ + r] = tl == 0 ? ms_pend_[(size_t)s].row0 : 0; P[5 * HM_ + r] = tl == 0 ? ms_pend_[(size_t)s].n : 0;
+    // the row samples with its slot's settings (pm: this engine's, as for its own rows); a greedy slot: temperature 0 = the argmax
+    const MsSmp& z = ms_smpr(s); Q35SmpParams q = z.p; q.pm = smp_p_.pm;
+    if (z.on) smp = true; else q.temp = 0.0;
+    ms_hprm_[r] = q;
+  }
+  replay_fence(); ++sh_epoch_;
+  if (ms_ctx_pending_) { ms_ctx_push(use_graph); ms_ctx_pending_ = false; }   // (ms_draft has done this already when it was called)
+  if (toks) cudaMemcpyAsync(d_toks_, h_pin_ + PIN_IDS, (size_t)M * 4, cudaMemcpyHostToDevice, st_);
+  ms_dtoks_ = false;
+  cudaMemcpyAsync(ms_rows_, P, (size_t)6 * HM_ * 4, cudaMemcpyHostToDevice, st_);
+  if (smp) cudaMemcpyAsync(ms_prm_, ms_hprm_, (size_t)HM_ * sizeof(Q35SmpParams), cudaMemcpyHostToDevice, st_);
+  const bool topk = top_ids != nullptr || top_vals != nullptr;
+  struct Off { bool& f; bool& g; ~Off() { f = false; g = false; } } off{ms_now_, ms_smp_now_};
+  ms_now_ = true; ms_smp_now_ = smp;
+  if (!use_graph) pass_body(M, true, nlayers_, HEAD_ALL, topk, false, false);
+  else {
+    const int key = ((M * 2 + (topk ? 1 : 0)) * 2 + ms_par_) * 2 + (smp ? 1 : 0); auto it = ms_graph_.find(key);
+    if (it == ms_graph_.end()) {
+      cudaGraph_t g; cudaGraphExec_t ge; cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal); pass_body(M, true, nlayers_, HEAD_ALL, topk, false, false);
+      cudaStreamEndCapture(st_, &g);
+      if (cudaGraphInstantiate(&ge, g, 0) != cudaSuccess) throw std::runtime_error("ms_step: graph instantiate failed");
+      cudaGraphDestroy(g); it = ms_graph_.emplace(key, ge).first;
+    }
+    cudaGraphLaunch(it->second, st_);
+  }
+  ms_now_ = false; ms_smp_now_ = false;
+  cudaMemcpyAsync(h_pin_ + PIN_AM, d_next8_, (size_t)M * 4, cudaMemcpyDeviceToHost, st_);
+  cudaMemcpyAsync(h_pin_ + PIN_MST, d_toks_, (size_t)M * 4, cudaMemcpyDeviceToHost, st_);
+  if (top_ids) cudaMemcpyAsync(h_pin_ + PIN_TI, top_idx_, (size_t)M * 32, cudaMemcpyDeviceToHost, st_);
+  if (top_vals) cudaMemcpyAsync(h_pinf_ + PINF_TV, top_val_, (size_t)M * 32, cudaMemcpyDeviceToHost, st_);
+  cudaStreamSynchronize(st_);
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("ms_step: ") + cudaGetErrorString(e));
+  if (out_toks) std::memcpy(out_toks, h_pin_ + PIN_MST, (size_t)M * 4);
+  if (out_argmax) std::memcpy(out_argmax, h_pin_ + PIN_AM, (size_t)M * 4);
+  if (top_ids) std::memcpy(top_ids, h_pin_ + PIN_TI, (size_t)M * 32);
+  if (top_vals) std::memcpy(top_vals, h_pinf_ + PINF_TV, (size_t)M * 32);
+  for (int s = 0; s < ns; ++s) if (r0[(size_t)s] >= 0) {                   // the first row of each stream is in its state now; its accepted rows of the pass before too
+    ms_posr(s) += 1; ms_pend_[(size_t)s] = MsPend{};
+    if (s < ne) { Engine35* x = ms_eng_[(size_t)s]; x->last_M_ = 0; x->pre_committed_ = false; ++x->sh_epoch_; }
+    else { MsLight& X = ms_light_[(size_t)(s - ne)];
+           X.tail.push_back(h_pin_[PIN_MST + r0[(size_t)s]]);                // the token of that row (for ms_unload)
+           X.front = h_pin_[PIN_AM + r0[(size_t)s]]; } }                    // the frontier until ms_commit says more rows were right
+  ms_last_r0_ = r0; ms_last_len_ = len; ms_last_toks_.assign(h_pin_ + PIN_MST, h_pin_ + PIN_MST + M); ms_last_am_.assign(h_pin_ + PIN_AM, h_pin_ + PIN_AM + M);
+  ms_last_acc_.assign((size_t)ns, 0); ms_ctx_pending_ = ms_drafter_ && msd_ok_ && bdr_.on; ms_last_graph_ = use_graph;
+  ms_open_ = true; ms_par_ ^= 1;
+  last_M_ = 0; pre_committed_ = false;
+}
+void Engine35::ms_commit(int n, const int32_t* slots, const int32_t* n_accept) {
+  if (!ms_open_) throw std::runtime_error("ms_commit: no pass to commit (call it once, right after ms_step)");
+  // Every item is checked before anything changes.  A refused call changes nothing: the pass stays open, so it can be committed again
+  // with right values; a pass that is not committed counts as "no draft accepted" (ms_step, ms_draft and ms_flush close it).
+  if (n < 0 || n > ms_ns_ || (n > 0 && (!slots || !n_accept))) throw std::runtime_error("ms_commit: bad stream list");
+  for (int i = 0; i < n; ++i) {
+    const int s = slots[i], a = n_accept[i];
+    if (s < 0 || s >= ms_ns_ || ms_last_r0_[(size_t)s] < 0) throw std::runtime_error("ms_commit: the stream had no row in the last pass");
+    for (int q = 0; q < i; ++q) if (slots[q] == s) throw std::runtime_error("ms_commit: a stream is listed twice");
+    if (a < 0 || a >= ms_last_len_[(size_t)s]) throw std::runtime_error("ms_commit: more accepted rows than the stream had drafts");
+    const int r0 = ms_last_r0_[(size_t)s];
+    for (int j = 0; j < a; ++j) if (ms_last_toks_[(size_t)(r0 + j + 1)] != ms_last_am_[(size_t)(r0 + j)]) throw std::runtime_error("ms_commit: a draft the pass did not confirm");
+  }
+  int ng = 0;                                                              // the conv histories of the streams with accepted rows
+  for (int i = 0; i < n; ++i) { const int s = slots[i], a = n_accept[i]; if (a == 0) continue;
+    ms_hgrp_[3 * ng] = s; ms_hgrp_[3 * ng + 1] = ms_last_r0_[(size_t)s] + 1; ms_hgrp_[3 * ng + 2] = a; ++ng; }
+  if (ng) {
+    cudaMemcpyAsync(ms_grp_, ms_hgrp_, (size_t)ng * 12, cudaMemcpyHostToDevice, st_);
+    g_pdl_rows = 1;
+    launch_q35_ms_hist(Q35MsHistArgs{ms_mixed_tab_, ms_hist_tab_, ms_grp_, ms_ngdn_, ng}, st_);
+  }
+  ms_open_ = false;
+  const int ne = (int)ms_eng_.size();
+  for (int i = 0; i < n; ++i) { const int s = slots[i], a = n_accept[i]; if (a == 0) continue;
+    ms_posr(s) += a; if (s < ne) ++ms_eng_[(size_t)s]->sh_epoch_;
+    else { MsLight& X = ms_light_[(size_t)(s - ne)]; std::vector<int32_t>& t = X.tail; const size_t r1 = (size_t)ms_last_r0_[(size_t)s] + 1;   // the accepted drafts
+           t.insert(t.end(), ms_last_toks_.begin() + (std::ptrdiff_t)r1, ms_last_toks_.begin() + (std::ptrdiff_t)(r1 + (size_t)a));
+           X.front = ms_last_am_[(size_t)ms_last_r0_[(size_t)s] + (size_t)a]; }   // the token after the last accepted draft
+    ms_last_acc_[(size_t)s] = a;
+    ms_pend_[(size_t)s] = MsPend{ms_last_r0_[(size_t)s] + 1, a}; }
+  if (ms_ctx_pending_) { ms_ctx_push(ms_last_graph_); ms_ctx_pending_ = false; }   // the drafter rings: the rows the streams accepted, now
+}
+
+// ---- the drafter for the streams of a multi-stream pass ------------------------------------------------------------------------
+// One block for the rows of all streams that want drafts (the drafter weights are read once).  Tables give, per block row, its place
+// in its stream's block and its position, and per stream ("group") its rows, its ring and where its tokens stand in the pass.
+static int bdr_lno_cfg();
+void Engine35::ms_opt(int key, int value) {
+  if (key != 1) throw std::runtime_error("ms_opt: unknown key");
+  if (value && (!bdr_.on || !msd_ok_)) throw std::runtime_error("ms_opt 1: needs the drafter loaded (for every engine of the binding) before ms_bind");
+  ms_drafter_ = value ? 1 : 0; if (!ms_drafter_) ms_ctx_pending_ = false;
+}
+void Engine35::bdr_ctx_ms(int m) {
+  constexpr int D = 5120;
+  auto acc = [](DevTensor& t) { return reinterpret_cast<long long*>(t.part); };
+  BdrMsCtx X; X.row = msd_tab_ + MSD_CROW; X.pos = msd_tab_ + MSD_CPOS; X.slot = msd_tab_ + MSD_CSLOT;
+  launch_bdr_a8_cap_rows(cap_, Pmax_, X.row, bdr_.signs, bdr_.qx, bdr_.alpha, m, st_);
+  bdr_gemv({&bdr_.fc}, m);
+  launch_bdr_post(acc(bdr_.fc), bdr_.us, bdr_.fc.tau, D, bdr_.yfc, D, m, st_);
+  launch_bdr_a8n(bdr_.yfc, D, D, eps_, bdr_.hnorm, bdr_.signs, nullptr, bdr_.qx, bdr_.alpha, m, st_);
+  for (int i = 0; i < 5; ++i) {
+    DevTensor* L = bdr_.L[i];
+    bdr_gemv({&L[1], &L[2]}, m);
+    X.rk = msd_rk_[i]; X.rv = msd_rv_[i];
+    launch_bdr_kv_ring_ms(acc(L[1]), acc(L[2]), bdr_.us, L[1].tau, L[2].tau, bdr_.kn[i], eps_, m, X, st_);
+  }
+}
+// the rows the streams accepted in the last pass (its first row and the confirmed drafts) go into their drafter rings
+void Engine35::ms_ctx_push(int use_graph) {
+  if (!bdr_.on || !msd_ok_ || !cap_) return;
+  int32_t* const C = msd_h_ + MSD_CROW; int m = 0;
+  for (int s = 0; s < ms_ns_ && s < (int)ms_last_r0_.size(); ++s) {
+    const int r0 = ms_last_r0_[(size_t)s]; if (r0 < 0) continue;
+    const int a = ms_last_acc_[(size_t)s], p0 = ms_posr(s) - 1 - a;
+    for (int k = 0; k <= a && m < BDR_B; ++k) { C[m] = r0 + k; C[16 + m] = p0 + k; C[32 + m] = s; ++m; }
+  }
+  if (!m) return;
+  cudaMemcpyAsync(msd_tab_ + MSD_CROW, C, (size_t)48 * 4, cudaMemcpyHostToDevice, st_);
+  if (!use_graph) { bdr_ctx_ms(m); return; }
+  auto it = ms_cgraph_.find(m);
+  if (it == ms_cgraph_.end()) {
+    cudaGraph_t g = nullptr; cudaGraphExec_t ge = nullptr; cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal); bdr_ctx_ms(m); cudaStreamEndCapture(st_, &g);
+    if (!g || cudaGraphInstantiate(&ge, g, 0) != cudaSuccess) throw std::runtime_error("ms_ctx_push: graph capture failed");
+    cudaGraphDestroy(g); it = ms_cgraph_.emplace(m, ge).first;
+  }
+  cudaGraphLaunch(it->second, st_);
+}
+void Engine35::bdr_block_ms(int R, int ng, int J) {
+  constexpr int D = 5120, FF = 17408;
+  auto acc = [](DevTensor& t) { return reinterpret_cast<long long*>(t.part); };
+  BdrMs X; X.tl = msd_tab_ + MSD_TL; X.pos = msd_tab_ + MSD_POS; X.grp = msd_tab_ + MSD_GRP; X.g_b0 = msd_tab_ + MSD_GB0; X.g_len = msd_tab_ + MSD_GLEN;
+  X.g_slot = msd_tab_ + MSD_GSLOT; X.g_tok = msd_tab_ + MSD_GTOK; X.g_d0 = msd_tab_ + MSD_GD0; X.d_row = msd_tab_ + MSD_DROW; X.g_seed = msd_seed_; X.ng = ng;
+  launch_bdr_block_ids_ms(d_toks_, 248070, bdr_.ids, R, X, st_);
+  const uint16_t* emb = nullptr; const int* gids = nullptr; emb_src(bdr_.ids, R, emb, gids);
+  launch_bdr_embed(emb, gids, bdr_.h, R, st_);
+  for (int i = 0; i < 5; ++i) {
+    DevTensor* L = bdr_.L[i];
+    launch_bdr_a8n(bdr_.h, D, D, eps_, bdr_.ln1[i], bdr_.signs, bdr_.x1, bdr_.qx, bdr_.alpha, R, st_);
+    bdr_gemv({&L[7]}, R);
+    launch_bdr_dynconv_a8_ms(acc(L[7]), bdr_.us, L[7].tau, bdr_.dyn, bdr_.x1, bdr_.abase[i], bdr_.signs, bdr_.qx, bdr_.alpha, R, X.tl, st_);
+    bdr_gemv({&L[0], &L[1], &L[2]}, R);
+    launch_bdr_qkv_post_ms(acc(L[0]), acc(L[1]), acc(L[2]), bdr_.us, L[0].tau, L[1].tau, L[2].tau, bdr_.qn[i], bdr_.kn[i], X.pos, eps_, bdr_.yq, bdr_.yk, bdr_.yv, R, st_);
+    X.rk = msd_rk_[i]; X.rv = msd_rv_[i];
+    launch_bdr_attn_part_ms(bdr_.yq, bdr_.yk, bdr_.yv, bdr_.apart, X, st_);
+    launch_bdr_attn_comb_a8(bdr_.apart, bdr_.signs, bdr_.qx, bdr_.alpha, R, st_);
+    bdr_gemv({&L[3]}, R);
+    launch_bdr_post_conv_res_ms(acc(L[3]), bdr_.us, L[3].tau, bdr_.dyn, bdr_.abase[i] + 2 * D, R, bdr_.h, X.tl, st_);
+    launch_bdr_a8n(bdr_.h, D, D, eps_, bdr_.ln2[i], bdr_.signs, bdr_.x1, bdr_.qx, bdr_.alpha, R, st_);
+    bdr_gemv({&L[8]}, R);
+    launch_bdr_dynconv_a8_ms(acc(L[8]), bdr_.us, L[8].tau, bdr_.dyn, bdr_.x1, bdr_.mbase[i], bdr_.signs, bdr_.qx, bdr_.alpha, R, X.tl, st_);
+    bdr_gemv({&L[4], &L[5]}, R);
+    launch_bdr_glu_a8(acc(L[4]), acc(L[5]), bdr_.us, L[4].tau, L[5].tau, FF, bdr_.signs, bdr_.qx, bdr_.alpha, R, st_);
+    bdr_gemv({&L[6]}, R);
+    launch_bdr_post_conv_res_ms(acc(L[6]), bdr_.us, L[6].tau, bdr_.dyn, bdr_.mbase[i] + 2 * D, R, bdr_.h, X.tl, st_);
+  }
+  launch_bdr_a8n_rows(bdr_.h, D, D, eps_, bdr_.fnorm, bdr_.signs, bdr_.hf, bdr_.qx, bdr_.alpha, J, X.d_row, st_);   // the draft rows of all streams, gathered
+  if (bdr_.sk_m > 0) {
+    launch_bdr_shead(bdr_.hf, bdr_.sk_bt, bdr_.sk_a, bdr_.sk_as, bdr_.sk_w, bdr_.sk_ws, V_, bdr_.sk_m, bdr_.sk_grid, bdr_.sk_q, bdr_.sk_s, bdr_.sk_hist,
+                     bdr_.sk_thr, bdr_.sk_ci, bdr_.sk_cv, bdr_.tval, bdr_.tidx, J, st_);
+  } else {
+    const bool sub = bdr_.sub_on && bdr_.nsub > 0; const DevTensor& HT = sub ? bdr_.hsub : head_; const int NV = sub ? bdr_.nsub : V_;
+    GemvLaunch P{}; P.M = J; P.stage_bytes = 0; P.seg[0] = GemvSeg{HT.dev, reinterpret_cast<float*>(bdr_.hacc), 0}; P.n_seg = 1;
+    P.n_ctas = (HT.dev.N / 64 + GEMV_WARPS - 1) / GEMV_WARPS; P.max_workers = HT.dev.n_workers;
+    P.qx = bdr_.qx; P.alpha = bdr_.alpha; P.xsum = 1; P.us_out = bdr_.us; P.lno_cfg = bdr_lno_cfg();
+    if (!lnord_eligible(P)) throw std::runtime_error("bdraft: head GEMV not LNORD-eligible");
+    launch_lnord(P, st_);
+    launch_bdr_post(bdr_.hacc, bdr_.us, HT.tau, NV, bdr_.lg, NV, J, st_);
+    launch_bdr_topk16(bdr_.lg, NV, bdr_.tval, bdr_.tidx, J, bdr_.tcv, bdr_.tci, st_);
+    if (sub) launch_bdr_map_ids(bdr_.tidx, bdr_.sub_ids, J * 16, st_);
+  }
+  launch_bdr_hproj(bdr_.hf, bdr_.hp, bdr_.hpv, J, st_);
+  launch_bdr_select_ms(bdr_.hpv, bdr_.tval, bdr_.tidx, bdr_.pc, bdr_.sc, d_toks_, d_smp_, msd_tab_ + MSD_GCPL, X, st_);
+}
+void Engine35::ms_draft(int M, const int32_t* slots, const int32_t* toks, const int32_t* dev, int use_graph) {
+  if (ms_ns_ < 1) throw std::runtime_error("ms_draft: ms_bind first");
+  if (!bdr_.on || !msd_ok_ || !ms_drafter_) throw std::runtime_error("ms_draft: needs the drafter (load it before ms_bind, then ms_opt(1, 1))");
+  if (M < 1 || M > MS_ROWS || M > HM_) throw std::runtime_error("ms_draft: 1..16 rows");
+  if (!slots || !toks) throw std::runtime_error("ms_draft: no slot or token array");
+  ms_carrier_check("ms_draft");
+  const int ns = ms_ns_, ne = (int)ms_eng_.size();
+  std::vector<int> r0((size_t)ns, -1), len((size_t)ns, 0);
+  for (int r = 0; r < M; ++r) {
+    const int s = slots[r];
+    if (s < 0 || s >= ns) throw std::runtime_error("ms_draft: no such stream slot");
+    if (s >= ne && ms_light_[(size_t)(s - ne)].out) throw std::runtime_error("ms_draft: slot " + std::to_string(s) + " was moved to the carrier (ms_unload); ms_load a stream into it first");
+    if (r > 0 && slots[r - 1] == s) { ++len[(size_t)s]; continue; }
+    if (r0[(size_t)s] >= 0) throw std::runtime_error("ms_draft: the rows of a stream must be next to each other");
+    r0[(size_t)s] = r; len[(size_t)s] = 1;
+    if (s >= ne) { const MsLight& X = ms_light_[(size_t)(s - ne)]; ms_check_first("ms_draft", s, X.filled, X.front, toks, r); }
+  }
+  for (int s = 0; s < ns; ++s) if (r0[(size_t)s] >= 0 && ms_posr(s) + len[(size_t)s] > max_ctx_) throw std::runtime_error("ms_draft: context overflow");
+  if (ms_dtoks_) cudaStreamSynchronize(st_);                               // a second call without a pass in between: the staging memory is reused
+  ms_open_ = false;                                                        // the pass before can no longer be committed
+  replay_fence(); ++sh_epoch_;
+  if (ms_ctx_pending_) { ms_ctx_push(use_graph); ms_ctx_pending_ = false; }
+  int32_t* const T = msd_h_; std::memset(T, 0, (size_t)MSD_CROW * 4);
+  int R = 0, ng = 0, J = 0;
+  for (int r = 0; r < M;) {
+    const int s = slots[r], L = len[(size_t)s];
+    if (L >= 2 && (!dev || dev[r])) {
+      T[MSD_GB0 + ng] = R; T[MSD_GLEN + ng] = L; T[MSD_GSLOT + ng] = s; T[MSD_GTOK + ng] = r; T[MSD_GD0 + ng] = J;
+      // the stream's sampling, as bdraft_step sets it for this engine's own drafts: its seed, and its draft temperature when it
+      // samples with sampler 3 (else -1: the drafts are the drafter's argmax)
+      const MsSmp& z = ms_smpr(s); msd_hseed_[ng] = z.p.seed; T[MSD_GCPL + ng] = (z.on && z.p.version == 3) ? bdr_.cpl_pm : -1;
+      for (int k = 0; k < L; ++k) { T[MSD_TL + R] = k; T[MSD_POS + R] = ms_posr(s) + k; T[MSD_GRP + R] = ng; if (k) T[MSD_DROW + J++] = R; ++R; }
+      ++ng;
+    }
+    r += L;
+  }
+  std::memcpy(h_pin_ + PIN_IDS, toks, (size_t)M * 4);
+  cudaMemcpyAsync(d_toks_, h_pin_ + PIN_IDS, (size_t)M * 4, cudaMemcpyHostToDevice, st_);
+  ms_dlay_.assign(slots, slots + M); ms_dtoks_ = true;
+  if (ng) {
+    cudaMemcpyAsync(msd_tab_, T, (size_t)MSD_CROW * 4, cudaMemcpyHostToDevice, st_);
+    cudaMemcpyAsync(msd_seed_, msd_hseed_, (size_t)16 * 8, cudaMemcpyHostToDevice, st_);
+    if (!use_graph) bdr_block_ms(R, ng, J);
+    else {
+      const int key = (R * 32 + ng) * 32 + J; auto it = ms_dgraph_.find(key);
+      if (it == ms_dgraph_.end()) {
+        cudaGraph_t g = nullptr; cudaGraphExec_t ge = nullptr; cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal); bdr_block_ms(R, ng, J); cudaStreamEndCapture(st_, &g);
+        if (!g || cudaGraphInstantiate(&ge, g, 0) != cudaSuccess) throw std::runtime_error("ms_draft: graph capture failed");
+        cudaGraphDestroy(g); it = ms_dgraph_.emplace(key, ge).first;
+      }
+      cudaGraphLaunch(it->second, st_);
+    }
+  }
+  const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("ms_draft: ") + cudaGetErrorString(e));
+}
+
 void Engine35::run_pass(int M, bool commit, int head_mode, bool topk, bool nll, bool use_graph) {
   replay_fence(); ++sh_epoch_;
   if (!commit) last_keep_ = (opt_kconv_ && M <= HM_) ? 1 : 0;          // what layer() does; the commit replay must match it
   if (!use_graph) { pass_body(M, commit, nlayers_, head_mode, topk, nll, false); return; }
   const int key = M * 64 + (commit ? 32 : 0) + head_mode * 4 + (topk ? 2 : 0) + (nll ? 1 : 0) + (opt_kconv_ ? (1 << 30) : 0)
                   + (wk_pass(M, commit, head_mode) ? (1 << 29) : 0) + (atx_ ? (1 << 28) : 0) + (smp_ ? (1 << 27) : 0); auto it = pgraph_.find(key);
+  const bool rd = commit && M > HM_;                                     // a pass of a read (its graphs are kept LRU, read_graph_room)
   if (it == pgraph_.end()) {
+    if (rd) read_graph_room();
     cudaGraph_t g; cudaGraphExec_t ge; cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal); pass_body(M, commit, nlayers_, head_mode, topk, nll, false);
     cudaStreamEndCapture(st_, &g);
     if (cudaGraphInstantiate(&ge, g, 0) != cudaSuccess) throw std::runtime_error("Engine35: graph instantiate failed");
     cudaGraphDestroy(g); it = pgraph_.emplace(key, ge).first;
   }
+  if (rd) pg_use_[key] = ++pg_tick_;
   cudaGraphLaunch(it->second, st_);
+}
+// Room for one more graph of a read pass: when kReadGraphs are kept, the one used longest ago is destroyed.  A server reads prompts of
+// every length, one graph per length, and without a bound their GPU memory grows for hours.  A graph made again replays the same
+// kernels with the same arguments: only its capture is paid again.  Keys whose graph was dropped elsewhere are forgotten first.
+void Engine35::read_graph_room() {
+  for (auto u = pg_use_.begin(); u != pg_use_.end();) u = pgraph_.count(u->first) ? std::next(u) : pg_use_.erase(u);
+  if ((int)pg_use_.size() < kReadGraphs) return;
+  auto old = pg_use_.begin();
+  for (auto u = pg_use_.begin(); u != pg_use_.end(); ++u) if (u->second < old->second) old = u;
+  const auto g = pgraph_.find(old->first);
+  cudaStreamSynchronize(st_);                                            // its last launch has ended (a read waits for each pass anyway)
+  cudaGraphExecDestroy(g->second); pgraph_.erase(g); pg_use_.erase(old);
 }
 void Engine35::upload_rows(const int32_t* ids, int M, const int32_t* targets) {
   std::memcpy(h_pin_ + PIN_IDS, ids, (size_t)M * 4); cudaMemcpyAsync(d_toks_, h_pin_ + PIN_IDS, (size_t)M * 4, cudaMemcpyHostToDevice, st_);
@@ -1779,7 +2522,7 @@ bool Engine35::snap_save_at(int n) {
   if (mtp_.on) cudaMemcpyAsync(sl.pend, mtp_.pend, (size_t)H_ * 2, cudaMemcpyDeviceToHost, st_);
   cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("snap_save: ") + cudaGetErrorString(e));
-  sl.pos = n; sl.tick = ++sh_tick_;
+  sl.pos = n; sl.tick = ++sh_tick_; sl.born = sl.tick;
   return true;
 }
 void Engine35::snap_load_slot(int i) {

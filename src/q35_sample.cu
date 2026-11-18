@@ -53,6 +53,7 @@ __device__ __forceinline__ unsigned long long kj_mix(unsigned long long z) {
   z += 0x9E3779B97F4A7C15ull; z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; return z ^ (z >> 31); }
 __device__ __forceinline__ double kj_uniform(unsigned long long seed, long long pos) {   
   return (double)(kj_mix(kj_mix(seed) ^ (unsigned long long)pos) >> 11) * (1.0 / 9007199254740992.0); }
+#if !defined(YSKN_SAMPLE_MS_TU)   // q35_sample_ms.cu includes this file for the helpers, not for the kernels and launchers
 __global__ void __launch_bounds__(KJ_T) smp_kernel(Q35SmpArgs A) { pdl_wait(); pdl_trigger();
   const int r = blockIdx.y, k = A.prm->top_k; const float* lg = A.logits + (size_t)r * A.V;
   float tv[KJ_PT]; int ti[KJ_PT];
@@ -99,6 +100,7 @@ __global__ void __launch_bounds__(KJ_T) smp_kernel(Q35SmpArgs A) { pdl_wait(); p
   A.d_tok_out[r] = id;
   if (A.adv_pos) { *A.adv_pos += 1; *A.adv_tok = id; }                    
 }
+#endif
 
 
 
@@ -128,6 +130,7 @@ __device__ __forceinline__ void k2_warp_pop(float (&v)[L], int (&id)[L], int kk,
       k2_lane_best(v, id, bv, bi, lb); }
   }
 }
+#if !defined(YSKN_SAMPLE_MS_TU)
 __global__ void __launch_bounds__(K2_T) smp2_kernel(Q35SmpArgs A) { pdl_wait(); pdl_trigger();
   __shared__ float s_wv[K2_T / 32][Q35_SMP_K]; __shared__ int s_wi[K2_T / 32][Q35_SMP_K];
   __shared__ float s_v[Q35_SMP_K]; __shared__ int s_i[Q35_SMP_K]; __shared__ int s_last;
@@ -205,11 +208,14 @@ __global__ void __launch_bounds__(K2_T) smp2_kernel(Q35SmpArgs A) { pdl_wait(); 
   A.d_tok_out[r] = id;
   if (A.adv_pos) { *A.adv_pos += 1; *A.adv_tok = id; }
 }
+#endif
 }  
+#if !defined(YSKN_SAMPLE_MS_TU)
 bool q35_smp2_on() { static const bool v = [] { const char* e = std::getenv("YSKN_SMP2"); return !(e && e[0] == '0'); }(); return v; }
 void launch_q35_smp(const Q35SmpArgs& A, cudaStream_t st) {
   if (A.V > KJ_G * KJ_T * KJ_PT) throw std::runtime_error("SMP: vocabulary larger than 262,144");
   if (q35_smp2_on()) { launch_k(smp2_kernel, dim3(K2_G, A.rows), dim3(K2_T), 0, st, A); return; }
   launch_k(smp_kernel, dim3(KJ_G, A.rows), dim3(KJ_T), 0, st, A);
 }
+#endif
 }  

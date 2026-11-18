@@ -516,8 +516,10 @@ template <int KB, bool VPK> static void pk3_launch(const Q35AtxPkArgs& U, cudaSt
   pk3_launch2<KB, VPK, false>(U, st);
 }
 template <int KB, bool VPK, bool QK8> static void pk3_set_kv(cudaError_t& e) { pk3_set<KB, VPK, 2, true, QK8>(e); pk3_set<KB, VPK, 2, false, QK8>(e); pk3_set<KB, VPK, 3, true, QK8>(e); pk3_set<KB, VPK, 3, false, QK8>(e); }
+#if !defined(YSKN_ATXPK_MS_TU)   // (q35_atxpk_ms.cu: this would make every kernel above in that unit too)
 static void pk3_set_all(cudaError_t& e) {
   pk3_set_kv<4, true, false>(e); pk3_set_kv<4, false, false>(e); pk3_set_kv<5, true, false>(e); pk3_set_kv<5, false, false>(e);
   pk3_set_kv<4, true, true>(e); pk3_set_kv<4, false, true>(e); pk3_set_kv<5, true, true>(e); pk3_set_kv<5, false, true>(e);
   pk3_set_lut<4, true, 2>(e); pk3_set_lut<4, false, 2>(e); pk3_set_lut<4, true, 3>(e); pk3_set_lut<4, false, 3>(e); pk3_set_lut<5, true, 2>(e); pk3_set_lut<5, false, 2>(e);
 }
+#endif

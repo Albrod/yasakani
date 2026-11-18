@@ -123,6 +123,27 @@ template <class Eng> int SpecxT<Eng>::prefill(const int32_t* ids, int n) {
   int start = 0, mode = 0, lcp = 0, saved = 0, nslots = 0; double ms_snap = 0;
   std::vector<int> cuts;
   int chunk = 0;
+  if (c_.frontier) {
+    // The frontier form: the engine holds ids[0 .. n-2] (its live sequence, e.g. set by yskn_ms_unload) and ids[n-1] was emitted but
+    // not read.  Nothing is read here; generate() starts with ids[n-1] as the frontier, as the next pass of a stream that was never
+    // moved would.  A continued read (mode 1) that starts at n - 1; returns -1 (no token).
+    if constexpr (std::is_same_v<Eng, Engine35>) {
+      const std::vector<int32_t>& live = e_.snap_live();
+      if (!c_.snap || e_.has_draft() || n < 2 || !e_.snap_live_ok() || (int)live.size() != n - 1 || !std::equal(live.begin(), live.end(), ids))
+        throw std::runtime_error("specx: the frontier form needs snap = 1, no built-in draft head, and the engine holding exactly the prompt "
+                                 "without its last token as its live sequence");
+      // the last prompt token must be the frontier itself: the token the stream emitted last (kept with the live sequence).  Another
+      // token would be checked by the first pass as if the stream had emitted it, and the ids would differ without any error.
+      if (ids[n - 1] != e_.snap_front())
+        throw std::runtime_error("specx: the frontier form: the last prompt token (" + std::to_string(ids[n - 1]) + ") is not the token the "
+                                 "engine's stream emitted last (" + std::to_string(e_.snap_front()) + "); give that token as the frontier");
+      S_.assign(ids, ids + n);
+      T2_.clear(); T2m_.clear(); T3_.clear(); draft_done_ = n - 1;
+      indexed_ = 0; for (auto& m : ng_) m.clear(); recent_.clear(); stats = SpecxStats{};
+      stats.sh_mode = 1; stats.sh_start = n - 1; stats.sh_lcp = n - 1; stats.sh_slots = e_.snap_count();
+      return -1;
+    } else throw std::runtime_error("specx: the frontier form is for the qwen3_5 engine");
+  }
   if constexpr (std::is_same_v<Eng, Engine35>) {
     if (c_.snap) {
       chunk = e_.prefill_chunk();

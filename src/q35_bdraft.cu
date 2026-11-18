@@ -973,4 +973,332 @@ void launch_bdr_shead(const float* hf, const float* bt, const int8_t* a, const f
   launch_k(bdr_sk_rescore_kernel, dim3(M / 8, rows), dim3(256), 0, st, w8, ws, hf, (const int*)ci, cv, h1, h2);
   launch_k(bdr_sk_top16_kernel, dim3(rows), dim3(256), 0, st, (const float*)cv, (const int*)ci, M, val, idx);
 }
+
+// ---- multi-stream pass (experimental): the drafter kernels for the rows of several streams in one block (BdrMs / BdrMsCtx in q35.hpp).
+// Tables give, per block row, its place in its stream's block and its position, and per stream ("group") its rows, its ring and
+// where its tokens stand in the pass.  The kernels and launchers above are not changed by them.
+__global__ void __launch_bounds__(256) bdr_attn_part_ms_kernel(const float* __restrict__ q, const float* __restrict__ kb, const float* __restrict__ vb,
+                                                               float* __restrict__ part, BdrMs ms) {
+  pdl_wait(); pdl_trigger();
+  __shared__ uint32_t s_k[DCHMAX][65];
+  __shared__ __align__(16) uint16_t s_v[DCHMAX][DHD];
+  __shared__ float s_p[8][4][DCHMAX];
+  // blockIdx.z = 2 * group + half; the rows of the group are b0 .. b0 + M - 1, m below counts inside the group
+  const int gi = (int)blockIdx.z >> 1, zh = (int)blockIdx.z & 1;
+  if (gi >= ms.ng || zh * 8 >= ms.g_len[gi]) return;
+  const int b0 = ms.g_b0[gi], M = ms.g_len[gi];
+  const uint16_t* const rk = ms.rk[ms.g_slot[gi]]; const uint16_t* const rv = ms.rv[ms.g_slot[gi]];
+  q += (size_t)b0 * DNH * DHD; kb += (size_t)b0 * DNKV * DHD; vb += (size_t)b0 * DNKV * DHD;
+  const int g = blockIdx.x, s = blockIdx.y, w = threadIdx.x >> 5, lane = threadIdx.x & 31, hq = g * (DNH / DNKV) + (w >> 1), mb = (w & 1) * 4 + zh * 8,
+            p = ms.pos[b0];
+  const int k0 = max(0, p - (DWIN - 1)), nctx = p - k0;
+  const float scale = 0.08838834764831845f;
+  float o[4][4], mx[4], l[4];
+  #pragma unroll
+  for (int r = 0; r < 4; ++r) { o[r][0] = o[r][1] = o[r][2] = o[r][3] = 0.f; mx[r] = -INFINITY; l[r] = 0.f; }
+  if (s == DCTX) {
+    float qv[4][4];
+    #pragma unroll
+    for (int r = 0; r < 4; ++r) {
+      const int m = mb + r; float4 t = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (m < M) t = *reinterpret_cast<const float4*>(q + ((size_t)m * DNH + hq) * DHD + 4 * lane);
+      qv[r][0] = t.x * scale; qv[r][1] = t.y * scale; qv[r][2] = t.z * scale; qv[r][3] = t.w * scale;
+    }
+    for (int j = 0; j < M; ++j) {
+      const size_t b = ((size_t)j * DNKV + g) * DHD + 4 * lane;
+      const float4 kf = *reinterpret_cast<const float4*>(kb + b), vf = *reinterpret_cast<const float4*>(vb + b);
+      const float kk[4] = {kf.x, kf.y, kf.z, kf.w}, vv[4] = {vf.x, vf.y, vf.z, vf.w};
+      #pragma unroll
+      for (int r = 0; r < 4; ++r) {
+        float sc = fmaf(qv[r][0], kk[0], fmaf(qv[r][1], kk[1], fmaf(qv[r][2], kk[2], qv[r][3] * kk[3])));
+        #pragma unroll
+        for (int of = 16; of; of >>= 1) sc += __shfl_xor_sync(0xffffffffu, sc, of);
+        if (mb + r < M) {
+          const float mn = fmaxf(mx[r], sc), c = __expf(mx[r] - mn), e = __expf(sc - mn);
+          l[r] = fmaf(l[r], c, e);
+          #pragma unroll
+          for (int d = 0; d < 4; ++d) o[r][d] = fmaf(o[r][d], c, e * vv[d]);
+          mx[r] = mn;
+        }
+      }
+    }
+  } else {
+    const int chunk = (nctx + DCTX - 1) / DCTX, j0 = s * chunk, n = max(0, min(nctx, j0 + chunk) - j0);
+    for (int i = threadIdx.x; i < n * 16; i += 256) {
+      const int r = i >> 4, c = i & 15; const size_t src = ((size_t)g * DWIN + ((k0 + j0 + r) & (DWIN - 1))) * DHD + c * 8;
+      const uint4 k4 = *reinterpret_cast<const uint4*>(rk + src), v4 = *reinterpret_cast<const uint4*>(rv + src);
+      uint32_t* kd = &s_k[r][c * 4]; kd[0] = k4.x; kd[1] = k4.y; kd[2] = k4.z; kd[3] = k4.w;
+      *reinterpret_cast<uint4*>(&s_v[r][c * 8]) = v4;
+    }
+    __syncthreads();
+    if (n > 0) {
+      float sc[2][4];
+      #pragma unroll
+      for (int rd = 0; rd < 2; ++rd) {
+        const int j = rd * 32 + lane; float a[4] = {0.f, 0.f, 0.f, 0.f};
+        if (j < n) {
+          const uint32_t* kr = s_k[j];
+          const float2* q2[4];
+          #pragma unroll
+          for (int r = 0; r < 4; ++r) q2[r] = reinterpret_cast<const float2*>(q + ((size_t)min(mb + r, M - 1) * DNH + hq) * DHD);
+          for (int d2 = 0; d2 < DHD / 2; ++d2) {
+            const uint32_t kw = kr[d2]; const float ka = __uint_as_float(kw << 16), kc = __uint_as_float(kw & 0xffff0000u);
+            #pragma unroll
+            for (int r = 0; r < 4; ++r) { const float2 qq = __ldg(q2[r] + d2); a[r] = fmaf(qq.y, kc, fmaf(qq.x, ka, a[r])); }
+          }
+        }
+        #pragma unroll
+        for (int r = 0; r < 4; ++r) {
+          const int m = mb + r;
+          sc[rd][r] = (j < n && m < M && k0 + j0 + j >= p + m - (DWIN - 1)) ? a[r] * scale : -INFINITY;
+        }
+      }
+      #pragma unroll
+      for (int r = 0; r < 4; ++r) {
+        float mm = fmaxf(sc[0][r], sc[1][r]);
+        #pragma unroll
+        for (int of = 16; of; of >>= 1) mm = fmaxf(mm, __shfl_xor_sync(0xffffffffu, mm, of));
+        float e0 = 0.f, e1 = 0.f;
+        if (mm != -INFINITY) { e0 = sc[0][r] == -INFINITY ? 0.f : __expf(sc[0][r] - mm); e1 = sc[1][r] == -INFINITY ? 0.f : __expf(sc[1][r] - mm); }
+        if (lane < n) s_p[w][r][lane] = e0;
+        if (32 + lane < n) s_p[w][r][32 + lane] = e1;
+        float sm = e0 + e1;
+        #pragma unroll
+        for (int of = 16; of; of >>= 1) sm += __shfl_xor_sync(0xffffffffu, sm, of);
+        mx[r] = mm; l[r] = sm;
+      }
+      __syncwarp();
+      for (int j = 0; j < n; ++j) {
+        const uint2 vw = *reinterpret_cast<const uint2*>(&s_v[j][4 * lane]);
+        const float vv[4] = {__uint_as_float(vw.x << 16), __uint_as_float(vw.x & 0xffff0000u), __uint_as_float(vw.y << 16), __uint_as_float(vw.y & 0xffff0000u)};
+        #pragma unroll
+        for (int r = 0; r < 4; ++r) { const float pj = s_p[w][r][j];
+          #pragma unroll
+          for (int d = 0; d < 4; ++d) o[r][d] = fmaf(pj, vv[d], o[r][d]); }
+      }
+    }
+  }
+  #pragma unroll
+  for (int r = 0; r < 4; ++r) {
+    const int m = mb + r; if (m >= M) continue;
+    float* pp = part + (((size_t)s * DNH + hq) * BDR_B + b0 + m) * DPART;
+    if (lane == 0) { pp[0] = mx[r]; pp[1] = l[r]; }
+    *reinterpret_cast<float4*>(pp + 4 + 4 * lane) = make_float4(o[r][0], o[r][1], o[r][2], o[r][3]);
+  }
+}
+
+__global__ void bdr_block_ids_ms_kernel(const int* __restrict__ toks, int mask, int* __restrict__ ids, int M, BdrMs ms) {
+  pdl_wait(); pdl_trigger();
+  const int r = threadIdx.x;
+  if (r < M) ids[r] = ms.tl[r] == 0 ? toks[ms.g_tok[ms.grp[r]]] : mask;   // a stream's first block row: its last token
+}
+
+__global__ void __launch_bounds__(32 * DTOPK) bdr_select3_ms_kernel(const float* __restrict__ hp, const float* __restrict__ val, const int* __restrict__ idx,
+                                                                    const uint16_t* __restrict__ pc, const uint16_t* __restrict__ sc, int* __restrict__ toks,
+                                                                    const Q35SmpParams* __restrict__ prm, const int* __restrict__ gcpl, BdrMs ms) {
+  pdl_wait(); pdl_trigger();
+  int* const out = nullptr; int* const alt = nullptr; float* const marg = nullptr; int* const alt3 = nullptr;   // the streams keep no alternatives
+  // this CTA is the chain of group blockIdx.x: its rows of the draft arrays, its tokens in the pass, its position, its seed and its
+  // draft temperature (gcpl, per group: what bdr_select3_kernel reads from *cpl for one stream)
+  const int gi = (int)blockIdx.x, nj = ms.g_len[gi] - 1, d0 = ms.g_d0[gi];
+  if (nj <= 0) return;
+  hp += (size_t)d0 * DRANK; val += (size_t)d0 * DTOPK; idx += (size_t)d0 * DTOPK;
+  toks += ms.g_tok[gi];
+  const long long p0 = (long long)ms.pos[ms.g_b0[gi]];
+  const unsigned long long seed = ms.g_seed[gi];
+  __shared__ float s_a[DRANK]; __shared__ float s_score[DTOPK]; __shared__ int s_pred;
+  __shared__ double s_g[BDR_J][DTOPK], s_z[DTOPK], s_e[DTOPK], s_val[DTOPK], s_pre[DTOPK + 1]; __shared__ int s_ord[DTOPK];
+  const int w = threadIdx.x >> 5, lane = threadIdx.x & 31, cp = gcpl[gi];
+  for (int q = threadIdx.x; q < ((2 * nj - 1) * DTOPK + 1) * (DRANK * 2 / 128); q += blockDim.x) {
+    const int row = q / (DRANK * 2 / 128), part = q % (DRANK * 2 / 128);
+    const uint16_t* b = row < nj * DTOPK ? sc + (size_t)idx[row] * DRANK : pc + (size_t)(row == nj * DTOPK ? toks[0] : idx[row - nj * DTOPK - 1]) * DRANK;
+    asm volatile("prefetch.global.L1 [%0];" :: "l"(b + part * 64)); }
+  if (threadIdx.x == 0) s_pred = toks[0];
+  if (cp > 0 && threadIdx.x < nj * DTOPK) {
+    const int jj = threadIdx.x / DTOPK; s_g[jj][threadIdx.x % DTOPK] = kh_gumbel(seed, p0 + 1 + jj, idx[threadIdx.x], prm->pm); }
+  __syncthreads();
+  const double td = 1e-3 * cp;
+  for (int j = 0; j < nj; ++j) {
+    if (threadIdx.x < DRANK) s_a[threadIdx.x] = bf2f(pc[(size_t)s_pred * DRANK + threadIdx.x]) * hp[(size_t)j * DRANK + threadIdx.x];
+    __syncthreads();
+    { const uint16_t* scr = sc + (size_t)idx[j * DTOPK + w] * DRANK; float sm = 0.f;
+      for (int r = lane; r < DRANK; r += 32) sm = fmaf(s_a[r], bf2f(scr[r]), sm);
+      for (int o = 16; o; o >>= 1) sm += __shfl_xor_sync(0xffffffffu, sm, o);
+      if (lane == 0) s_score[w] = val[j * DTOPK + w] + sm; }
+    __syncthreads();
+    if (w == 0) {
+      const bool in = lane < DTOPK;
+      const float sl = in ? s_score[lane] : -INFINITY; const int il = in ? idx[j * DTOPK + lane] : 0x7fffffff;
+      float bv0 = sl; int b = in ? lane : 99; dsel_first(bv0, b);
+      int b2 = -1, b3 = -1; double v2d = -INFINITY, v3d = -INFINITY; float v2f = -INFINITY;
+      if (cp > 0) {
+        int rk = 0;
+        #pragma unroll
+        for (int k = 0; k < DTOPK; ++k) { const float sk = s_score[k]; const int ik = __shfl_sync(0xffffffffu, il, k);
+                                          rk += (sk > sl || (sk == sl && ik < il)) ? 1 : 0; }
+        if (in) s_ord[rk] = lane;
+        __syncwarp();
+        const int top = s_ord[0];
+        if (in) { const double z = ((double)sl - (double)s_score[top]) / td; s_z[lane] = z; s_e[lane] = exp(z); }
+        __syncwarp();
+        if (lane == 0) { double tot = 0.0; for (int i = 0; i < DTOPK; ++i) { s_pre[i] = tot; tot += s_e[s_ord[i]]; } s_pre[DTOPK] = tot; }
+        __syncwarp();
+        if (in) s_val[lane] = s_pre[rk] < 0.95 * s_pre[DTOPK] ? s_z[lane] + s_g[j][lane] : -INFINITY;
+        __syncwarp();
+        const int c = in ? s_ord[lane] : 0;
+        double v = in ? s_val[c] : -INFINITY; int k = in ? lane : 99; dsel_first(v, k);
+        if (v > -INFINITY) b = __shfl_sync(0xffffffffu, c, k);
+        if (alt) {
+          v = (in && c != b) ? s_val[c] : -INFINITY; k = in ? lane : 99; dsel_first(v, k);
+          if (v > -INFINITY) { b2 = __shfl_sync(0xffffffffu, c, k); v2d = v; }
+          v = (in && c != b && c != b2) ? s_val[c] : -INFINITY; k = in ? lane : 99; dsel_first(v, k);
+          if (v > -INFINITY) { b3 = __shfl_sync(0xffffffffu, c, k); v3d = v; }
+        }
+      } else if (alt) {
+        float v = (in && lane != b) ? sl : -INFINITY; int k = in ? lane : 99; dsel_first(v, k);
+        if (v > -INFINITY) { b2 = k; v2f = v; }
+        v = (in && lane != b && lane != b2) ? sl : -INFINITY; k = in ? lane : 99; dsel_first(v, k);
+        if (v > -INFINITY) b3 = k;
+      }
+      if (lane == 0) {
+        const int t = idx[j * DTOPK + b]; s_pred = t; toks[1 + j] = t; if (out) out[j] = t;
+        if (alt) {
+          if (cp > 0) { const bool ok = b2 >= 0 && v2d > -INFINITY; alt[j] = ok ? idx[j * DTOPK + b2] : -1; marg[j] = ok ? (float)(s_val[b] - v2d) : 1e30f;
+                        if (alt3) alt3[j] = ok && b3 >= 0 && v3d > -INFINITY ? idx[j * DTOPK + b3] : -1; }
+          else { alt[j] = b2 >= 0 ? idx[j * DTOPK + b2] : -1; marg[j] = b2 >= 0 ? s_score[b] - v2f : 1e30f;
+                 if (alt3) alt3[j] = b2 >= 0 && b3 >= 0 ? idx[j * DTOPK + b3] : -1; }
+        }
+      }
+    }
+    __syncthreads();
+  }
+}
+
+__global__ void __launch_bounds__(512) bdr_a8n_rows_kernel(const float* __restrict__ x, int ld, int n, float eps, const uint16_t* __restrict__ w,
+                                                      const int8_t* __restrict__ signs, float* __restrict__ xn, int8_t* __restrict__ qx, float* __restrict__ alpha,
+                                                           const int* __restrict__ rowmap) {
+  pdl_wait(); pdl_trigger();
+  __shared__ float buf[512]; __shared__ unsigned s_amax; __shared__ float sh[8];
+  const int g = blockIdx.x, m = blockIdx.y, i = g * 512 + threadIdx.x, G = n / 512;
+  const int src = rowmap[m];                                              // the row of x this output row is made from
+  const float r = bdr_row_r(x + (size_t)src * ld, n, eps, sh);
+  const float v = r * x[(size_t)src * ld + i] * bf2f(w[i]);
+  if (xn) xn[(size_t)m * n + i] = v;
+  if (threadIdx.x == 0) s_amax = 0u;
+  buf[threadIdx.x] = v * (float)signs[i];
+  __syncthreads();
+  a8_group512_tail(buf, &s_amax, qx + (size_t)m * n + g * 512, alpha + (size_t)m * G + g);
+}
+
+__global__ void __launch_bounds__(512) bdr_a8_cap_rows_kernel(const float* __restrict__ cap, int pmax, const int* __restrict__ rows, const int8_t* __restrict__ signs,
+                                                         int8_t* __restrict__ qx, float* __restrict__ alpha) {
+  pdl_wait(); pdl_trigger();
+  __shared__ float buf[512]; __shared__ unsigned s_amax;
+  const int g = blockIdx.x, m = blockIdx.y, i = g * 512 + threadIdx.x;
+  const float v = cap[((size_t)(g / 10) * pmax + rows[m]) * DH + (g % 10) * 512 + threadIdx.x];
+  if (threadIdx.x == 0) s_amax = 0u;
+  buf[threadIdx.x] = v * (float)signs[i];
+  __syncthreads();
+  a8_group512_tail(buf, &s_amax, qx + (size_t)m * (5 * DH) + g * 512, alpha + (size_t)m * 50 + g);
+}
+
+__global__ void __launch_bounds__(512) bdr_dynconv_a8_ms_kernel(long long* __restrict__ acc, const float* __restrict__ us, const float* __restrict__ tau,
+                                                             float* __restrict__ dyn, const float* __restrict__ x, const uint16_t* __restrict__ base,
+                                                             const int8_t* __restrict__ signs, int8_t* __restrict__ qx, float* __restrict__ alpha,
+                                                                const int* __restrict__ tl) {
+  pdl_wait(); pdl_trigger();
+  __shared__ float buf[512]; __shared__ unsigned s_amax; __shared__ float sd[4][32];
+  const int c = blockIdx.x, m = blockIdx.y, t = threadIdx.x, j = c * 512 + t;
+  if (t < 128) {
+    const int idx = (t >> 6) * 640 + ((t >> 5) & 1) * 320 + c * 32 + (t & 31);
+    long long* p = acc + (size_t)m * 1280 + idx; const float y = bdr_y(p, us[m], tau[idx]); *p = 0;
+    dyn[(size_t)m * 1280 + idx] = y; sd[t >> 5][t & 31] = y;
+  }
+  if (t == 0) s_amax = 0u;
+  __syncthreads();
+  const int gg = t >> 4;
+  float v = (bf2f(base[j]) + sd[0][gg]) * x[(size_t)m * DH + j];
+  if (m > 0 && tl[m] > 0) v += (bf2f(base[DH + j]) + sd[1][gg]) * x[(size_t)(m - 1) * DH + j];   // the row before, in the same stream
+  buf[t] = v * (float)signs[j];
+  __syncthreads();
+  a8_group512_tail(buf, &s_amax, qx + (size_t)m * DH + c * 512, alpha + (size_t)m * (DH / 512) + c);
+}
+
+__global__ void __launch_bounds__(128) bdr_qkv_post_ms_kernel(long long* __restrict__ aq, long long* __restrict__ ak, long long* __restrict__ av, const float* __restrict__ us,
+                                                           const float* __restrict__ tq, const float* __restrict__ tk, const float* __restrict__ tv,
+                                                           const uint16_t* __restrict__ qn, const uint16_t* __restrict__ kn, const int* __restrict__ rpos, float eps,
+                                                           float* __restrict__ yq, float* __restrict__ yk, float* __restrict__ yv) {
+  pdl_wait(); pdl_trigger();
+  __shared__ float sh[4]; __shared__ float v[DHD];
+  const int m = blockIdx.x, h = blockIdx.y, d = threadIdx.x;
+  if (h >= DNH + DNKV) {
+    const int r = (h - DNH - DNKV) * DHD + d; long long* p = av + (size_t)m * (DNKV * DHD) + r;
+    yv[(size_t)m * (DNKV * DHD) + r] = bdr_y(p, us[m], tv[r]); *p = 0; return;
+  }
+  const bool isq = h < DNH; const int N = isq ? DNH * DHD : DNKV * DHD, r = (isq ? h : h - DNH) * DHD + d;
+  long long* p = (isq ? aq : ak) + (size_t)m * N + r;
+  const float x = bdr_y(p, us[m], (isq ? tq : tk)[r]); *p = 0;
+  (isq ? yq : yk)[(size_t)m * N + r] = bdr_norm_rope(x, isq ? qn : kn, (float)rpos[m], eps, sh, v);
+}
+
+__global__ void __launch_bounds__(128) bdr_kv_ring_ms_kernel(long long* __restrict__ ak, long long* __restrict__ av, const float* __restrict__ us,
+                                                          const float* __restrict__ tk, const float* __restrict__ tv, const uint16_t* __restrict__ kn,
+                                                          float eps, BdrMsCtx ms) {
+  pdl_wait(); pdl_trigger();
+  __shared__ float sh[4]; __shared__ float v[DHD];
+  const int m = blockIdx.x, h = blockIdx.y & 7, d = threadIdx.x, r = h * DHD + d, pm = ms.pos[m];   // the row's position and stream
+  uint16_t* const rk = ms.rk[ms.slot[m]]; uint16_t* const rv = ms.rv[ms.slot[m]];
+  const size_t o = ((size_t)h * DWIN + (pm & (DWIN - 1))) * DHD + d;
+  if (blockIdx.y >= 8) { long long* p = av + (size_t)m * (DNKV * DHD) + r; rv[o] = f2bf(bdr_y(p, us[m], tv[r])); *p = 0; return; }
+  long long* p = ak + (size_t)m * (DNKV * DHD) + r;
+  const float x = bdr_y(p, us[m], tk[r]); *p = 0;
+  rk[o] = f2bf(bdr_norm_rope(x, kn, (float)pm, eps, sh, v));
+}
+
+__global__ void __launch_bounds__(128) bdr_post_conv_res_ms_kernel(long long* __restrict__ acc, const float* __restrict__ us, const float* __restrict__ tau,
+                                                                const float* __restrict__ dyn, const uint16_t* __restrict__ base, int M, float* __restrict__ h,
+                                                                   const int* __restrict__ tl) {
+  pdl_wait(); pdl_trigger();
+  const int j = blockIdx.x * 128 + threadIdx.x, g = j >> 4;
+  const float tj = tau[j], b0 = bf2f(base[j]), b1 = bf2f(base[DH + j]);
+  float y[BDR_B], d0[BDR_B], d1[BDR_B], hv[BDR_B];
+  #pragma unroll
+  for (int m = 0; m < BDR_B; ++m) if (m < M) {
+    long long* p = acc + (size_t)m * DH + j; y[m] = bdr_y(p, us[m], tj); *p = 0;
+    d0[m] = dyn[(size_t)m * 1280 + 640 + g]; d1[m] = dyn[(size_t)m * 1280 + 960 + g]; hv[m] = h[(size_t)m * DH + j];
+  }
+  #pragma unroll
+  for (int m = 0; m < BDR_B; ++m) if (m < M) {
+    float v = (b0 + d0[m]) * y[m];
+    if (m > 0 && tl[m] > 0) v += (b1 + d1[m]) * y[m - 1];   // the row before, in the same stream
+    h[(size_t)m * DH + j] = hv[m] + v;
+  }
+}
+
+void launch_bdr_block_ids_ms(const int* toks, int mask, int* ids, int M, const BdrMs& ms, cudaStream_t st) {
+  launch_k(bdr_block_ids_ms_kernel, dim3(1), dim3(32), 0, st, toks, mask, ids, M, ms); }
+void launch_bdr_a8n_rows(const float* x, int ld, int n, float eps, const uint16_t* w, const int8_t* signs, float* xn, int8_t* qx, float* alpha, int M,
+                         const int* rowmap, cudaStream_t st) {
+  launch_k(bdr_a8n_rows_kernel, dim3(n / 512, M), dim3(512), 0, st, x, ld, n, eps, w, signs, xn, qx, alpha, rowmap); }
+void launch_bdr_a8_cap_rows(const float* cap, int pmax, const int* rows, const int8_t* signs, int8_t* qx, float* alpha, int M, cudaStream_t st) {
+  launch_k(bdr_a8_cap_rows_kernel, dim3(50, M), dim3(512), 0, st, cap, pmax, rows, signs, qx, alpha); }
+void launch_bdr_dynconv_a8_ms(long long* acc, const float* us, const float* tau, float* dyn, const float* x, const uint16_t* base, const int8_t* signs, int8_t* qx,
+                              float* alpha, int M, const int* tl, cudaStream_t st) {
+  launch_k(bdr_dynconv_a8_ms_kernel, dim3(DH / 512, M), dim3(512), 0, st, acc, us, tau, dyn, x, base, signs, qx, alpha, tl); }
+void launch_bdr_qkv_post_ms(long long* aq, long long* ak, long long* av, const float* us, const float* tq, const float* tk, const float* tv, const uint16_t* qn,
+                            const uint16_t* kn, const int* rpos, float eps, float* yq, float* yk, float* yv, int M, cudaStream_t st) {
+  launch_k(bdr_qkv_post_ms_kernel, dim3(M, DNH + 2 * DNKV), dim3(DHD), 0, st, aq, ak, av, us, tq, tk, tv, qn, kn, rpos, eps, yq, yk, yv); }
+void launch_bdr_kv_ring_ms(long long* ak, long long* av, const float* us, const float* tk, const float* tv, const uint16_t* kn, float eps, int M,
+                           const BdrMsCtx& ms, cudaStream_t st) {
+  launch_k(bdr_kv_ring_ms_kernel, dim3(M, 2 * DNKV), dim3(DHD), 0, st, ak, av, us, tk, tv, kn, eps, ms); }
+void launch_bdr_attn_part_ms(const float* q, const float* kb, const float* vb, float* part, const BdrMs& ms, cudaStream_t st) {
+  if (ms.ng < 1) return;
+  launch_k(bdr_attn_part_ms_kernel, dim3(DNKV, DSPLIT, 2 * ms.ng), dim3(256), 0, st, q, kb, vb, part, ms); }
+void launch_bdr_post_conv_res_ms(long long* acc, const float* us, const float* tau, const float* dyn, const uint16_t* base, int M, float* h, const int* tl, cudaStream_t st) {
+  if (M > BDR_B) throw std::runtime_error("bdraft: post_conv_res takes <= BDR_B rows");
+  launch_k(bdr_post_conv_res_ms_kernel, dim3(DH / 128), dim3(128), 0, st, acc, us, tau, dyn, base, M, h, tl); }
+void launch_bdr_select_ms(const float* hp, const float* val, const int* idx, const uint16_t* pc, const uint16_t* sc, int* toks, const Q35SmpParams* prm, const int* gcpl,
+                          const BdrMs& ms, cudaStream_t st) {
+  if (ms.ng < 1) return;
+  launch_k(bdr_select3_ms_kernel, dim3(ms.ng), dim3(32 * DTOPK), 0, st, hp, val, idx, pc, sc, toks, prm, gcpl, ms); }
 } 

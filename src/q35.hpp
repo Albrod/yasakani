@@ -25,6 +25,14 @@ struct Q35Xsm { const float* us = nullptr; const float* S = nullptr; float eps =
 
 
 struct Q35Pf { const void* p[2] = {nullptr, nullptr}; unsigned long long n[2] = {0ull, 0ull}; };
+// multi-stream pass (experimental): rows of several streams in one pass.  The rows of a stream are next to each other: its last token
+// first, draft tokens after it.  Per row r: pos[r] = absolute position of the row in its stream, slot[r] = index of that stream in
+// the per-layer pointer tables, tl[r] = index of the row among the rows of its stream in this pass (0 = first), len[r] = number of
+// rows of the stream in this pass (set on its first row, 0 on the others), pend0[r] / pendn[r] (first row only) = the rows of the
+// previous pass that the stream accepted and that its recurrent state does not hold yet (first row index in that pass, count).
+// A multi-stream pass runs its own kernels (the *_ms launchers); the argument structs of the single-request kernels carry none of this.
+struct Q35MsRows { const int* pos = nullptr; const int* slot = nullptr; const int* tl = nullptr; const int* len = nullptr;
+                   const int* pend0 = nullptr; const int* pendn = nullptr; };
 
 
 void launch_l2pf(const Q35Pf& f, cudaStream_t st);
@@ -62,6 +70,9 @@ void launch_q35_mix(const Q35MixArgs&, cudaStream_t);
 struct Q35ConvArgs { const uint16_t* mixed; const uint16_t* conv_w; uint16_t* hist; const float* ab; const uint16_t* A_log;
                      const uint16_t* dt_bias; int M; int n_commit; float* q; float* k; float* v; float* beta; float* g; };
 void launch_q35_conv(const Q35ConvArgs&, cudaStream_t);
+// multi-stream pass (at most 16 rows): hist[slot] = the conv history of this layer for each stream
+struct Q35ConvMs { Q35MsRows ms; uint16_t* const* hist = nullptr; };
+void launch_q35_conv_ms(const Q35ConvArgs&, const Q35ConvMs&, cudaStream_t);
 
 
 
@@ -69,6 +80,15 @@ struct Q35StateArgs { const float *q, *k, *v, *beta, *g; float* S; int M; int n_
 void launch_q35_capture_a8(const float*,int,int,int,const int8_t*,int8_t*,float*,int,cudaStream_t);
 void launch_q35_state_nb(const Q35StateArgs&, cudaStream_t);
 void launch_q35_state(const Q35StateArgs&, cudaStream_t);
+// multi-stream pass (at most 16 rows): S[slot] / hist[slot] = the recurrent state and the conv history of this layer for each stream;
+// pk / pv / pbeta / pg = the kept conv outputs of the previous pass (the rows a stream accepted there go into its state first)
+struct Q35StateMs { Q35MsRows ms; float* const* S = nullptr; uint16_t* const* hist = nullptr;
+                    const float *pk = nullptr, *pv = nullptr, *pbeta = nullptr, *pg = nullptr; };
+void launch_q35_state_ms(const Q35StateArgs&, const Q35StateMs&, cudaStream_t);
+// multi-stream pass: store the history of rows a stream accepted after the pass.  mixed[l] = the mixed rows of the last pass of
+// recurrent layer l, hist[l][slot] = history of that layer for the stream, grp = (slot, first row, rows) per group.
+struct Q35MsHistArgs { const uint16_t* const* mixed; uint16_t* const* const* hist; const int* grp; int layers; int groups; };
+void launch_q35_ms_hist(const Q35MsHistArgs&, cudaStream_t);
 
 struct Q35GdnOutArgs { const float* core; const float* z; const uint16_t* gw; float eps; int M; const int8_t* sg_in; int8_t* qx; float* alpha; int lo = 0; };
 void launch_q35_gdn_out(const Q35GdnOutArgs&, cudaStream_t);
@@ -84,6 +104,12 @@ struct Q35AttnPostArgs { const float *part_q, *part_k, *part_v; const float *tau
                          int kstg = 0, vstg = 0; int pks = 128; uint8_t* kp = nullptr; uint8_t* vp = nullptr; float* kps = nullptr; float* vps = nullptr; };   
 void launch_q35_attn_post(const Q35AttnPostArgs&, cudaStream_t);
 void launch_tb_requant(const Q35AttnPostArgs&, cudaStream_t);   
+// multi-stream pass (at most 16 rows): the KV containers of each stream (by slot); the rows of a staged (packed) layer go through
+// the shared staging rows as in a single-request pass
+struct Q35AttnPostMs { Q35MsRows ms; int8_t* const* k8 = nullptr; float* const* ks = nullptr; int8_t* const* v8 = nullptr; float* const* vs = nullptr;
+                       uint8_t* const* kp = nullptr; float* const* kps = nullptr; uint8_t* const* vp = nullptr; float* const* vps = nullptr; };
+void launch_q35_attn_post_ms(const Q35AttnPostArgs&, const Q35AttnPostMs&, cudaStream_t);
+void launch_tb_requant_ms(const Q35AttnPostArgs&, const Q35AttnPostMs&, cudaStream_t);
 void launch_q35_rope_table(float2* out, int max_ctx, cudaStream_t, int pm = 0);   
 void launch_q35_visual_rope(float2* out, int max_ctx, const int* positions, int n, int delta, cudaStream_t, int pm);
 void launch_q35_visual_embed(uint16_t* rows, const uint16_t* table, const int* ids,
@@ -120,11 +146,15 @@ struct Q35SmpArgs { const float* logits; int V; int rows; int row0; int* d_tok_o
                      float* topk_val = nullptr; int* topk_idx = nullptr; };   
 void launch_q35_smp(const Q35SmpArgs&, cudaStream_t);
 bool q35_smp2_on();   
+// multi-stream pass: pos[r] = the position of row r in its stream, prm[r] = the sampling of that stream (temp 0: the row keeps the
+// argmax that d_tok_out holds); Q35SmpArgs::prm is not read
+void launch_q35_smp_ms(const Q35SmpArgs&, const int* pos, const Q35SmpParams* prm, cudaStream_t);
 
 struct Q35CombineArgs { const float* pm; const float* pl; const float* pacc; int splits; int M; const uint16_t* gate16;
                         const int8_t* sg_in; int8_t* qx; float* alpha;
                         const int* d_pos = nullptr; const uint8_t* wk = nullptr; int splits_short = 0, long_len = 0; int lo = 0; };   
 void launch_q35_combine(const Q35CombineArgs&, cudaStream_t);
+void launch_q35_combine_ms(const Q35CombineArgs&, const int* pos, cudaStream_t);   // multi-stream pass: pos[r] = the position of row r
 
 
 void launch_q35_kz(const Q35AttnArgs&, const uint8_t* wk, cudaStream_t);
@@ -175,6 +205,27 @@ struct Q35ChkArgs { const unsigned long long* acc; const int8_t* qx; const float
 void launch_q35_chk(const Q35ChkArgs&, int M, cudaStream_t);
 void launch_q35_chk_fault(unsigned long long* acc, int kind, int row, int bit, cudaStream_t);
 
+// drafter rows of several streams in one block (multi-stream pass)
+struct BdrMs {
+  const int* tl = nullptr;      // per block row: its index in its stream's block (0 = the stream's last token)
+  const int* pos = nullptr;     // per block row: its position in its stream
+  const int* grp = nullptr;     // per block row: its group (a stream of this block)
+  const int* g_b0 = nullptr;    // per group: its first block row
+  const int* g_len = nullptr;   // per group: its rows
+  const int* g_slot = nullptr;  // per group: its stream slot (index into the ring tables)
+  const int* g_tok = nullptr;   // per group: the index of its first row in the token array of the pass
+  const int* g_d0 = nullptr;    // per group: its first row in the draft-row arrays
+  const int* d_row = nullptr;   // per draft row: its block row
+  const unsigned long long* g_seed = nullptr;   // per group: the sampling seed of the stream
+  int ng = 0;
+  uint16_t* const* rk = nullptr; uint16_t* const* rv = nullptr;   // per stream slot: the ring of the layer
+};
+struct BdrMsCtx {                // context rows of several streams
+  const int* row = nullptr;     // per context row: its row in the capture of the last pass
+  const int* pos = nullptr;     // per context row: its position in its stream
+  const int* slot = nullptr;    // per context row: its stream slot
+  uint16_t* const* rk = nullptr; uint16_t* const* rv = nullptr;
+};
 void launch_bdr_rownorm(const float* x, int n, int ld, float eps, float* r, int M, cudaStream_t);
 void launch_bdr_a8(const float* x, int ld, int n, const float* r, const uint16_t* w, const int8_t* signs, float* xn, int8_t* qx, float* alpha, int M, cudaStream_t);
 void launch_bdr_post(long long* acc, const float* us, const float* tau, int N, float* y, int ldy, int M, cudaStream_t);
@@ -206,6 +257,21 @@ void launch_bdr_hproj(const float* hf, const uint16_t* w, float* hp, int rows, c
 void launch_bdr_select(const float* hp, const float* val, const int* idx, const uint16_t* pc, const uint16_t* sc, int* toks, int* out,
                        const Q35SmpParams* prm, const int* cpl, const int* pos, int nj, cudaStream_t, int* alt = nullptr, float* marg = nullptr, int* alt3 = nullptr);   
 void launch_bdr_hcap(int* toks, const int* alt, const int* alt3, const float* marg, const float* tab, uint8_t* wk, int* cfg, const int* cpl, const int* go, cudaStream_t);
+// the drafter kernels of a multi-stream block (BdrMs / BdrMsCtx above); the single-stream launchers above are not changed by them
+void launch_bdr_block_ids_ms(const int* toks, int mask, int* ids, int M, const BdrMs& ms, cudaStream_t);
+void launch_bdr_a8n_rows(const float* x, int ld, int n, float eps, const uint16_t* w, const int8_t* signs, float* xn, int8_t* qx, float* alpha, int M,
+                         const int* rowmap, cudaStream_t);   // output row m is made from row rowmap[m] of x
+void launch_bdr_a8_cap_rows(const float* cap, int pmax, const int* rows, const int8_t* signs, int8_t* qx, float* alpha, int M, cudaStream_t);   // capture rows rows[m]
+void launch_bdr_dynconv_a8_ms(long long* acc, const float* us, const float* tau, float* dyn, const float* x, const uint16_t* base, const int8_t* signs, int8_t* qx,
+                              float* alpha, int M, const int* tl, cudaStream_t);
+void launch_bdr_qkv_post_ms(long long* aq, long long* ak, long long* av, const float* us, const float* tq, const float* tk, const float* tv, const uint16_t* qn,
+                            const uint16_t* kn, const int* rpos, float eps, float* yq, float* yk, float* yv, int M, cudaStream_t);   // rpos[m] = position of row m
+void launch_bdr_kv_ring_ms(long long* ak, long long* av, const float* us, const float* tk, const float* tv, const uint16_t* kn, float eps, int M,
+                           const BdrMsCtx& ms, cudaStream_t);
+void launch_bdr_attn_part_ms(const float* q, const float* kb, const float* vb, float* part, const BdrMs& ms, cudaStream_t);
+void launch_bdr_post_conv_res_ms(long long* acc, const float* us, const float* tau, const float* dyn, const uint16_t* base, int M, float* h, const int* tl, cudaStream_t);
+void launch_bdr_select_ms(const float* hp, const float* val, const int* idx, const uint16_t* pc, const uint16_t* sc, int* toks, const Q35SmpParams* prm, const int* gcpl,
+                          const BdrMs& ms, cudaStream_t);   // gcpl[g] = the draft temperature of group g (-1: greedy drafts); prm: pm only
 
 
 

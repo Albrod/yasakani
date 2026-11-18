@@ -677,6 +677,7 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk_vsp_kernel(Q35AtxP
 }
 
 #include "q35_atxpk3.cuh"
+#if !defined(YSKN_ATXPK_MS_TU)   // q35_atxpk_ms.cu includes this file for the kernel helpers above, not for what follows
 #include "q35_atxpk4.cuh"
 constexpr size_t PK_SMEM(int ns) { return (size_t)2 * PK_KT * PK_LD * 2 + (size_t)ns * 2 * PK_KT * Q35_HD + (size_t)ns * 2 * PK_KT * 4 + 2 * 512 + 1024; }
 static int pk_ns_env() { static const int v = [] { const char* e = std::getenv("YSKN_ATX_NS"); const int n = e ? std::atoi(e) : 2; return n >= 2 && n <= 3 ? n : 2; }(); return v; }
@@ -740,4 +741,5 @@ void launch_q35_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs&
   if (P.kb == 4) { if (P.vp) pk_vsp_go<4, true>(U, st); else pk_vsp_go<4, false>(U, st); }
   else           { if (P.vp) pk_vsp_go<5, true>(U, st); else pk_vsp_go<5, false>(U, st); }
 }
+#endif
 }  

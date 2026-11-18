@@ -35,6 +35,11 @@ struct TbFastArgs {
   int k3_only = 0, vit2_off = 0, stage = 3;
 };
 void launch_tb_fast(const TbFastArgs&, cudaStream_t);           
+// multi-stream pass (experimental): per token tok of the pass, its position pos[tok] and stream slot[tok]; the containers of every stream
+struct TbFastMs { const int* pos = nullptr; const int* slot = nullptr;
+                  int8_t* const* q8_0 = nullptr; int8_t* const* q8_1 = nullptr; float* const* qs_0 = nullptr; float* const* qs_1 = nullptr;
+                  unsigned char* const* pay0 = nullptr; unsigned char* const* pay1 = nullptr; float* const* scl0 = nullptr; float* const* scl1 = nullptr; };
+void launch_tb_fast_ms(const TbFastArgs&, const TbFastMs&, cudaStream_t);
 
 
 struct TbHost { int nm = 0; int has_cdq = 0; unsigned char* scr = nullptr; };

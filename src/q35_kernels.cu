@@ -1580,5 +1580,311 @@ void launch_q35_embed(const Q35EmbArgs& A, int M, cudaStream_t st) {
   launch_k(q35_embed_blk_kernel, dim3(Q35_H / 512, M), dim3(256), 0, st, A); }
 __global__ void q35_pos_slices_kernel(const int* base, int* out, int n, int step) { pdl_wait(); pdl_trigger(); const int i = threadIdx.x; if (i < n) out[i] = *base + i * step; }
 void launch_q35_pos_slices(const int* base, int* out, int n, int step, cudaStream_t st) { launch_k(q35_pos_slices_kernel, dim3(1), dim3(64), 0, st, base, out, n, step); }
+
+// ---- multi-stream pass (experimental) ------------------------------------------------------------------------------------------
+// Separate kernels for a pass that carries the rows of several streams (requests): the containers that hold a stream's state (the
+// recurrent state, the conv history, the KV rows) come from per-slot tables, the positions from per-row tables.  The single-request
+// kernels above are not changed by them.  A multi-stream pass has at most 16 rows.
+__global__ void __launch_bounds__(128) q35_conv_ms_kernel(Q35ConvArgs A, Q35ConvMs X) {
+  __shared__ float s_red[4];
+  const int slot = blockIdx.x, t = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int kind = slot < Q35_GK ? 0 : (slot < 2 * Q35_GK ? 1 : 2);
+  const int head = kind == 0 ? slot : (kind == 1 ? slot - Q35_GK : slot - 2 * Q35_GK);
+  const int c = (kind == 0 ? 0 : (kind == 1 ? Q35_GK * Q35_GD : 2 * Q35_GK * Q35_GD)) + head * Q35_GD + tid;
+  const uint16_t cw0 = A.conv_w[c * 4], cw1 = A.conv_w[c * 4 + 1], cw2 = A.conv_w[c * 4 + 2], cw3 = A.conv_w[c * 4 + 3];
+  const uint16_t* const hist = X.hist[X.ms.slot[t]];                       // row t is row tl of its own stream in this pass
+  const int tl = X.ms.tl[t];
+  uint16_t hv[3] = {0, 0, 0};
+  #pragma unroll
+  for (int k = 0; k < 3; ++k) if (tl - 3 + k < 0) hv[k] = __ldcg(hist + (size_t)(tl + k) * Q35_CONV + c);
+  uint16_t c_dt = 0, c_al = 0;
+  if (kind == 2 && tid == 0) { c_dt = A.dt_bias[head]; c_al = A.A_log[head]; }
+  pdl_wait(); pdl_trigger();
+  const float w0 = bf2f(cw0), w1 = bf2f(cw1), w2 = bf2f(cw2), w3 = bf2f(cw3);
+  auto xin = [&](int r) { return r >= 0 ? bf2f(A.mixed[(size_t)(t - tl + r) * Q35_CONV + c]) : bf2f(hv[r - tl + 3]); };
+  const float s1 = xin(tl - 3), s2 = xin(tl - 2), s3 = xin(tl - 1), x = xin(tl);
+  const float acc = __fadd_rn(__fadd_rn(__fadd_rn(__fmul_rn(w0, s1), __fmul_rn(w1, s2)), __fmul_rn(w2, s3)), __fmul_rn(w3, x));
+  const float act = rbf(q35_silu(rbf(acc)));
+  if (kind == 2) {
+    A.v[((size_t)t * Q35_GV + head) * Q35_GD + tid] = act;
+    if (tid == 0) {
+      const float b = A.ab[(size_t)t * 96 + head], a = A.ab[(size_t)t * 96 + 48 + head];
+      A.beta[(size_t)t * Q35_GV + head] = rbf(q35_sigmoid(b));
+      const float sp_in = __fadd_rn(a, bf2f(c_dt));
+      const float sp = q35_softplus(sp_in);
+      A.g[(size_t)t * Q35_GV + head] = __fmul_rn(-q35_exp(bf2f(c_al)), sp);
+    }
+  } else {
+    float ss = __fmul_rn(act, act);
+    for (int o = 16; o; o >>= 1) ss = __fadd_rn(ss, __shfl_xor_sync(0xffffffffu, ss, o));
+    if (lane == 0) s_red[warp] = ss;
+    __syncthreads();
+    const float tot = __fadd_rn(__fadd_rn(__fadd_rn(s_red[0], s_red[1]), s_red[2]), s_red[3]);
+    const float y = __fmul_rn(act, q35_rsqrt(__fadd_rn(tot, 1e-6f)));
+    if (kind == 0) A.q[((size_t)t * Q35_GK + head) * Q35_GD + tid] = __fmul_rn(y, 0.08838834764831845f);
+    else A.k[((size_t)t * Q35_GK + head) * Q35_GD + tid] = y;
+  }
+}
+void launch_q35_conv_ms(const Q35ConvArgs& A, const Q35ConvMs& X, cudaStream_t st) {
+  if (A.M < 1 || A.M > 16 || !X.ms.slot || !X.ms.tl || !X.hist) throw std::runtime_error("launch_q35_conv_ms: 1..16 rows and the stream tables");
+  launch_k(q35_conv_ms_kernel, dim3(2 * Q35_GK + Q35_GV, A.M), dim3(128), 0, st, A, X); }
+
+__global__ void __launch_bounds__(128) q35_state_ms_kernel(Q35StateArgs A, Q35StateMs X) {
+
+
+
+  __shared__ float sk[2][Q35_GD], sq[2][Q35_GD], skv[2][4][32], so[2][4][32];
+  const int h = blockIdx.x, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, j = blockIdx.y * 32 + lane, kh = h / (Q35_GV / Q35_GK);
+  // The CTAs with blockIdx.z = r hold the stream whose first row in this pass is row r (ms.len[r] rows of that
+  // stream, one after the other; 0 when row r is not a first row).  The first row is committed inside the pass.  Before it, the rows
+  // of the previous pass that the stream accepted afterwards (ms.pendn[r] rows from row ms.pend0[r] of that pass, kept in pk / pv /
+  // pbeta / pg) go into the state: the same updates in the same order as a replay right after that pass.
+  const int r0 = (int)blockIdx.z, Mx = X.ms.len[r0], np = X.ms.pendn[r0], p0 = X.ms.pend0[r0];
+  const int ncx = Mx > 0 ? 1 : 0;
+  if (Mx + np == 0) { pdl_wait(); pdl_trigger(); return; }
+  float* const Sp = X.S[X.ms.slot[r0]] + (size_t)h * Q35_GD * Q35_GD;
+  uint16_t* const hist = X.hist[X.ms.slot[r0]];
+  float s[32];
+  #pragma unroll
+  for (int r = 0; r < 32; ++r) s[r] = __ldcg(Sp + (size_t)(warp * 32 + r) * Q35_GD + j);
+  pdl_wait(); pdl_trigger();
+  if (ncx > 0) {
+    const int gt = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + tid;
+    if (gt < Q35_CONV) { const int n = ncx; uint16_t o[3], nw[3];
+      #pragma unroll
+      for (int k = 0; k < 3; ++k) o[k] = hist[(size_t)k * Q35_CONV + gt];
+      #pragma unroll
+      for (int k = 0; k < 3; ++k) { const int r = n - 3 + k; nw[k] = r >= 0 ? A.mixed[(size_t)(r0 + r) * Q35_CONV + gt] : o[3 + r]; }
+      #pragma unroll
+      for (int k = 0; k < 3; ++k) hist[(size_t)k * Q35_CONV + gt] = nw[k]; }
+  }
+  // steps: the np accepted rows of the previous pass (they change the state only), then the Mx rows of this pass.  The state is
+  // stored after step np + ncx: after the first row of this pass, or after the last accepted row when the stream has no row here.
+  auto ld = [&](int i, float& k, float& q, float& g, float& b, float& v) {
+    if (i < np) { const int t = p0 + i;
+      k = X.pk[((size_t)t * Q35_GK + kh) * Q35_GD + tid]; q = 0.f;
+      g = X.pg[(size_t)t * Q35_GV + h]; b = X.pbeta[(size_t)t * Q35_GV + h]; v = X.pv[((size_t)t * Q35_GV + h) * Q35_GD + j]; return; }
+    const int t = r0 + i - np;
+    k = A.k[((size_t)t * Q35_GK + kh) * Q35_GD + tid]; q = A.q[((size_t)t * Q35_GK + kh) * Q35_GD + tid];
+    g = A.g[(size_t)t * Q35_GV + h]; b = A.beta[(size_t)t * Q35_GV + h]; v = A.v[((size_t)t * Q35_GV + h) * Q35_GD + j]; };
+  const int T = np + Mx;
+  float nk = 0.f, nq = 0.f, ng = 0.f, nb = 0.f, nv = 0.f;
+  if (T > 0) ld(0, nk, nq, ng, nb, nv);
+  for (int i = 0; i < T; ++i) {
+    const int pb = i & 1;
+    sk[pb][tid] = nk; sq[pb][tid] = nq;
+    const float eg = q35_exp(ng), bt = nb, vj = nv;
+    if (i + 1 < T) ld(i + 1, nk, nq, ng, nb, nv);
+    __syncthreads();
+    if (i > np && warp == 0) { const int qb = pb ^ 1;
+      A.core[((size_t)(r0 + i - np - 1) * Q35_GV + h) * Q35_GD + j] = rbf(__fadd_rn(__fadd_rn(__fadd_rn(so[qb][0][lane], so[qb][1][lane]), so[qb][2][lane]), so[qb][3][lane])); }
+    float kv = 0.f;
+    #pragma unroll
+    for (int r = 0; r < 32; ++r) { s[r] = __fmul_rn(s[r], eg); kv = __fadd_rn(kv, __fmul_rn(s[r], sk[pb][warp * 32 + r])); }
+    skv[pb][warp][lane] = kv;
+    __syncthreads();
+    const float d = __fmul_rn(__fsub_rn(vj, __fadd_rn(__fadd_rn(__fadd_rn(skv[pb][0][lane], skv[pb][1][lane]), skv[pb][2][lane]), skv[pb][3][lane])), bt);
+    float o = 0.f;
+    #pragma unroll
+    for (int r = 0; r < 32; ++r) { s[r] = __fadd_rn(s[r], __fmul_rn(sk[pb][warp * 32 + r], d)); o = __fadd_rn(o, __fmul_rn(s[r], sq[pb][warp * 32 + r])); }
+    so[pb][warp][lane] = o;
+    if (i + 1 == np + ncx) {
+      #pragma unroll
+      for (int r = 0; r < 32; ++r) Sp[(size_t)(warp * 32 + r) * Q35_GD + j] = s[r];
+    }
+  }
+  __syncthreads();
+  if (Mx > 0 && warp == 0) { const int qb = (T - 1) & 1;
+    A.core[((size_t)(r0 + Mx - 1) * Q35_GV + h) * Q35_GD + j] = rbf(__fadd_rn(__fadd_rn(__fadd_rn(so[qb][0][lane], so[qb][1][lane]), so[qb][2][lane]), so[qb][3][lane])); }
+}
+void launch_q35_state_ms(const Q35StateArgs& A, const Q35StateMs& X, cudaStream_t st) {
+  if (A.M < 1 || A.M > 16 || !X.ms.slot || !X.ms.len || !X.ms.pend0 || !X.ms.pendn || !X.S || !X.hist)
+    throw std::runtime_error("launch_q35_state_ms: 1..16 rows and the stream tables");
+  launch_k(q35_state_ms_kernel, dim3(Q35_GV, Q35_GD / 32, A.M), dim3(128), 0, st, A, X); }
+
+// the history (the last three mixed rows) of the streams that accepted rows after the pass.  One CTA set per recurrent layer and
+// group; the same rule as the history update of the state kernel.
+__global__ void __launch_bounds__(256) q35_ms_hist_kernel(Q35MsHistArgs A) {
+  pdl_wait(); pdl_trigger();
+  const int l = blockIdx.x, g = blockIdx.y;
+  const int slot = A.grp[3 * g], row0 = A.grp[3 * g + 1], n = A.grp[3 * g + 2];
+  if (n <= 0) return;
+  uint16_t* const hist = A.hist[l][slot]; const uint16_t* const mixed = A.mixed[l] + (size_t)row0 * Q35_CONV;
+  for (int c = blockIdx.z * blockDim.x + threadIdx.x; c < Q35_CONV; c += gridDim.z * blockDim.x) {
+    uint16_t o[3], nw[3];
+    #pragma unroll
+    for (int k = 0; k < 3; ++k) o[k] = hist[(size_t)k * Q35_CONV + c];
+    #pragma unroll
+    for (int k = 0; k < 3; ++k) { const int r = n - 3 + k; nw[k] = r >= 0 ? mixed[(size_t)r * Q35_CONV + c] : o[3 + r]; }
+    #pragma unroll
+    for (int k = 0; k < 3; ++k) hist[(size_t)k * Q35_CONV + c] = nw[k];
+  }
+}
+void launch_q35_ms_hist(const Q35MsHistArgs& A, cudaStream_t st) {
+  if (A.layers < 1 || A.groups < 1) return;
+  launch_k(q35_ms_hist_kernel, dim3(A.layers, A.groups, 8), dim3(256), 0, st, A); }
+
+__global__ void __launch_bounds__(512) q35_attn_post_ms_kernel(Q35AttnPostArgs A, Q35AttnPostMs X) {
+  __shared__ float buf[512], s_red[16];
+  const int blk = blockIdx.x, tok = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const float* part; const float* tau; const int8_t* sg; int nw, N, n;
+  if (blk < Q35_NH) { part = A.part_q; tau = A.tau_q; nw = A.nw_q; N = 2 * Q35_NH * Q35_HD; n = blk * 512 + tid; sg = A.sg_q + blk * 512; }
+  else if (blk < Q35_NH + 2) { part = A.part_k; tau = A.tau_k; nw = A.nw_k; N = Q35_KVH * Q35_HD; n = (blk - Q35_NH) * 512 + tid; sg = A.sg_k + (blk - Q35_NH) * 512; }
+  else { part = A.part_v; tau = A.tau_v; nw = A.nw_v; N = Q35_KVH * Q35_HD; n = (blk - Q35_NH - 2) * 512 + tid; sg = A.sg_v + (blk - Q35_NH - 2) * 512; }
+  const int d = tid & (Q35_HD - 1);
+  const float c_tau = tau[n]; const int8_t c_sg = sg[tid]; const uint16_t c_nw = blk < Q35_NH + 2 ? (blk < Q35_NH ? A.qn_w : A.kn_w)[d] : 0;
+  pdl_wait(); pdl_trigger();
+  if (tid == 0 && A.pf.p[0]) q35_l2pf(A.pf, blk + tok * gridDim.x, gridDim.x * gridDim.y);
+  const int pos = X.ms.pos[tok];                                           // the row's own position in its stream
+  long long acc = 0; float2 nrs = make_float2(0.f, 0.f);
+  if (A.xsm.us) { acc = q35_xsm_ld(part, A.xsm.mode, nw, A.M, N, tok, n); if (A.xsm.mode != 3) nrs = q35_xsm_row(A.xsm.us, A.xsm.S, A.xsm.eps, tok); }
+  buf[tid] = A.xsm.us ? (A.xsm.mode == 3 ? __fmul_rn(__uint_as_float((unsigned)acc), c_tau) : __fmul_rn(__fmul_rn(q35_xsm_fin(acc, A.xsm.mode, nrs.x), nrs.y), c_tau))
+                      : __fmul_rn(c_tau, q35_combine(part, nw, A.M, N, tok, n)); __syncthreads();
+  q35_inv_h512s(buf, (float)c_sg);
+  const float y = rbf(buf[tid]);
+  if (blk >= Q35_NH + 2) {
+    const int kvh = (blk - Q35_NH - 2) * 2 + (tid >> 8);
+    if (A.v8) {
+      float vy=y;
+#if YSKN_KVX_ROT
+      vy=kvx_rotate(vy,buf,false);
+#endif
+      { const bool own = !A.vstg; const int sl = own ? X.ms.slot[tok] : 0;      // not staged: the stream's own container
+        q35_kv8_store(vy, own ? X.v8[sl] : A.v8, own ? X.vs[sl] : A.vs, q35_kvrow(A.vstg,A.max_ctx,kvh,pos,tok),d); } return; }
+    A.vc[((size_t)kvh * A.max_ctx + pos) * Q35_HD + d] = q35_f2kv16(y, A.kv_fp16);
+    return;
+  }
+  if (blk < Q35_NH && tid >= Q35_HD) A.gate16[((size_t)tok * Q35_NH + blk) * Q35_HD + d] = f2bf(y);
+  float ss = __fmul_rn(y, y);
+  for (int o = 16; o; o >>= 1) ss = __fadd_rn(ss, __shfl_xor_sync(0xffffffffu, ss, o));
+  if (lane == 0) s_red[warp] = ss;
+  __syncthreads();
+  const int w0 = (tid >> 8) * 8; float tot = 0.f;
+  for (int w = 0; w < 8; ++w) tot = __fadd_rn(tot, s_red[w0 + w]);
+  const float r = q35_rsqrt(__fadd_rn(__fdiv_rn(tot, (float)Q35_HD), A.eps));
+  const float xn = rbf(__fmul_rn(__fmul_rn(y, r), __fadd_rn(1.f, bf2f(c_nw))));
+  buf[tid] = xn;
+  __syncthreads();
+  float out = xn;
+  if (d < Q35_RD / 2) { const float2 cs = A.rope[(size_t)pos * (Q35_RD / 2) + d];
+    out = rbf(__fadd_rn(rbf(__fmul_rn(xn, cs.x)), rbf(__fmul_rn(-buf[tid + Q35_RD / 2], cs.y)))); }
+  else if (d < Q35_RD) { const float2 cs = A.rope[(size_t)pos * (Q35_RD / 2) + d - Q35_RD / 2];
+    out = rbf(__fadd_rn(rbf(__fmul_rn(xn, cs.x)), rbf(__fmul_rn(buf[tid - Q35_RD / 2], cs.y)))); }
+#if YSKN_KVX_ROT
+  __syncthreads();
+  out=kvx_rotate(out,buf,false);
+#endif
+  if (blk < Q35_NH) { if (tid < Q35_HD) A.q16[((size_t)tok * Q35_NH + blk) * Q35_HD + d] = f2bf(out); }
+  else { const int kvh = (blk - Q35_NH) * 2 + (tid >> 8);
+         if (A.k8) { const bool own = !A.kstg; const int sl = own ? X.ms.slot[tok] : 0;
+                     q35_kv8_store(out, own ? X.k8[sl] : A.k8, own ? X.ks[sl] : A.ks, q35_kvrow(A.kstg, A.max_ctx, kvh, pos, tok), d); } else A.kc[((size_t)kvh * A.max_ctx + pos) * Q35_HD + d] = q35_f2kv16(out, A.kv_fp16); }
+}
+void launch_q35_attn_post_ms(const Q35AttnPostArgs& A, const Q35AttnPostMs& X, cudaStream_t st) {
+  if (A.M < 1 || A.M > 16 || !X.ms.pos || !X.ms.slot) throw std::runtime_error("launch_q35_attn_post_ms: 1..16 rows and the stream tables");
+  if ((A.k8 && !A.kstg && (!X.k8 || !X.ks)) || (A.v8 && !A.vstg && (!X.v8 || !X.vs)) || (!A.k8 || !A.v8))
+    throw std::runtime_error("launch_q35_attn_post_ms: needs INT8 KV and the containers of the streams");
+  launch_k(q35_attn_post_ms_kernel, dim3(Q35_NH + 4, A.M), dim3(512), 0, st, A, X); }
+#if YSKN_KVX_MODE == 3
+void launch_tb_requant_ms(const Q35AttnPostArgs& A, const Q35AttnPostMs& X, cudaStream_t st) {
+  const TbHost& H = tbf_host();
+  if (!H.scr) throw std::runtime_error("launch_tb_requant_ms: a multi-stream pass needs the fast encoder");
+  TbFastArgs F{};
+  F.blob = A.tb; F.nm = H.nm; F.has_cdq = H.has_cdq; F.q8_0 = A.k8; F.q8_1 = A.v8; F.qs_0 = A.ks; F.qs_1 = A.vs;
+  F.max_ctx = A.max_ctx; F.d_pos = A.d_pos; F.layer = A.tb_layer; F.scr = A.tb_scr ? A.tb_scr : H.scr;
+  F.stg_k = A.kstg; F.stg_v = A.vstg; F.pk_pay = A.kp; F.pk_pay1 = A.vp; F.pk_scl0 = A.kps; F.pk_scl1 = A.vps; F.pk_stride = A.pks;
+  TbFastMs Y; Y.pos = X.ms.pos; Y.slot = X.ms.slot; Y.q8_0 = X.k8; Y.qs_0 = X.ks; Y.q8_1 = X.v8; Y.qs_1 = X.vs;
+  Y.pay0 = X.kp; Y.scl0 = X.kps; Y.pay1 = X.vp; Y.scl1 = X.vps;
+  for (int t0 = 0; t0 < A.M; t0 += TBF_TILE) { F.tok0 = t0; F.nrow = 8 * std::min(TBF_TILE, A.M - t0); launch_tb_fast_ms(F, Y, st); }
+}
+#endif
+
+__global__ void __launch_bounds__(512) q35_combine_ms_kernel(Q35CombineArgs A, const int* mpos) {
+  __shared__ float buf[512]; __shared__ unsigned s_amax;
+  const int blk = blockIdx.x, tok = blockIdx.y, tid = threadIdx.x, e = blk * 512 + tid, head = e / Q35_HD, d = e % Q35_HD;
+  const int8_t c_si = A.sg_in[e];
+  pdl_wait(); pdl_trigger();
+  float y;
+  int S = A.splits;
+  if (A.splits_short > 0 && mpos[tok] + 1 < A.long_len) S = A.splits_short;   // the row's own position
+  if (S <= 32) {
+
+    __shared__ float s_sc[2][32], s_L[2];
+    float pa[32];
+    #pragma unroll
+    for (int s = 0; s < 32; ++s) pa[s] = s < S ? A.pacc[(((size_t)tok * A.splits + s) * Q35_NH + head) * Q35_HD + d] : 0.f;
+    if (tid < 64) {
+      const int hh = tid >> 5, sp = tid & 31; const size_t p = ((size_t)tok * A.splits + sp) * Q35_NH + blk * 2 + hh;
+      const float pmv = sp < S ? A.pm[p] : -1e30f, plv = sp < S ? A.pl[p] : 0.f;
+      float M2 = pmv;
+      for (int o2 = 16; o2; o2 >>= 1) M2 = fmaxf(M2, __shfl_xor_sync(0xffffffffu, M2, o2));
+      M2 = fmaxf(-1e30f, M2);
+      const float sc = (pmv > -1e29f) ? expf(pmv - M2) : 0.f;
+      s_sc[hh][sp] = sc;
+      float L2 = 0.f;
+      for (int k = 0; k < 32; ++k) L2 += __shfl_sync(0xffffffffu, sc, k) * __shfl_sync(0xffffffffu, plv, k);
+      if (sp == 0) s_L[hh] = L2;
+    }
+    __syncthreads();
+    const int hh = head - blk * 2; float o = 0.f;
+    #pragma unroll
+    for (int s = 0; s < 32; ++s) o += s_sc[hh][s] * pa[s];
+    #if YSKN_KVX_ROT
+    y = __fdiv_rn(o, s_L[hh]);
+#else
+    y = rbf(__fdiv_rn(o, s_L[hh]));
+#endif
+  } else if (S <= 64) {
+    __shared__ float s_sc2[2][64], s_L2[2];
+    float pa[64];
+    #pragma unroll
+    for (int s = 0; s < 64; ++s) pa[s] = s < S ? A.pacc[(((size_t)tok * A.splits + s) * Q35_NH + head) * Q35_HD + d] : 0.f;
+    if (tid < 64) {
+      const int hh = tid >> 5, sp = tid & 31;
+      const size_t p0 = ((size_t)tok * A.splits + sp) * Q35_NH + blk * 2 + hh, p1 = ((size_t)tok * A.splits + sp + 32) * Q35_NH + blk * 2 + hh;
+      const float pm0 = A.pm[p0], pl0 = A.pl[p0];
+      const float pm1 = sp + 32 < S ? A.pm[p1] : -1e30f, pl1 = sp + 32 < S ? A.pl[p1] : 0.f;
+      float M2 = fmaxf(pm0, pm1);
+      for (int o2 = 16; o2; o2 >>= 1) M2 = fmaxf(M2, __shfl_xor_sync(0xffffffffu, M2, o2));
+      M2 = fmaxf(-1e30f, M2);
+      const float sc0 = (pm0 > -1e29f) ? expf(pm0 - M2) : 0.f, sc1 = (pm1 > -1e29f) ? expf(pm1 - M2) : 0.f;
+      s_sc2[hh][sp] = sc0; s_sc2[hh][sp + 32] = sc1;
+      float L2 = 0.f;
+      for (int k = 0; k < 32; ++k) L2 += __shfl_sync(0xffffffffu, sc0, k) * __shfl_sync(0xffffffffu, pl0, k);
+      for (int k = 0; k < 32; ++k) L2 += __shfl_sync(0xffffffffu, sc1, k) * __shfl_sync(0xffffffffu, pl1, k);
+      if (sp == 0) s_L2[hh] = L2;
+    }
+    __syncthreads();
+    const int hh = head - blk * 2; float o = 0.f;
+    #pragma unroll
+    for (int s = 0; s < 64; ++s) o += s_sc2[hh][s] * pa[s];
+    #if YSKN_KVX_ROT
+    y = __fdiv_rn(o, s_L2[hh]);
+#else
+    y = rbf(__fdiv_rn(o, s_L2[hh]));
+#endif
+  } else {
+    float M2 = -1e30f; for (int s = 0; s < A.splits; ++s) M2 = fmaxf(M2, A.pm[((size_t)tok * A.splits + s) * Q35_NH + head]);
+    float L2 = 0.f, o = 0.f;
+    for (int s = 0; s < A.splits; ++s) { const size_t p = ((size_t)tok * A.splits + s) * Q35_NH + head; const float sc = (A.pm[p] > -1e29f) ? expf(A.pm[p] - M2) : 0.f;
+      L2 += sc * A.pl[p]; o += sc * A.pacc[p * Q35_HD + d]; }
+    #if YSKN_KVX_ROT
+    y = __fdiv_rn(o, L2);
+#else
+    y = rbf(__fdiv_rn(o, L2));
+#endif
+  }
+#if YSKN_KVX_ROT
+  y=rbf(kvx_rotate(y,buf,true));
+#endif
+  const float sg = rbf(q35_sigmoid(bf2f(A.gate16[((size_t)tok * Q35_NH + head) * Q35_HD + d])));
+  const float y2 = rbf(__fmul_rn(y, sg));
+  if (tid == 0) s_amax = 0u;
+  buf[tid] = __fmul_rn(y2, (float)c_si);
+  __syncthreads();
+  a8_group512_tail(buf, &s_amax, A.lo ? A.qx + (size_t)blk * 4096 : A.qx + (size_t)tok * (Q35_NH * Q35_HD) + blk * 512, A.alpha + (size_t)tok * (Q35_NH * Q35_HD / 512) + blk, A.lo ? tok : -1);
+}
+void launch_q35_combine_ms(const Q35CombineArgs& A, const int* pos, cudaStream_t st) {
+  if (A.M < 1 || A.M > 16 || !pos) throw std::runtime_error("launch_q35_combine_ms: 1..16 rows and the row positions");
+  launch_k(q35_combine_ms_kernel, dim3(Q35_NH * Q35_HD / 512, A.M), dim3(512), 0, st, A, pos); }
 } 
 #include "lfrow_kernels.cuh"

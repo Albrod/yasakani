@@ -37,6 +37,7 @@ add_library(yskn SHARED
   src/post_kernels.cu
   src/q35_atx.cu
   src/q35_atxpk.cu
+  src/q35_atxpk_ms.cu
   src/q35_bdraft.cu
   src/q35_chk.cu
   src/q35_fa.cu
@@ -46,6 +47,7 @@ add_library(yskn SHARED
   src/q35_kz.cu
   src/q35_prefill.cu
   src/q35_sample.cu
+  src/q35_sample_ms.cu
   src/repack.cu
   src/specx.cpp
   src/test_hooks.cpp

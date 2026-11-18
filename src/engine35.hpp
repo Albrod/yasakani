@@ -135,9 +135,14 @@ public:
   void snap_trim(int L);                             // forget the slots after position L
   int  snap_count() const { int c = 0; for (const SnapSlot& s : sh_slots_) c += s.pos > 0; return c; }
   int  snap_pos() const { int p = -1; for (const SnapSlot& s : sh_slots_) p = std::max(p, s.pos); return p; }
-  void snap_note(const int32_t* ids, int n) { sh_cur_.assign(ids, ids + n); sh_note_ = sh_epoch_; }   
+  // the live sequence: ids = the n tokens this engine holds in its KV, front = the token it emitted last (not in its KV yet; -1 = not
+  // known).  Both hold while snap_live_ok(); the frontier form of yskn_spec_generate checks the last prompt token against front.
+  void snap_note(const int32_t* ids, int n, int32_t front) { sh_cur_.assign(ids, ids + n); sh_front_ = front; sh_note_ = sh_epoch_; }
+  // forget the live sequence: the next read cannot continue it (mode 1); the saved states stay (mode 2)
+  void live_drop() { sh_cur_.clear(); sh_front_ = -1; sh_note_ = 0; }
   bool snap_live_ok() const { return sh_note_ == sh_epoch_ && (int)sh_cur_.size() == pos_ && pos_ > 0; }
   const std::vector<int32_t>& snap_live() const { return sh_cur_; }
+  int32_t snap_front() const { return snap_live_ok() ? sh_front_ : -1; }   // the frontier of the live sequence, -1 without one
   void snap_drop() { for (SnapSlot& s : sh_slots_) s.pos = -1; sh_seq_.clear(); sh_last_ = -1; }
   int  snap_slots_max() const { return sh_max_; }
   int  snap_step() const { return sh_step_; }
@@ -188,7 +193,105 @@ public:
   void bdraft_debug(const float* feats, int n, int pos0, int32_t anchor, float* hidden, int32_t* top_ids, float* top_vals, int32_t* path);
   int  bdraft_out(int32_t* drafts);            
   void bdraft_ring(int layer, int slot0, int n, uint16_t* k_out, uint16_t* v_out);   
+  // multi-stream pass (experimental): the rows of several streams (requests) ride in one pass of this engine (the carrier).  A pass
+  // has at most 16 rows.  ms_bind sets the stream slots: n_light light slots (the state containers of a stream: recurrent states,
+  // their histories, the KV rows; numbers n .. n + n_light - 1) and, for tests only, n engines that share the weights (numbers 0 ..
+  // n - 1).  ms_load copies the state of an engine after its prompt pass into a light slot.  ms_step runs one pass: the rows of a
+  // stream are next to each other, toks of its first row = the stream's last token, the following rows = draft tokens.  The first row
+  // is committed inside the pass (position + 1).  out_argmax[r] = the token the model gives after row r (the sampled one when the
+  // slot of row r samples).  ms_commit (once, right after ms_step) says how many drafts of each stream were right: the positions
+  // advance by that many rows.  Sampling is set per slot (ms_set_sampling: the values and checks of set_opt 10, 11, 12, 29, 16 and 13;
+  // ms_load takes the source engine's, a new slot starts with this engine's); a row whose slot has temperature 0 takes the argmax,
+  // so greedy and sampled streams share a pass.  ms_seeds sets only the seed of every slot.  ms_flush: finish the pending work of the
+  // streams; the single-request entries of this engine (the C API) call it first when anything is pending (ms_gate).
+  // This engine's live sequence (what a read may continue, mode 1): ms_bind, ms_load, ms_draft and ms_step drop it (the stream it held
+  // may live on in a slot); ms_commit, ms_flush, the settings and the queries keep it; ms_unload sets it to the stream it takes.
+  // The frontier of a light slot (the token its stream emitted last, not in its KV yet): ms_load takes the source's (known when the
+  // source has a live sequence), ms_step sets it to out_argmax of the stream's first row, ms_commit to the one after its accepted
+  // drafts; ms_unload hands it to this engine with the live sequence.  While it is known, ms_step / ms_draft refuse a first row with
+  // another token.  A light slot that no ms_load has filled takes no rows.
+  void ms_bind(Engine35* const* eng, int n, int n_light = 0);
+  void ms_load(int slot, Engine35* src);
+  // The inverse of ms_load: this engine takes the stream of a light slot (its states, histories, KV rows, position, drafter memory and
+  // sampling); ids = the n tokens the slot holds (n = its position; checked: the tokens of its passes, and the ones it was loaded with
+  // when the source had a live sequence).  Its live sequence becomes ids, so that a read of ids + more tokens continues it (mode 1);
+  // when the source had none (the head of ids cannot be checked) it stays dropped and no saved state stays.  Its saved states stay
+  // only where they still match the KV rows it now holds (see the definition).  The slot is marked as moved out: passes refuse it
+  // until ms_load fills it again.
+  void ms_unload(int slot, const int32_t* ids, int n);
+  // what a caller needs to plan the slots (see yskn_ms_info in yskn_ms.h); returns the number of values written
+  int ms_info(int64_t* out, int max_out) const;
+  int  ms_slot_hash(int slot, uint64_t* out, int max_out);               // the values state_hash gives for an engine in that state
+  int  ms_slot_pos(int slot);
+  // The drafter for the streams (needs the drafter loaded before ms_bind, and ms_opt(1, 1)): ms_draft takes the rows of the NEXT pass
+  // (toks: the last token of every stream at its first row; for a stream with dev == 0 at its first row also the caller's own drafts)
+  // and fills the other rows of the streams with dev != 0 on the device.  ms_step with toks == nullptr then runs that pass; out_toks
+  // gets the tokens of all rows.  While ms_opt(1) is on, the rows a stream accepted go into its drafter memory in ms_commit: call it
+  // right after every ms_step (n may be 0), before the engine is used for anything else (the rows are read from the capture of the pass).
+  void ms_step(int M, const int32_t* slots, const int32_t* toks, int use_graph, int32_t* out_argmax, int32_t* top_ids, float* top_vals, int32_t* out_toks = nullptr);
+  void ms_draft(int M, const int32_t* slots, const int32_t* toks, const int32_t* dev, int use_graph);
+  void ms_opt(int key, int value);
+  void ms_commit(int n, const int32_t* slots, const int32_t* n_accept);
+  void ms_seeds(const uint32_t* seeds, int n);
+  void ms_set_sampling(int slot, int temp_x1000, int top_p_x1000, int top_k, int min_p_x1000, int sampler, uint32_t seed);
+  void ms_flush();
+  void ms_gate() { if (ms_ns_ > 0 && (ms_open_ || ms_dtoks_ || ms_ctx_pending_ || ms_pending())) ms_flush(); }
 private:
+  struct MsTab { float** S = nullptr; uint16_t** hist = nullptr; int8_t** k8 = nullptr; float** ks = nullptr; int8_t** v8 = nullptr; float** vs = nullptr;
+                 uint8_t** kp = nullptr; float** kps = nullptr; uint8_t** vp = nullptr; float** vps = nullptr; };
+  // kept conv outputs of a pass (16 rows per recurrent layer): the accepted drafts of a pass go into the state at the start of the next
+  // pass (or in ms_settle), so a pass writes one set while the rows of the pass before are read from the other.  The single-request
+  // path keeps its own rows in Q35Layer::tq.. for its commit replay; the two never share a buffer.
+  struct MsKeep { float *tq = nullptr, *tk = nullptr, *tv = nullptr, *tbeta = nullptr, *tg = nullptr; };
+  struct MsPend { int row0 = 0, n = 0; };                                // accepted rows of the last pass that the state does not hold yet
+  struct MsLay { float* S = nullptr; uint16_t* hist = nullptr; uint8_t* kp = nullptr; float* kps = nullptr; uint8_t* vp = nullptr; float* vps = nullptr;
+                 int8_t* k8 = nullptr; float* ks = nullptr; int8_t* v8 = nullptr; float* vs = nullptr; };   // the state containers of one layer of a stream
+  // the sampling of a stream slot, as set_opt keeps it for this engine (smp_, smp_p_): on = temperature > 0 (else the argmax)
+  struct MsSmp { int on = 0; Q35SmpParams p{0.6, 0.95, 20, 0, 0ull}; };
+  // a stream slot without an engine.  out: moved to this engine by ms_unload (no pass takes it until ms_load).  What ms_load knew
+  // of the source: src_self = it was this engine, src_tick = sh_tick_ then (the saved states older than that were taken on the KV
+  // rows the slot copied), src_ids = the tokens the source held (its live sequence; src_known = false when it had none).
+  // ring = the drafter memory came from the source (false: cleared, the source had no drafter).  load_pos = the position ms_load
+  // copied; tail = the tokens of the rows the slot took since (each pass: the first row, then the accepted drafts), so that
+  // load_pos + tail.size() = pos and ms_unload can check every token of ids it did not get from the source's live sequence.
+  // front = the stream's frontier (-1 = not known: loaded from a source without a live sequence and no pass since); filled = an
+  // ms_load has put a stream into the slot (a slot made by ms_bind holds none).
+  struct MsLight { std::vector<MsLay> L; int pos = 0; MsSmp smp; bool out = false, src_self = false, src_known = false, ring = false;
+                   unsigned long long src_tick = 0; std::vector<int32_t> src_ids; int load_pos = 0; std::vector<int32_t> tail;
+                   int32_t front = -1; bool filled = false; };
+  std::vector<MsLight> ms_light_; int ms_ns_ = 0;                        // light slots that exist; slots of the current binding (engines + light)
+  int& ms_posr(int s) { const int ne = (int)ms_eng_.size(); return s < ne ? ms_eng_[(size_t)s]->pos_ : ms_light_[(size_t)(s - ne)].pos; }
+  std::vector<MsSmp> ms_esmp_;                                           // the sampling of the engine slots (test-only form) of the binding
+  MsSmp& ms_smpr(int s) { const int ne = (int)ms_eng_.size(); return s < ne ? ms_esmp_[(size_t)s] : ms_light_[(size_t)(s - ne)].smp; }
+  std::vector<MsTab> ms_tab_; std::vector<Engine35*> ms_eng_; int ms_cap_ = 0; int *ms_pos_ = nullptr, *ms_slot_ = nullptr; bool ms_now_ = false;
+  int *ms_rows_ = nullptr, *ms_tl_ = nullptr, *ms_len_ = nullptr, *ms_pend0_ = nullptr, *ms_pendn_ = nullptr, *ms_grp_ = nullptr; int32_t* ms_hgrp_ = nullptr;
+  // per row of a pass: the sampling of its slot (temp 0 = argmax), device table and pinned staging; ms_smp_now_ = a row of the
+  // current pass samples (the head runs the sampling kernel)
+  Q35SmpParams *ms_prm_ = nullptr, *ms_hprm_ = nullptr; bool ms_smp_now_ = false;
+  std::vector<MsKeep> ms_keep_[2]; std::vector<MsPend> ms_pend_; int ms_par_ = 0; bool ms_open_ = false;   // ms_keep_[parity of the pass][layer]
+  bool ms_pending() const { for (const MsPend& p : ms_pend_) if (p.n > 0) return true; return false; }
+  std::vector<int> ms_last_r0_, ms_last_len_; std::vector<int32_t> ms_last_toks_, ms_last_am_;
+  const uint16_t** ms_mixed_tab_ = nullptr; uint16_t*** ms_hist_tab_ = nullptr; int ms_ngdn_ = 0;
+  Q35MsRows ms_rows() const { return Q35MsRows{ms_pos_, ms_slot_, ms_tl_, ms_len_, ms_pend0_, ms_pendn_}; }
+  void ms_settle(const std::vector<int>& slots);
+  void ms_carrier_check(const char* what) const;
+  int ms_unsupported(std::string* why, bool profile = true) const;      // 0, or the code of a setting the pass is not built for (yskn_ms_info)
+  void smp_assign(int on, const Q35SmpParams& p);                        // this engine's sampling, as set_opt 10..13, 16 and 29 set it
+  void ms_drop_graphs();                                                 // the graphs of the pass and of its drafter
+  void ms_attn_post(Q35Layer& Y, const Q35AttnPostArgs& X);              // the kernels of a multi-stream pass (q35.hpp *_ms)
+  void ms_attention(Q35Layer& Y, const Q35AttnArgs& AT, int cap_ord, bool kz);
+  // drafter of the multi-stream pass
+  struct MsRing { uint16_t* rk[5] = {}; uint16_t* rv[5] = {}; };          // the drafter rings of a light slot
+  std::vector<MsRing> ms_dring_;
+  uint16_t** msd_rk_[5] = {}; uint16_t** msd_rv_[5] = {}; int msd_cap_ = 0;   // per drafter layer: the ring of every slot (device tables)
+  int* msd_tab_ = nullptr; unsigned long long* msd_seed_ = nullptr; int32_t* msd_h_ = nullptr; unsigned long long* msd_hseed_ = nullptr;
+  int ms_drafter_ = 0, ms_last_graph_ = 0; bool ms_ctx_pending_ = false, ms_dtoks_ = false, msd_ok_ = false;
+  std::vector<int> ms_last_acc_, ms_dlay_;
+  std::map<int, cudaGraphExec_t> ms_dgraph_, ms_cgraph_;
+  void ms_ctx_push(int use_graph);
+  void bdr_block_ms(int R, int ng, int J);
+  void bdr_ctx_ms(int m);
+  std::map<int, cudaGraphExec_t> ms_graph_;
   std::shared_ptr<Shared35Weights> shared_weights_;
   struct Bdr {
     bool on = false; Container c; DevTensor fc; DevTensor L[5][9];        
@@ -391,6 +494,9 @@ private:
   int32_t* h_pin_ = nullptr; float* h_pinf_ = nullptr;
   int32_t* h_dec_ = nullptr;   
   cudaGraphExec_t gexec_ = nullptr; std::map<int, cudaGraphExec_t> pgraph_;
+  // the graphs of read passes (commit, more than HM_ rows) are kept for kReadGraphs keys at most, the least recently used dropped
+  // first (read_graph_room): reads come in every length, and each kept graph holds GPU memory
+  static constexpr int kReadGraphs = 32; std::map<int, uint64_t> pg_use_; uint64_t pg_tick_ = 0; void read_graph_room();
   cudaGraphExec_t gexec_alt_ = nullptr;   
   std::map<int, cudaGraphExec_t> rgraph_;                     
   int opt_replay_graph_ = 1, opt_single_commit_ = 1, opt_catchup_nosync_ = 1, opt_mtp_log_ = 0;
@@ -402,10 +508,11 @@ private:
   bool specx_scope_ = false;  
   bool pre_committed_ = false;   
   
-  struct SnapSlot { float* S = nullptr; uint16_t* hist = nullptr; uint16_t* ring = nullptr; uint16_t* pend = nullptr; int pos = -1; unsigned long long tick = 0; };
+  struct SnapSlot { float* S = nullptr; uint16_t* hist = nullptr; uint16_t* ring = nullptr; uint16_t* pend = nullptr; int pos = -1; unsigned long long tick = 0;
+                    unsigned long long born = 0; };   // born: the tick of the save (a restore moves tick, not born)
   std::vector<SnapSlot> sh_slots_; int sh_max_ = 1, sh_step_ = 1024, sh_tail_ = 4096, sh_sparse_ = 65536, sh_min_ = 8192, sh_last_ = -1;
   unsigned long long sh_tick_ = 0; bool sh_warned_ = false;
-  std::vector<int32_t> sh_seq_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0;
+  std::vector<int32_t> sh_seq_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0; int32_t sh_front_ = -1;
   bool snap_alloc(SnapSlot& s);
   void snap_free();
   int last_keep_ = 1;          // the last verify pass kept the conv outputs for the commit replay (rows <= 16)

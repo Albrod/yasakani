@@ -70,6 +70,9 @@ struct SpecxConfig {
   int copy_rows = 16;       // most rows of a copy-from-input pass (16 = as before; up to 64 where wide passes are on)
   int copy_index = 0;       // 0 = the n-gram tables, 1 = the 4-token chain index with the copy cursor (with the block drafter)
   int snap_tok = -1;      
+  // experimental (a stream handed back from a slot, yskn_ms.h): the engine holds the prompt without its last token as its live
+  // sequence, and that last token is the one the stream emitted last.  Nothing is read: the first pass checks it with its drafts.
+  int frontier = 0;
 };
 struct SpecxStats {
   int64_t passes = 0, tokens = 0, rows_hist[65] = {};
