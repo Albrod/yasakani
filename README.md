@@ -137,6 +137,12 @@ RTX 5090:
   3.24 in the author's run of both on the same card with 0.1.3), so expect it to be slower there than the speed tables above.
 * Further evaluations, with their settings and caveats, are on the [model card](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9).
 
+**Arete-27B-pi** (by [@audreyt](https://github.com/audreyt)): Arete-27B with the harness-hub pi coding adapter merged before quantization.
+The [model card](https://huggingface.co/audreyt/Arete-27B-pi-YASAKANI-quality/tree/7a0670eaa25753ed82aa1e31f1d943d6ff582be0)
+includes pi setup instructions and results measured by @audreyt on an RTX 5090 with YASAKANI 0.1.4:
+`verify` matched all 11 files and `selfcheck` passed all 3 cases. Against the
+merged BF16 model, the quality tools measured KL divergence 0.01127 and 95.57% top-1 agreement (20 windows, KV5 cache).
+
 <a name="how-it-works-briefly"></a>
 <a name="documentation-and-contributions"></a>
 
