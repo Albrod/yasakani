@@ -42,6 +42,8 @@ Windows 11（64 ビット）、Python 3.10 以上、NVIDIA ドライバー 580 �
 
 ターミナルでは `/effort medium` と入力すると思考が短くなり、`/think off` で思考がオフになります。[手動インストール](python/README.md#install) · [API の使い方](python/README.md#the-server)
 
+**更新。** v0.1.6 の次の版から、起動ファイルが自分で更新できます（v0.1.6 からは、新しい起動用 ZIP を一度だけ手で取得してください）。1 日に 1 回、メニューを開くときに GitHub へ新しい版があるかを問い合わせます（問い合わせる前にそう表示します）。新しい版があれば今の版と新しい版を示し、変える前に必ず聞きます。ブラウザーのチャットにも同じ案内と **更新する** のボタンが出ます。メニューの「新しい版を確かめる」、`START.cmd --action update`、`yasakani update` でも更新できます。モデルはそのまま使い、エンジンと Python のパッケージは入れ直します。前の版に戻すときは `START.cmd --action rollback` です。毎日の確認を止めるときは `START.cmd --no-update-check` です。[何を送るか、ファイルをどう確かめるか](docs/FAQ.ja.md#更新はどう動く)
+
 <a name="速さ"></a>
 
 ## 速度と品質

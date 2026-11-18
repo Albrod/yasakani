@@ -42,6 +42,8 @@ You need 64-bit Windows 11, Python 3.10 or later, NVIDIA driver 580 or later, th
 
 In terminal chat, type `/effort medium` to make the model think for a shorter time, or `/think off` to turn thinking off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
 
+**Updates.** From the release after v0.1.6, the quickstart can update itself (from v0.1.6, download the new quickstart ZIP by hand once). Once a day, when the menu opens, it asks GitHub whether there is a newer release and says so first. If there is one, it shows the old and new version and asks before it changes anything; the browser chat shows the same offer with an **Update** button. You can also choose “check for a new version” in the menu, run `START.cmd --action update`, or type `yasakani update`. The models stay; the engine and the Python package are installed again. `START.cmd --action rollback` goes back to the version before. To turn the daily check off: `START.cmd --no-update-check`. [What the check sends, and how the files are checked](docs/FAQ.md#how-does-the-update-work)
+
 <a name="speed"></a>
 
 ## Speed and quality

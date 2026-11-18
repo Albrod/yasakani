@@ -58,8 +58,24 @@ can be given with `--model-dir` or `YASAKANI_MODEL_DIR`.
 | `yasakani chat` | chat in the terminal. `/think on\|off`, `/effort low\|medium\|xhigh`, `/reset`, `/exit`; Ctrl+C stops the answer being written |
 | `yasakani serve` | starts the OpenAI-compatible server (below) |
 | `yasakani bench` | speed measurement: greedy, fixed length, your own prompts with `--prompts-file`; `--json` for a machine-readable result; `--edit` runs the edit tasks of the speed tables ([below](#bench---edit-the-edit-tasks-of-the-speed-tables)) |
+| `yasakani update` | looks for a newer release on GitHub; the only command that contacts the network ([below](#yasakani-update)) |
 
 Loading the model takes about a minute; `serve` answers `/health` with `503 loading` until it is ready.
+
+## `yasakani update`
+
+`yasakani update` asks GitHub's API for the latest release (one HTTPS request, User-Agent `yasakani-update`, nothing about this computer)
+and prints the installed and the latest version. `--check` stops there.
+
+* In a folder set up by the quickstart (`START.cmd`), the update is the quickstart's job: the command opens a new window that runs
+  `START.cmd --action update` and ends at once, so that nothing of this Python environment is in use while the package is replaced.
+  The quickstart asks before it changes anything (`--yes` skips the question) and keeps the start files of the old version for
+  `START.cmd --action rollback`.
+* After a manual installation it changes nothing. It prints the two steps: download and unpack the engine ZIP of the new release (its
+  SHA-256 is in the release's `SHA256SUMS.txt`), then `pip install --upgrade` the unpacked folder and use the `yskn.dll` in it. On Linux:
+  `git pull` and build again as in [BUILDING.md](../BUILDING.md).
+
+No other command contacts the network: `serve`, `chat`, `bench`, `info`, `verify` and `selfcheck` do not check for updates.
 
 ## `bench --edit`: the edit tasks of the speed tables
 

@@ -175,8 +175,36 @@ Whether other models can be supported is decided one by one, and nothing is prom
 ## Does it send my prompts anywhere?
 
 No. The Python package makes no outgoing network connections (it only listens, on `127.0.0.1` unless you choose otherwise), and the engine library
-imports no networking functions. After the download it needs no internet connection. Details and the checks behind this statement are in
-[SECURITY.md](../SECURITY.md).
+imports no networking functions. After the download it needs no internet connection. The one exception is the update check: `yasakani update`
+when you type it, and the quickstart's check for a new version, each send one request to GitHub that holds no prompt and nothing about your PC
+([below](#how-does-the-update-work)). Details and the checks behind this statement are in [SECURITY.md](../SECURITY.md).
+
+## How does the update work?
+
+From the release after v0.1.6, the quickstart (`START.cmd`) can update itself.
+
+* **The check.** At most once a day, when the menu opens, the quickstart first prints that it asks github.com, then sends one HTTPS request:
+  `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest`, with the User-Agent `yasakani-quickstart` and nothing else about
+  your PC (no ID, no version of Windows, no GPU, no prompt). It waits at most 5 seconds; if GitHub cannot be reached, it says so in one line and
+  goes on. Pre-releases are never offered. GitHub sees your IP address, as with any download.
+* **Turning it off.** `START.cmd --no-update-check` turns the daily check off and remembers it (in `quickstart_state.json`);
+  `START.cmd --update-check` turns it on again. The environment variable `YASAKANI_NO_UPDATE_CHECK=1` also turns it off. The menu item
+  “check for a new version” and `START.cmd --action update` still work when you choose them.
+* **Nothing changes without a yes.** When there is a newer version, the quickstart shows the old and new version and the release page, and
+  asks. In the browser chat, a bar offers **Update** and **Later**; the page itself sends nothing to GitHub.
+* **What an update does.** It downloads the quickstart ZIP and `SHA256SUMS.txt` of that release, only from
+  `https://github.com/yasakani-dev/yasakani/releases/download/<tag>/`, compares the ZIP's SHA-256 with `SHA256SUMS.txt`, and accepts only
+  the known start files (no folders, no other files). It copies the current start files to `backup\<old version>\`, puts the new ones in
+  place and starts the new quickstart, which downloads its own engine ZIP and checks its SHA-256 as on the first run, then installs the
+  Python package again. The models are kept.
+* **Going back.** `START.cmd --action rollback` puts the start files of the version before the last update back; on the next start the
+  engine of that version is installed again.
+* **How far you can trust it.** The release files are not code-signed. The check rests on GitHub's HTTPS and on the release's
+  `SHA256SUMS.txt`, which comes from the same release: it catches a broken or swapped download, not a release that was itself replaced on
+  GitHub.
+* **`yasakani update`** prints the installed and the latest version (`--check` only prints). In a folder set up by the quickstart it opens a
+  new window that runs `START.cmd --action update`; after a manual installation it prints what to download and the command to run, and
+  changes nothing. `yasakani serve`, `chat` and `bench` never contact the network.
 
 ## Windows warns me about the download. Is that normal?
 
