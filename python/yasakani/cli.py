@@ -640,7 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="yasakani", description="Run Qwen3.8-27B locally on one NVIDIA RTX GPU with the YASAKANI engine "
                                                            "(tested on the RTX 5090 under Windows).")
     ap.add_argument("--version", action="version", version="yasakani " + __version__)
-    sub = ap.add_subparsers(dest="cmd", required=True, metavar="{info,serve,chat,bench,selfcheck,verify}")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="{info,serve,chat,bench,selfcheck,verify,update}")
 
     sp = sub.add_parser("info", help="check this computer, the engine library and (with --model-dir) a model folder")
     sp.add_argument("--model-dir")
@@ -701,7 +701,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "an output limit of 32768 tokens for every task, so tok/s varies from run to run")
     sp.add_argument("--json", action="store_true", help="print the result as JSON")
     sp.set_defaults(func=cmd_bench)
+
+    sp = sub.add_parser("update", help="look for a newer release on GitHub (the only command that contacts the network).  In a folder "
+                                       "set up by the quickstart its launcher does the update; otherwise the steps are printed")
+    sp.add_argument("--check", action="store_true", help="only print the installed and the latest version")
+    sp.add_argument("--yes", action="store_true", help="in a quickstart folder: update without asking")
+    sp.set_defaults(func=cmd_update)
     return ap
+
+
+def cmd_update(args) -> int:
+    from .update import cmd_update as run
+    return run(args)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
