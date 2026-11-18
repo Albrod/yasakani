@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="380" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc" xml:lang="en">
+<title id="title">YASAKANI quality and fastest models</title>
+<desc id="desc">One RTX 5090, one request at a time, thinking off. On our own JSONL edit task (return 60 JSONL lines with one record changed) the recommended quality model (12.37 GB) wrote 2,243 tok/s and the fastest model (10.31 GB) 2,298 tok/s. v0.1.4, November 15, 2026, mean of 2 runs, prompt reading excluded. Context up to 262,144 tokens.</desc>
+<rect width="1000" height="380" rx="16" fill="#131714"/>
+<path d="M18 3H982" stroke="#d9bb77" stroke-width="4"/>
+<g font-family="Segoe UI, Noto Sans JP, Yu Gothic, sans-serif">
+<text x="34" y="57" font-size="34" font-weight="700" letter-spacing="2" fill="#e2c888">YASAKANI</text>
+<text x="966" y="53" text-anchor="end" font-size="21" fill="#d3dad2">Qwen3.8-27B · Up to 262,144 context tokens</text>
+<path d="M34 77H966M34 217H966M34 294H966" stroke="#455047"/>
+<g font-size="25" fill="#c5cdc5">
+<text x="34" y="118">Model</text>
+<text x="599" y="118" text-anchor="end">Main model file</text>
+<text x="966" y="118" text-anchor="end">JSONL edit speed</text>
+</g>
+<g id="quality-model" fill="#e2c888" font-weight="650">
+<text x="34" y="177" font-size="38">Quality model</text>
+<text x="35" y="201" font-size="20" fill="#d3c7a9">Recommended</text>
+<text x="599" y="185" text-anchor="end" font-size="52">12.37<tspan font-size="28"> GB</tspan></text>
+<text x="966" y="185" text-anchor="end" font-size="52">2,243<tspan font-size="28"> tok/s</tspan></text>
+</g>
+<g id="fastest-model" fill="#f5f3ec" font-weight="600">
+<text x="34" y="268" font-size="38">Fastest model</text>
+<text x="599" y="271" text-anchor="end" font-size="50">10.31<tspan font-size="28"> GB</tspan></text>
+<text x="966" y="271" text-anchor="end" font-size="50">2,298<tspan font-size="28"> tok/s</tspan></text>
+</g>
+<text x="34" y="330" font-size="21" fill="#c5cdc5">Our own JSONL edit task · one RTX 5090 · one request at a time · thinking off</text>
+<text x="34" y="360" font-size="21" fill="#c5cdc5">v0.1.4 (Nov 15, 2026) · mean of 2 runs · generation only, prompt excluded</text>
+</g></svg>

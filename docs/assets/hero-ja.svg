@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="380" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc" xml:lang="ja">
+<title id="title">YASAKANI の品質モデルと最速モデル</title>
+<desc id="desc">RTX 5090 1枚・1件ずつ・思考なし。自作の JSONL 編集（60行のうち1行だけ直して全行を返す）で、推奨の品質モデル（本体 12.37 GB）は 2,243 tok/s、最速モデル（本体 10.31 GB）は 2,298 tok/s。v0.1.4・2026年11月15日・2回の平均・入力処理を除く。文脈上限 262,144 トークン。</desc>
+<rect width="1000" height="380" rx="16" fill="#131714"/>
+<path d="M18 3H982" stroke="#d9bb77" stroke-width="4"/>
+<g font-family="Segoe UI, Noto Sans JP, Yu Gothic, sans-serif">
+<text x="34" y="57" font-size="34" font-weight="700" letter-spacing="2" fill="#e2c888">YASAKANI</text>
+<text x="966" y="53" text-anchor="end" font-size="21" fill="#d3dad2">Qwen3.8-27B · 文脈上限 262,144 トークン</text>
+<path d="M34 77H966M34 217H966M34 294H966" stroke="#455047"/>
+<g font-size="25" fill="#c5cdc5">
+<text x="34" y="118">モデル</text>
+<text x="599" y="118" text-anchor="end">本体ファイル容量</text>
+<text x="966" y="118" text-anchor="end">JSONL 編集の生成速度</text>
+</g>
+<g id="quality-model" fill="#e2c888" font-weight="650">
+<text x="34" y="177" font-size="38">品質モデル</text>
+<text x="35" y="201" font-size="20" fill="#d3c7a9">推奨</text>
+<text x="599" y="185" text-anchor="end" font-size="52">12.37<tspan font-size="28"> GB</tspan></text>
+<text x="966" y="185" text-anchor="end" font-size="52">2,243<tspan font-size="28"> tok/s</tspan></text>
+</g>
+<g id="fastest-model" fill="#f5f3ec" font-weight="600">
+<text x="34" y="268" font-size="38">最速モデル</text>
+<text x="599" y="271" text-anchor="end" font-size="50">10.31<tspan font-size="28"> GB</tspan></text>
+<text x="966" y="271" text-anchor="end" font-size="50">2,298<tspan font-size="28"> tok/s</tspan></text>
+</g>
+<text x="34" y="330" font-size="21" fill="#c5cdc5">自作の JSONL 編集・RTX 5090 1枚・1件ずつ・思考なし</text>
+<text x="34" y="360" font-size="21" fill="#c5cdc5">v0.1.4（2026年11月15日）・2回の平均・入力処理を除く生成速度</text>
+</g></svg>

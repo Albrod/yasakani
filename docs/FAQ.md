@@ -35,6 +35,32 @@ Not exactly. The speed depends on what you ask: predictable text (code, structur
 engine proposes several words at once and keeps the ones the main model agrees with. Your GPU's clocks, cooling and the other programs using it
 matter too. Run `yasakani bench` to see your own numbers.
 
+## How do I measure the edit speed on my PC?
+
+```bat
+yasakani bench --edit --model-dir D:\models\qwen38-quality --dll D:\yasakani\yskn.dll
+```
+
+After the quickstart, open a command prompt in its folder, run `yasakani_env.cmd` (it sets the model folder and the DLL), then type
+`yasakani bench --edit`. It runs the three edit tasks of the speed tables: the code edit and the JSONL edit of the README table, and the
+long JSONL edit (160 records) of "What 0.1.4 changed", with the prompts, output limits and expected answers of [`bench/`](../bench/) (they
+come with the package). As in the tables it is greedy with thinking off. `--think` turns thinking on, with temperature 1.0 and an output
+limit of 32,768 tokens for every task (the server's default), so tok/s varies from run to run and the thinking part is not sped up much;
+the thinking columns of the README tables are not what it reproduces. `--runs 2` repeats each task, `--json` prints a machine-readable
+result. For each task it prints the tokens, the seconds, tok/s, the tokens per pass of the main
+model, the number of wide copy passes, and whether the answer is the expected one. The first lines give the package version, the SHA-256 of
+`yskn.dll`, the GPU (name, compute capability, driver), the model file and whether wide copy passes are used, so a pasted result says what
+it was measured with.
+
+The wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used on compute capability 12.x (RTX 50 series)
+only, and were measured on the RTX 5090 only; other GPUs copy with passes of up to 16 tokens. Speed here is (tokens - 1) / the engine's
+time from the first to the last generated token, inside the process; the thinking-off tables were measured through the server's stream, so
+the numbers are close to them, not the same. The file of the code edit is CPython's `textwrap.py` with one e-mail address replaced by
+`<email>`, as in `bench/`. YASAKANI's thinking-off measurements of November 15 (the speed table and "What 0.1.4 changed") used this same
+text; every earlier record of the code edit in `bench/` (November 3 to 8; among them the other engines' rows and YASAKANI's thinking-on
+rows) had the address itself, 4 prompt tokens more. In the records of November 15 (0.1.4) every answer was the expected one except the
+quality model's code edit (2 lines differ).
+
 ## Are the answers the same as the original model's?
 
 No. The models are compressed (the original BF16 weights are 53.8 GB; the quality model is 12.37 GB and the fastest model 10.31 GB), so they
@@ -75,6 +101,11 @@ need a newer driver fail, and so does compiling PTX at load time. The engine car
 it needs no PTX compilation. We have tested 616.92 only.
 The quickstart checks the driver before it downloads the engine or a model, and if the driver is older it stops and shows where to get a
 new one.
+
+Two GPUs in one PC: one process uses one GPU, chosen with `--device N` (GPU N of `yasakani info` and nvidia-smi). With 0.1.5 this
+could fail with `graph instantiate failed` while the other GPU was visible ([#20](https://github.com/yasakani-dev/yasakani/issues/20)).
+0.1.6 has a fix for this; it has not yet been tried on a PC with two GPUs. A `CUDA_VISIBLE_DEVICES` you set yourself is kept. See
+[What you need](../README.md#what-you-need).
 
 ## How much memory and disk does it need?
 
@@ -133,7 +164,7 @@ API key will do). If it does not connect:
   not enforce the call: the model decides, and an answer without a call comes back with `finish_reason` `stop`. The old `functions` field is
   answered with 400. Version 0.1.0 answered every request with `tools` with 400: if you use 0.1.0, put a newer quickstart (0.1.1 or later) into the same folder
   and run `START.cmd` again (the model is not downloaded again). Tool calling is new and has been tested far less than plain chat.
-  An agent screen is in the harness (see "Use it as an agent" in the [README](../README.md)).
+  An agent screen is in the harness (see "Development and support" in the [README](../README.md)).
 
 ## Can I use other models, for example Qwen4?
 

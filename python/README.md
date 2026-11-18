@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.1.5`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
+Status: version `0.1.6`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
 
 ## What you need
 
@@ -57,9 +57,37 @@ can be given with `--model-dir` or `YASAKANI_MODEL_DIR`.
 | `yasakani selfcheck` | runs three short fixed greedy prompts and compares the output with `selfcheck.json`: *does this installation reproduce the reference output?* |
 | `yasakani chat` | chat in the terminal. `/think on\|off`, `/effort low\|medium\|xhigh`, `/reset`, `/exit`; Ctrl+C stops the answer being written |
 | `yasakani serve` | starts the OpenAI-compatible server (below) |
-| `yasakani bench` | speed measurement: greedy, fixed length, your own prompts with `--prompts-file`; `--json` for a machine-readable result |
+| `yasakani bench` | speed measurement: greedy, fixed length, your own prompts with `--prompts-file`; `--json` for a machine-readable result; `--edit` runs the edit tasks of the speed tables ([below](#bench---edit-the-edit-tasks-of-the-speed-tables)) |
 
 Loading the model takes about a minute; `serve` answers `/health` with `503 loading` until it is ready.
+
+## `bench --edit`: the edit tasks of the speed tables
+
+`yasakani bench --edit` (since 0.1.6) runs the three edit tasks of the speed tables in the README of the repository: the code edit (CPython's
+`textwrap.py`, about 4,800 prompt tokens, at most 8,192 tokens out), the JSONL edit (60 records, at most 8,192) and the long JSONL edit
+(160 records, at most 12,000). Their prompts, output limits and expected answers are those of `bench/` and come with the package
+(`yasakani/edit_tasks.json`), so the repository is not needed. As in the measurement of the tables, each task is greedy with thinking off
+and runs until the model ends its answer. `--think` turns thinking on: those runs use temperature 1.0 (top-p 0.95, top-k 20, min-p 0,
+one seed per run counted up from `--seed0`, default 1) and the output limit 32,768 for every task (the server's default), so their tok/s
+varies from run to run, and the thinking part, which mostly does not copy the input, is not sped up much; the thinking columns of the
+README tables are not what `--think` reproduces. `--runs N` repeats each task, `--json` prints a machine-readable result; `--n` and
+`--prompts-file` do not apply.
+
+Each row gives the prompt tokens; the tokens written (with thinking on, the thinking included); the seconds from the first to the last
+generated token (the engine's own time, inside the process; reading the prompt is not included); tok/s = (tokens - 1) / seconds; the
+tokens per pass of the main model (tokens / passes, as in `bench`); the number of wide copy passes; and whether the answer is the expected
+one (white space around it and a Markdown code fence are ignored, as by the measurement client; otherwise the number of differing lines).
+The first lines name the package version, the SHA-256 of the engine library, the GPU with its compute capability and driver, the model file
+and whether wide copy passes are used, so that a pasted result says what it was measured with. A task whose prompt and output limit do not
+fit the context (`--max-ctx`; the long JSONL edit needs 18,640 tokens with thinking off and 39,448 with `--think`) is skipped, and the
+exit code is then 1.
+
+Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used on compute capability 12.x (RTX 50 series)
+only, and were measured on the RTX 5090 only; on other GPUs the copying uses passes of up to 16 tokens, and the header says so. The
+thinking-off tables were measured through the server's stream (2 runs per task), so these numbers are close to them, not the same. The
+code-edit file has one e-mail address replaced by `<email>`, as in `bench/`. YASAKANI's thinking-off measurements of November 15 (in the
+README: the speed table and "What 0.1.4 changed") used this same text; every earlier record of the code edit in `bench/` (November 3 to
+8; among them the other engines' rows and YASAKANI's thinking-on rows) had the address itself, 4 prompt tokens more.
 
 ## GPUs other than the RTX 5090
 
@@ -84,9 +112,19 @@ been checked on other cards. It is `yasakani.gpu.plan_context`; `Engine` itself 
 
 **Several GPUs.** nvidia-smi and `yasakani info` number the GPUs in PCI order; CUDA by default puts the fastest first. Since 0.1.5 the
 package sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` before it loads the engine library (unless it is already set), so `--device N` is GPU N of
-`yasakani info` and the context is chosen for that GPU. `CUDA_VISIBLE_DEVICES` still renumbers them (`--device` then counts the GPUs it
-names, in its order). When `CUDA_DEVICE_ORDER` is set to something else, it is not known which GPU `--device` is, and the context is chosen
-for the smallest of them. The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
+`yasakani info` and the context is chosen for that GPU. On a PC with two GPUs, 0.1.5 was reported to fail with `graph instantiate
+failed` on a GPU that was not CUDA's device 0 while the other one was visible ([#20](https://github.com/yasakani-dev/yasakani/issues/20)).
+The likely cause, found by reading the code and with a stand-in test on one GPU (not yet confirmed on two GPUs): CUDA's current GPU
+belongs to the thread, the engine chose its GPU only on the thread that opened it, and generation runs on other threads. Since 0.1.6
+the engine makes its GPU current on every call, from any thread. The commands that load the model (`chat`, `serve`, `bench`,
+`selfcheck`) also make that GPU the only one the engine sees: they set `CUDA_VISIBLE_DEVICES` to its UUID from nvidia-smi, open it as
+device 0 and print one line that says so. When nvidia-smi gives no UUID for it, nothing is made invisible, and the line says that the
+engine also sees the other GPUs. A `CUDA_VISIBLE_DEVICES` you set yourself is kept, and still renumbers the GPUs
+(`--device` then counts the GPUs it names, in its order). When `CUDA_DEVICE_ORDER` is set to something else, it is not known which GPU
+`--device` is: nothing is made invisible, and the context is chosen for the smallest of them. With one GPU nothing changes. `Engine`
+itself makes no GPU invisible; to do what the commands do from Python, set `CUDA_VISIBLE_DEVICES` before the first `Engine`
+(`yasakani.gpu.visible_only` names the GPU, but only once `CUDA_DEVICE_ORDER` is `PCI_BUS_ID`: call `yasakani._native.pci_bus_order()`
+first). The quickstart sets `CUDA_VISIBLE_DEVICES` to the GPU it checked. Run one engine per process.
 
 **The self-check** compares with output made on an RTX 5090. On another GPU tiny differences in the computation can make the greedy output
 take another token part-way through, so since 0.1.4 `selfcheck` also lets the engine read the reference output there and compares its

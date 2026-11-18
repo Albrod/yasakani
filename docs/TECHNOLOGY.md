@@ -3,9 +3,9 @@
 Technical notes by the author, written as a map for people who read the source code in this repository.
 日本語: [TECHNOLOGY.ja.md](TECHNOLOGY.ja.md)
 
-* Scope: versions 0.1.0 to 0.1.5. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
+* Scope: versions 0.1.0 to 0.1.6. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
   one missing synchronization (chapter 7); 0.1.4 adds kernels for passes of 17 to 64 rows on compute capability 12.x and changes host
-  code (5.4 and chapter 8); 0.1.5 changes host code only (fixes; the GPU code is that of 0.1.4). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
+  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).
@@ -117,7 +117,7 @@ we got when we ran it again. This is how it works.
 The calibration text is 96 windows of WikiText and 96 windows of **the model's own thinking transcripts**. Thinking text is included
 because this model spends most of its output on thinking. With the output-side statistics and the thinking text together, and with the
 same size and the same format, the KL on thinking text fell to 0.58 times that of our earlier conversion (quality model, 0.0210 to 0.0122).
-On general web text it rose by 3 to 10%. This choice is why the quality table in the README is measured on thinking text.
+On general web text it rose by 3 to 10%. This choice is why the quality numbers in the README are measured on thinking text.
 The 20 thinking transcripts used for that measurement were not used for the statistics.
 
 ### 3.3 The helper model

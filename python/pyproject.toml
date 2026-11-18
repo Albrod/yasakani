@@ -26,5 +26,8 @@ vision = ["Pillow>=10"]
 [tool.setuptools]
 packages = ["yasakani"]
 
+[tool.setuptools.package-data]
+yasakani = ["edit_tasks.json"]
+
 [tool.setuptools.dynamic]
 version = { attr = "yasakani.__version__" }

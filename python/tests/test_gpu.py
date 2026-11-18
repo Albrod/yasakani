@@ -4,13 +4,17 @@
 nvidia-smi is never run for real here: its output is given as text, or a stand-in program prints it.  The memory sizes of the cards are
 what nvidia-smi reports for them (MiB); the rule's numbers are those of the published model files.
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -241,9 +245,90 @@ class DeviceOrderTests(unittest.TestCase):
                              "MiB with a context of 16384 tokens).  Close other programs that use the GPU, or give --max-ctx to try anyway.")
 
     def test_numbering_line(self):
-        self.assertEqual(G.numbering(PCI), "--device N is GPU N above (PCI bus order)")
-        self.assertIn("CUDA_VISIBLE_DEVICES=GPU-50600000", G.numbering(dict(PCI, CUDA_VISIBLE_DEVICES="GPU-50600000")))
-        self.assertIn("CUDA_DEVICE_ORDER=FASTEST_FIRST", G.numbering({"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}))
+        gs = self.gpus()
+        line = "--device N is GPU N above (PCI bus order)"
+        self.assertEqual(G.numbering(PCI), line)                                            # nvidia-smi's list not given: the 0.1.5 line
+        self.assertEqual(G.numbering(PCI, gs), line + "; the engine then sees only that GPU")
+        no_uuid = G.parse("0, NVIDIA RTX A2000 12GB\n1, NVIDIA GeForce RTX 5060 Ti\n", ("index", "name"))
+        self.assertEqual(G.numbering(PCI, no_uuid), line + "; nvidia-smi gave no UUIDs, so the engine also sees the other GPUs")
+        mixed = G.parse("\n".join([REPORTED[0], smi_line(1, "NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 400, "[N/A]")]))
+        self.assertEqual(G.numbering(PCI, mixed), line + "; the engine then sees only that GPU, except GPU 1 (nvidia-smi gave no UUID): "
+                                                         "then it also sees the other GPUs")
+        self.assertIn("CUDA_VISIBLE_DEVICES=GPU-50600000", G.numbering(dict(PCI, CUDA_VISIBLE_DEVICES="GPU-50600000"), gs))
+        self.assertIn("CUDA_DEVICE_ORDER=FASTEST_FIRST", G.numbering({"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}, gs))
+
+
+class VisibleOnlyTests(unittest.TestCase):
+    """0.1.6 (issue #20, second report): with two GPUs visible, the engine failed with "graph instantiate failed" on the GPU that was
+    not CUDA's device 0, and passed with only that GPU visible.  So the command line makes the GPU of --device the only one CUDA sees
+    (CUDA_VISIBLE_DEVICES = its UUID) and opens the engine as device 0; the plan and the messages still name nvidia-smi's GPU N."""
+
+    def gpus(self):
+        return G.parse("\n".join(REPORTED))
+
+    def test_which_gpu(self):
+        gs = self.gpus()
+        for device, uuid in ((1, "GPU-50600000-0000"), (0, "GPU-a2000000-0000")):
+            g = G.visible_only(G.detect(device, environ=PCI, gpus=gs), PCI)
+            self.assertEqual((g.index, g.uuid), (device, uuid))
+        self.assertIsNone(G.visible_only(G.detect(2, environ=PCI, gpus=gs), PCI))           # no such GPU: the engine says so, as before
+        self.assertIsNone(G.visible_only(G.detect(0, environ=PCI, gpus=gs[:1]), PCI))       # one GPU: nothing changes
+        for env in (dict(PCI, CUDA_VISIBLE_DEVICES="1"), dict(PCI, CUDA_VISIBLE_DEVICES=""), dict(PCI, CUDA_VISIBLE_DEVICES="GPU-5060")):
+            self.assertIsNone(G.visible_only(G.detect(0, environ=env, gpus=gs), env))      # the user's choice is kept
+        env = {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}                                       # not known which GPU --device is
+        self.assertIsNone(G.visible_only(G.detect(0, environ=env, gpus=gs), env))
+        no_uuid = G.parse("0, NVIDIA RTX A2000 12GB\n1, NVIDIA GeForce RTX 5060 Ti\n", ("index", "name"))
+        self.assertIsNone(G.visible_only(G.detect(1, environ=PCI, gpus=no_uuid), PCI))      # an nvidia-smi without UUIDs: as 0.1.5
+        self.assertIsNone(G.visible_only(G.Detected(), PCI))                               # no nvidia-smi
+
+    def visible(self, device, env, gpus=None, started=False):
+        from yasakani import cli
+        det = G.detect(device, environ=env, gpus=self.gpus() if gpus is None else gpus)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            opened = cli._visible_gpu(det, device, environ=env, cuda_started=started)
+        return opened, err.getvalue(), det
+
+    def test_command_line(self):
+        env = dict(PCI)
+        opened, said, det = self.visible(1, env)
+        self.assertEqual((opened, env.get("CUDA_VISIBLE_DEVICES")), (0, "GPU-50600000-0000"))
+        self.assertEqual(said.strip(), "gpu: GPU 1 of nvidia-smi (NVIDIA GeForce RTX 5060 Ti); the engine sees only this GPU "
+                                       "(CUDA_VISIBLE_DEVICES is set to its UUID)")
+        self.assertNotIn("GPU-50600000", said)                                              # the UUID is not printed
+        self.assertEqual(det.gpu.index, 1)                                                  # the plan still looks at GPU 1
+        plan = G.plan_context(FakePack(FASTEST), det)
+        self.assertEqual((plan.max_ctx, plan.free_mib), (98304, 15911))
+        env = dict(PCI)
+        opened, said, _ = self.visible(0, env)                                               # --device 0 (the default) too
+        self.assertEqual((opened, env.get("CUDA_VISIBLE_DEVICES")), (0, "GPU-a2000000-0000"))
+        self.assertIn("gpu: GPU 0 of nvidia-smi (NVIDIA RTX A2000 12GB)", said)
+        for env, device in ((dict(PCI), 0), (dict(PCI), 1)):                                # one GPU: no change at all
+            opened, said, _ = self.visible(device, env, gpus=self.gpus()[:1])
+            self.assertEqual((opened, said, env), (device, "", PCI))
+        env = dict(PCI, CUDA_VISIBLE_DEVICES="1")                                           # set by the user (yasakani_env.cmd): kept
+        opened, said, _ = self.visible(0, env)
+        self.assertEqual((opened, said, env["CUDA_VISIBLE_DEVICES"]), (0, "", "1"))
+        env = dict(PCI, CUDA_VISIBLE_DEVICES="0,1")
+        opened, said, _ = self.visible(1, env)
+        self.assertEqual((opened, said, env["CUDA_VISIBLE_DEVICES"]), (1, "", "0,1"))
+        env = {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}
+        opened, said, _ = self.visible(1, env)
+        self.assertEqual((opened, said, env), (1, "", {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}))
+        env = dict(PCI)                                                                     # CUDA may have started: too late to change
+        opened, said, _ = self.visible(1, env, started=True)
+        self.assertEqual((opened, said, env), (1, "", PCI))
+        no_uuid = G.parse("\n".join([REPORTED[0], smi_line(1, "NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 400, "[N/A]")]))
+        env = dict(PCI)                                                                     # no UUID for GPU 1: nothing hidden, and it says so
+        opened, said, _ = self.visible(1, env, gpus=no_uuid)
+        self.assertEqual((opened, env), (1, PCI))
+        self.assertEqual(said.strip(), "gpu: GPU 1 of nvidia-smi (NVIDIA GeForce RTX 5060 Ti); nvidia-smi gave no UUID for it, so the "
+                                       "engine also sees the other GPUs")
+        self.assertNotIn("sees only", said)
+        env = dict(PCI)                                                                     # GPU 0 has its UUID: as above
+        opened, said, _ = self.visible(0, env, gpus=no_uuid)
+        self.assertEqual((opened, env.get("CUDA_VISIBLE_DEVICES")), (0, "GPU-a2000000-0000"))
+        self.assertIn("the engine sees only this GPU", said)
 
 
 class ContextRuleTests(unittest.TestCase):
@@ -342,8 +427,8 @@ class QuickstartTests(unittest.TestCase):
             raise unittest.SkipTest("quickstart/quickstart.py not found (set YASAKANI_QUICKSTART)")
 
     def test_version(self):
-        self.assertEqual(self.qs.QS_VERSION, "0.1.5")
-        self.assertIn("/v0.1.5/", self.qs.ENGINE_URL)
+        self.assertEqual(self.qs.QS_VERSION, "0.1.6")
+        self.assertIn("/v0.1.6/", self.qs.ENGINE_URL)
 
     def test_decision_table(self):
         for name, cc, total, qs, quality in CARDS:
@@ -529,7 +614,9 @@ class CliGpuTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("NVIDIA GeForce RTX 5060 Ti (compute capability 12.0)", r.stderr)
         self.assertIn("context: 98304 tokens, chosen from the free GPU memory (4958 of 16311 MiB free)", r.stderr)
-        self.assertEqual(log.read_text().splitlines(), ["device=1 order=PCI_BUS_ID visible=(unset)"])
+        self.assertIn("gpu: GPU 1 of nvidia-smi (NVIDIA GeForce RTX 5060 Ti); the engine sees only this GPU", r.stderr)
+        self.assertNotIn("GPU-1", r.stderr)
+        self.assertEqual(log.read_text().splitlines(), ["device=0 order=PCI_BUS_ID visible=GPU-1"])      # 0.1.6 (0.1.5: device=1, both visible)
         r = self.run_cli(gpus, "chat", *self.common(), "--device", "0", stub=dict(STUB_OPEN_LOG=str(log)))
         self.assertEqual(r.returncode, 1)
         self.assertIn("(2782 of 12282 MiB free", r.stderr)
@@ -539,10 +626,71 @@ class CliGpuTests(unittest.TestCase):
                          stub=dict(STUB_OPEN_LOG=str(log), CUDA_DEVICE_ORDER="FASTEST_FIRST"))
         self.assertEqual(r.returncode, 0, r.stderr)                            # a value the user set is kept
         self.assertEqual(log.read_text().splitlines()[-1], "device=0 order=FASTEST_FIRST visible=(unset)")
+        self.assertNotIn("gpu: ", r.stderr)
         r = self.run_cli(gpus, "info", *self.common())
-        self.assertIn("--device N is GPU N above (PCI bus order)", r.stdout)
+        self.assertIn("--device N is GPU N above (PCI bus order); the engine then sees only that GPU", r.stdout)
         r = self.run_cli(gpus[:1], "info", *self.common())
         self.assertNotIn("--device", r.stdout)                                   # one GPU: as before
+        nou = [dict(g, uuid="[N/A]") for g in gpus]                             # an nvidia-smi that gives no UUID: the lines say so
+        r = self.run_cli(nou, "info", *self.common())
+        self.assertIn("--device N is GPU N above (PCI bus order); nvidia-smi gave no UUIDs, so the engine also sees the other GPUs", r.stdout)
+        self.assertNotIn("sees only", r.stdout)
+        r = self.run_cli(nou, "chat", *self.common(), "--no-think", "--device", "1", stub=dict(STUB_OPEN_LOG=str(log)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("gpu: GPU 1 of nvidia-smi (NVIDIA GeForce RTX 5060 Ti); nvidia-smi gave no UUID for it, so the engine also sees the "
+                      "other GPUs", r.stderr)
+        self.assertEqual(log.read_text().splitlines()[-1], "device=1 order=PCI_BUS_ID visible=(unset)")       # nothing hidden (as 0.1.5)
+
+    def test_two_gpus_only_the_chosen_one_visible(self):
+        """0.1.6 (issue #20): chat, selfcheck, bench and serve open the engine as device 0 with only the GPU of --device visible; the
+        user's CUDA_VISIBLE_DEVICES is kept; one GPU is unchanged."""
+        gpus = [self.gpu("NVIDIA RTX A2000 12GB", "8.6", 12282, 9500, 0), self.gpu("NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 11353, 1)]
+        log = self.folder.parent / "open_visible.log"
+        said = "gpu: GPU 1 of nvidia-smi (NVIDIA GeForce RTX 5060 Ti); the engine sees only this GPU (CUDA_VISIBLE_DEVICES is set to its UUID)"
+        ref = self.folder.parent / "ref_visible.json"
+        for args in (["chat", "--no-think"], ["selfcheck", "--max-ctx", "4096", "--write", str(ref)], ["bench", "--max-ctx", "4096", "--n", "8"]):
+            if log.exists():
+                log.unlink()
+            r = self.run_cli(gpus, *args, *self.common(), "--device", "1", stub=dict(STUB_OPEN_LOG=str(log)))
+            self.assertEqual(r.returncode, 0, (args, r.stdout, r.stderr))
+            self.assertIn(said, r.stderr)
+            self.assertEqual(log.read_text().splitlines(), ["device=0 order=PCI_BUS_ID visible=GPU-1"], args)
+        self.assertEqual(json.loads(ref.read_text(encoding="utf-8"))["gpu"], "NVIDIA GeForce RTX 5060 Ti")   # the GPU of --device
+        log.unlink()
+        env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1", YASAKANI_NVIDIA_SMI=str(self.smi), FAKE_GPUS=json.dumps(gpus),
+                   STUB_OPEN_LOG=str(log))
+        for k in [k for k in env if k.startswith(("YSKN_", "STUB_")) and k != "STUB_OPEN_LOG"] + ["YASAKANI_DLL", "YASAKANI_MODEL_DIR",
+                                                                                                "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"]:
+            env.pop(k, None)
+        proc = subprocess.Popen([sys.executable, "-m", "yasakani", "serve", *self.common(), "--device", "1", "--port", "0", "--no-warmup"],
+                                cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            t0 = time.time()
+            while time.time() - t0 < 40 and not (log.exists() and log.read_text().strip()):
+                time.sleep(0.2)
+            time.sleep(0.5)
+            proc.send_signal(signal.SIGINT)
+            out, err = proc.communicate(timeout=20)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        self.assertEqual(log.read_text().splitlines(), ["device=0 order=PCI_BUS_ID visible=GPU-1"], err)
+        self.assertIn(said, err)
+        r = self.run_cli(gpus, "chat", *self.common(), "--no-think", "--max-ctx", "8192", stub=dict(STUB_OPEN_LOG=str(log)))
+        self.assertEqual(r.returncode, 0, r.stderr)                            # no --device: GPU 0 of nvidia-smi, the same way
+        self.assertEqual(log.read_text().splitlines()[-1], "device=0 order=PCI_BUS_ID visible=GPU-0")
+        for user in ("GPU-1", "1"):                                             # the user's CUDA_VISIBLE_DEVICES: kept, as in 0.1.5
+            r = self.run_cli(gpus, "chat", *self.common(), "--no-think", stub=dict(STUB_OPEN_LOG=str(log), CUDA_VISIBLE_DEVICES=user))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(log.read_text().splitlines()[-1], "device=0 order=PCI_BUS_ID visible=%s" % user)
+            self.assertNotIn("gpu: ", r.stderr)
+            self.assertIn("NVIDIA GeForce RTX 5060 Ti (compute capability 12.0)", r.stderr)       # the plan is for the 5060 Ti
+        one = [self.gpu("NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 11353, 0)]
+        r = self.run_cli(one, "chat", *self.common(), "--no-think", stub=dict(STUB_OPEN_LOG=str(log)))
+        self.assertEqual(r.returncode, 0, r.stderr)                            # one GPU: nothing changes
+        self.assertEqual(log.read_text().splitlines()[-1], "device=0 order=PCI_BUS_ID visible=(unset)")
+        self.assertNotIn("gpu: ", r.stderr)
 
     def test_selfcheck_exit_codes(self):
         ref = self.folder.parent / "ref_gpu.json"
