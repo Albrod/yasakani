@@ -15,7 +15,11 @@ Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building 
 | Build tools | CMake (3.24 or newer is required) and Ninja |
 | Target | one DLL with machine code for compute capability 8.6 (`sm_86`, RTX 30 series), 8.9 (`sm_89`, RTX 40 series) and 12.0 (`sm_120`, RTX 50 series), plus PTX for `compute_120`. Tested on the RTX 5090 only |
 
-The `yskn.dll` on the release page is this build (SHA-256 `967de3ea4102c54972ea8d31f3286eaee466f2db1092d5ea5c26eec10fc6be8f`). It is the
+The `yskn.dll` on the release page is this build (SHA-256 `a0991ab6ea5d5c7819a57775360962637a389daa36c3c6001d13187b242f7170`). It is
+the source of 0.1.6 plus the experimental code for several requests at once (`serve --parallel N`): two new GPU files for passes of several
+requests (`src/q35_atxpk_ms.cu`, `src/q35_sample_ms.cu`), kernels for several rows in other GPU files, and host code in `src/engine35.cpp`
+and `src/c_api.cpp`. It was compiled with the two commands below into the build folder of the 0.1.5 build, one step at a time as the
+code was added; the last step compiled only `src/c_api.cpp` again and linked. The 0.1.6 build (`967de3ea…be8f`) was the
 build of 0.1.5 (`918560d6…3f7a`) with the change of 0.1.6 in `src/c_api.cpp` (every entry point selects the engine's GPU,
 [#20](https://github.com/yasakani-dev/yasakani/issues/20)) compiled into its build folder with the two commands below (the CUDA compiler was named
 explicitly with `-DCMAKE_CUDA_COMPILER`): one C++ file was compiled again and linked, the exported functions are the same, and the GPU
