@@ -420,7 +420,7 @@ async function poll() {
   showModel(h); setButton();
   setTimeout(poll, ready ? 15000 : 1500);
 }
-// 0.1.7: the launcher found a newer version.  The page itself asks nothing of GitHub; the button asks the launcher (this address),
+// The launcher found a newer version.  The page itself asks nothing of GitHub; the button asks the launcher (this address),
 // with the one-time token of /webchat/config.  The launcher stops the server, updates and starts again on the same port.
 function showUpdate() {
   const u = cfg.update;

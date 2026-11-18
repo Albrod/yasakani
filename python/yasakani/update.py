@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 the YASAKANI authors
-"""``yasakani update [--check]`` (0.1.7): is there a newer release, and how to get it.
+"""``yasakani update [--check]``: is there a newer release, and how to get it.
 
 This is the only part of the package that contacts the network, and only when the command is typed.  It sends one HTTPS GET to
 GitHub's API for the latest release, with a generic User-Agent and nothing about this computer.  ``serve``, ``chat`` and ``bench``

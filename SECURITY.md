@@ -34,8 +34,8 @@ What it does:
 * Request bodies are limited to 32 MB; idle connections time out after 300 s; responses carry `X-Frame-Options: DENY`,
   `frame-ancestors 'none'` and `nosniff`.
 * The Python package makes **no outgoing network connections** (it only listens; the tokenizer is read from the local model folder), except
-  `yasakani update`, which sends one HTTPS request to GitHub's API when you type it and, in a folder set up by the quickstart, opens a new
-  window that runs `START.cmd --action update` (see the FAQ, “How does the update work?”). Otherwise it runs one external program: `nvidia-smi`, to
+  `yasakani update`: after a manual installation it sends one HTTPS request to GitHub's API when you type it; in a folder set up by the
+  quickstart it sends nothing itself and opens a new window that runs `START.cmd --action update` (see the FAQ, “How does the update work?”). Otherwise it runs one external program: `nvidia-smi`, to
   read the name, compute capability and memory of the GPU (in `yasakani info` and whenever a command opens the model; the environment
   variable `YASAKANI_NVIDIA_SMI` can name another nvidia-smi, or `none` to run none). It does not execute code the model writes. It does not write prompts or answers to disk or to a log. It writes a file only
   when you run `yasakani selfcheck --write`, or with `--vision-cache FOLDER` of the optional image input (see below).

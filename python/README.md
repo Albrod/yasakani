@@ -64,14 +64,14 @@ Loading the model takes about a minute; `serve` answers `/health` with `503 load
 
 ## `yasakani update`
 
-`yasakani update` asks GitHub's API for the latest release (one HTTPS request, User-Agent `yasakani-update`, nothing about this computer)
-and prints the installed and the latest version. `--check` stops there.
+What `yasakani update` does depends on how the package was installed.
 
-* In a folder set up by the quickstart (`START.cmd`), the update is the quickstart's job: the command opens a new window that runs
-  `START.cmd --action update` and ends at once, so that nothing of this Python environment is in use while the package is replaced.
-  The quickstart asks before it changes anything (`--yes` skips the question) and keeps the start files of the old version for
-  `START.cmd --action rollback`.
-* After a manual installation it changes nothing. It prints the two steps: download and unpack the engine ZIP of the new release (its
+* In a folder set up by the quickstart (`START.cmd`), the update is the quickstart's job. The command sends nothing itself: it opens a
+  new window that runs `START.cmd --action update` and ends at once, so that nothing of this Python environment is in use while the
+  package is replaced. The quickstart checks for the latest release, asks before it changes anything (`--yes` skips the question) and
+  keeps the start files of the old version for `START.cmd --action rollback`.
+* After a manual installation it asks GitHub's API for the latest release (one HTTPS request, User-Agent `yasakani-update`, nothing
+  about this computer), prints the installed and the latest version, and changes nothing. It prints the two steps: download and unpack the engine ZIP of the new release (its
   SHA-256 is in the release's `SHA256SUMS.txt`), then `pip install --upgrade` the unpacked folder and use the `yskn.dll` in it. On Linux:
   `git pull` and build again as in [BUILDING.md](../BUILDING.md).
 

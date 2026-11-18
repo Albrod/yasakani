@@ -202,9 +202,10 @@ From the release after v0.1.6, the quickstart (`START.cmd`) can update itself.
 * **How far you can trust it.** The release files are not code-signed. The check rests on GitHub's HTTPS and on the release's
   `SHA256SUMS.txt`, which comes from the same release: it catches a broken or swapped download, not a release that was itself replaced on
   GitHub.
-* **`yasakani update`** prints the installed and the latest version (`--check` only prints). In a folder set up by the quickstart it opens a
-  new window that runs `START.cmd --action update`; after a manual installation it prints what to download and the command to run, and
-  changes nothing. `yasakani serve`, `chat` and `bench` never contact the network.
+* **`yasakani update`** depends on how YASAKANI was installed. In a folder set up by the quickstart it asks GitHub nothing itself: it
+  opens a new window that runs `START.cmd --action update` and ends; the quickstart then checks, asks and replaces the files (`--yes`
+  skips the question). After a manual installation it asks GitHub once, prints the installed and the latest version, prints what to
+  download and the command to run, and changes nothing. `--check` only prints, in both cases. `yasakani serve`, `chat` and `bench` never contact the network.
 
 ## Windows warns me about the download. Is that normal?
 
