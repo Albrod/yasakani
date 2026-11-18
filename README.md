@@ -139,9 +139,10 @@ RTX 5090:
 
 **Arete-27B-pi** (by [@audreyt](https://github.com/audreyt)): Arete-27B with the harness-hub pi coding adapter merged before quantization.
 The [model card](https://huggingface.co/audreyt/Arete-27B-pi-YASAKANI-quality/tree/7a0670eaa25753ed82aa1e31f1d943d6ff582be0)
-includes pi setup instructions and results measured by @audreyt on an RTX 5090 with YASAKANI 0.1.4:
+(revision `7a0670e`; model file `arete_pi_quality.yskn`, 12,365,242,368 bytes, `49676c4ad01a9714fc35f74c9c4f6bb18d9367911f2453eab6b44798d907f75b`)
+includes pi setup instructions and results measured by the author of this conversion on an RTX 5090 (Linux) with YASAKANI 0.1.4:
 `verify` matched all 11 files and `selfcheck` passed all 3 cases. Against the
-merged BF16 model, the quality tools measured KL divergence 0.01127 and 95.57% top-1 agreement (20 windows, KV5 cache).
+merged BF16 model, the quality tools measured KL divergence 0.01127 and 95.57% top-1 agreement (20 thinking windows, 20,460 positions, KV5 cache).
 
 <a name="how-it-works-briefly"></a>
 <a name="documentation-and-contributions"></a>

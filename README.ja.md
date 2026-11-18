@@ -135,6 +135,13 @@ yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dl
   そのため思考文では、上の速さの表の値より遅くなると考えてください。
 * そのほかの評価は、設定と注意点とともに[モデルカード](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9)にあります。
 
+**Arete-27B-pi**（作成：[@audreyt](https://github.com/audreyt)）：Arete-27B に harness-hub の pi 用コーディングアダプターを合成してから変換したものです。
+[モデルカード](https://huggingface.co/audreyt/Arete-27B-pi-YASAKANI-quality/tree/7a0670eaa25753ed82aa1e31f1d943d6ff582be0)
+（リビジョン `7a0670e`、モデルファイル `arete_pi_quality.yskn`、12,365,242,368 バイト、`49676c4ad01a9714fc35f74c9c4f6bb18d9367911f2453eab6b44798d907f75b`）に、
+pi での設定方法と、この変換を作った人が RTX 5090（Linux）と YASAKANI 0.1.4 で測った結果があります。
+`verify` は 11 ファイルすべてが一致し、`selfcheck` は 3 件すべてが合格しました。合成後の BF16 のモデルとの近さは、
+品質の道具で KL 0.01127、第 1 候補一致率 95.57% でした（思考文 20 本・20,460 位置、KV5 のキャッシュ）。
+
 <a name="仕組みかんたんに"></a>
 <a name="ドキュメントと開発参加"></a>
 
