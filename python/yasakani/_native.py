@@ -77,6 +77,15 @@ def pci_bus_order(environ=None) -> None:
     env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
 
+_LOADED = []                                     # paths of the engine libraries loaded in this process
+
+
+def library_loaded() -> bool:
+    """True once an engine library has been loaded in this process.  CUDA may have started then, and it does not read
+    ``CUDA_DEVICE_ORDER`` or ``CUDA_VISIBLE_DEVICES`` again."""
+    return bool(_LOADED)
+
+
 class NativeLib:
     """The loaded library with typed entry points in ``fn``.  ``last_error()`` is thread-local in the engine: call it on the thread
     that made the failing call."""
@@ -88,6 +97,7 @@ class NativeLib:
             self.dll = C.CDLL(str(self.path))
         except OSError as ex:
             raise YasakaniError(_VC_HINT + str(ex)) from ex
+        _LOADED.append(str(self.path))
         self.fn = {}
         missing = []
         for name, (argtypes, restype) in SIGNATURES.items():

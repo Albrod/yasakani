@@ -20,7 +20,7 @@ from typing import List, Optional, Sequence
 
 from . import __version__
 from . import gpu as gpus
-from ._native import YasakaniError, find_library, pci_bus_order
+from ._native import YasakaniError, find_library, library_loaded, pci_bus_order
 from .runtime import ModelPack, RuntimeProfile
 from .selfcheck import FORMAT as SELFCHECK_FORMAT
 from .selfcheck import cases as _selfcheck_cases, ids_sha as _ids_sha, run as _selfcheck_run    # noqa: F401  (names of 0.1.3: bench scripts use them)
@@ -93,6 +93,26 @@ def _gpu_memory_warning(device: Optional[int] = 0) -> Optional[str]:
                 "in ordinary memory and generation becomes several times slower, without an error.  Close other programs that use "
                 "the GPU, or lower --max-ctx." % (used, total))
     return None
+
+
+def _visible_gpu(det, device: int, environ=None, cuda_started: Optional[bool] = None) -> int:
+    """0.1.6 (issue #20): on a PC with several GPUs, make the GPU of ``--device`` the only one the engine sees
+    (``CUDA_VISIBLE_DEVICES`` = its UUID, :func:`yasakani.gpu.visible_only`) and say so in one line.  Returns the device number to open
+    the engine with: 0 then, else ``device`` unchanged (one GPU, ``CUDA_VISIBLE_DEVICES`` set by the user, GPU not known).  When
+    nvidia-smi gave no UUID for that GPU, nothing is changed and the line says that the engine also sees the other GPUs.  CUDA reads
+    the variable once, when it starts, so nothing is changed once an engine library has been loaded in this process."""
+    env = os.environ if environ is None else environ
+    g = gpus.visible_only(det, env)
+    if g is None:
+        k = det.gpu
+        if k is not None and len(det.gpus) > 1 and det.numbered and not gpus.has_uuid(k):
+            _say("gpu: GPU %d of nvidia-smi (%s); nvidia-smi gave no UUID for it, so the engine also sees the other GPUs" % (k.index, k.name))
+        return device
+    if (library_loaded() if cuda_started is None else cuda_started):
+        return device
+    env["CUDA_VISIBLE_DEVICES"] = g.uuid
+    _say("gpu: GPU %d of nvidia-smi (%s); the engine sees only this GPU (CUDA_VISIBLE_DEVICES is set to its UUID)" % (g.index, g.name))
+    return 0
 
 
 def _add_engine_args(sp: argparse.ArgumentParser) -> None:
@@ -170,9 +190,10 @@ def _open_stack(args, *, warm: bool = True):
         _say(line)
     max_ctx = plan.max_ctx
     profile = RuntimeProfile.default(pack, plan.env) if plan.env else None
+    device = _visible_gpu(det, args.device)      # 0.1.6: several GPUs: the engine sees only the chosen one, as its device 0
     _say("loading the model (%s of weights) ..." % _human(pack.weights.stat().st_size))
     t0 = time.time()
-    eng = Engine(pack, max_ctx=max_ctx, device=args.device, dll=args.dll, profile=profile)
+    eng = Engine(pack, max_ctx=max_ctx, device=device, dll=args.dll, profile=profile)
     try:
         if eng.removed_env:
             _say("note: ignored %d YSKN_* setting(s) from the environment: %s" % (len(eng.removed_env), ", ".join(sorted(eng.removed_env))))
@@ -214,7 +235,7 @@ def cmd_info(args) -> int:
     for g in found:
         print("         GPU %d: compute capability %s - %s" % (g.index, g.cc_text, gpus.describe(g)))
     if len(found) > 1:
-        print("         " + gpus.numbering())
+        print("         " + gpus.numbering(gpus=found))
     d = getattr(args, "model_dir", None) or os.environ.get("YASAKANI_MODEL_DIR")
     if d:
         try:
@@ -441,6 +462,9 @@ def _load_prompts(path: Optional[str]):
 
 def cmd_bench(args) -> int:
     from .chat import ChatParams
+    if getattr(args, "edit", False):
+        return _bench_edit(args)
+    n_tokens = 512 if args.n is None else args.n
     prompts = _load_prompts(args.prompts_file)
     pack, eng, fmt, runner = _open_stack(args, warm=True)
     rows = []
@@ -450,7 +474,7 @@ def cmd_bench(args) -> int:
         for name, text in prompts:
             for run in range(args.runs):
                 eng.reset()
-                p = ChatParams(messages=[{"role": "user", "content": text}], max_tokens=args.n, temperature=0.0, ignore_eos=True,
+                p = ChatParams(messages=[{"role": "user", "content": text}], max_tokens=n_tokens, temperature=0.0, ignore_eos=True,
                                loop_guard=False, template_kwargs=dict(kw))
                 u = runner.run(p, lambda kind, t: None)
                 tps = u.completion_tokens / (u.gen_ms / 1000.0) if u.gen_ms > 0 else 0.0
@@ -464,11 +488,45 @@ def cmd_bench(args) -> int:
         eng.close()
     mean = sum(r["tokens_per_s"] for r in rows) / len(rows)
     if args.json:
-        print(json.dumps(dict(version=__version__, model=pack.model_id, gpu=_gpu_lines(), tokens_per_test=args.n, runs=rows,
+        print(json.dumps(dict(version=__version__, model=pack.model_id, gpu=_gpu_lines(), tokens_per_test=n_tokens, runs=rows,
                               mean_tokens_per_s=round(mean, 1)), indent=1))
     else:
-        print("mean over %d run(s): %.1f tokens/s   (greedy, thinking %s, %d tokens each)" % (len(rows), mean, "on" if args.think else "off", args.n))
+        print("mean over %d run(s): %.1f tokens/s   (greedy, thinking %s, %d tokens each)" % (len(rows), mean, "on" if args.think else "off", n_tokens))
     return 0
+
+
+def _bench_edit(args) -> int:
+    """0.1.6: ``bench --edit`` runs the three edit tasks of the speed tables (yasakani/editbench.py).  Exit code 1 when a task did not
+    fit the context and was skipped."""
+    from . import editbench
+    if args.prompts_file or args.n is not None:
+        raise YasakaniError("--prompts-file and --n do not apply to --edit: each edit task has its own prompt and output limit")
+    tasks = editbench.load_tasks()                     # before the long load
+    pack, eng, fmt, runner = _open_stack(args, warm=True)
+    try:
+        det = getattr(args, "gpu_detected", None)
+        head = editbench.header(__version__, pack, eng, det.gpu if det is not None else None, _gpu_lines(), args.think, args.runs,
+                                seed0=args.seed0)
+        if not args.json:
+            for line in editbench.header_lines(head):
+                print(line, flush=True)
+
+        def skip(task, need):
+            if not args.json:
+                print("%-17s skipped: needs a context of %d tokens, the engine has %d (--max-ctx)" % (task.title, need, eng.max_ctx), flush=True)
+
+        rows, skipped = editbench.run(runner, tasks, think=args.think, runs=args.runs, on_skip=skip,
+                                      on_row=None if args.json else (lambda r: print(editbench.row_line(r), flush=True)))
+    finally:
+        eng.close()
+    mean = editbench.means(rows)
+    if args.json:
+        print(json.dumps(dict(head, runs=rows, skipped=skipped, mean_tokens_per_s=mean), indent=1))
+    else:
+        if args.runs > 1 and rows:
+            print("mean tok/s: " + ", ".join("%s %.1f" % (t.title, mean[t.name]) for t in tasks if t.name in mean))
+        print(editbench.footer(args.think))
+    return 1 if skipped else 0
 
 
 # ---- selfcheck --------------------------------------------------------------------------------------------------------------------
@@ -628,12 +686,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--write", metavar="FILE", help="write a new reference file instead of checking (for people who publish a model folder)")
     sp.set_defaults(func=cmd_selfcheck)
 
-    sp = sub.add_parser("bench", help="measure generation speed (greedy, fixed length)")
+    sp = sub.add_parser("bench", help="measure generation speed (greedy; fixed length, or with --edit the edit tasks of the speed tables; "
+                                      "--edit --think samples)")
     _add_engine_args(sp)
+    sp.add_argument("--edit", action="store_true",
+                    help="run the 3 edit tasks of the speed tables in the README (code edit, JSONL edit, long JSONL edit) until the model "
+                         "ends its answer; prints tokens, seconds, tok/s, tokens per pass, wide copy passes and whether each answer is "
+                         "the expected one")
     sp.add_argument("--prompts-file", help="JSON list of prompts (strings or {\"name\", \"prompt\"}) or a text file with one prompt per line")
-    sp.add_argument("--n", type=int, default=512, help="tokens to generate per test (default 512)")
+    sp.add_argument("--n", type=int, default=None, help="tokens to generate per test (default 512; not with --edit)")
     sp.add_argument("--runs", type=int, default=1, help="repeats per test")
-    sp.add_argument("--think", action="store_true", help="let the model think first (default: answer directly)")
+    sp.add_argument("--think", action="store_true",
+                    help="let the model think first (default: answer directly).  With --edit: temperature 1.0 (seeds from --seed0) and "
+                         "an output limit of 32768 tokens for every task, so tok/s varies from run to run")
     sp.add_argument("--json", action="store_true", help="print the result as JSON")
     sp.set_defaults(func=cmd_bench)
     return ap

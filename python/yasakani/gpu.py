@@ -189,14 +189,46 @@ def _pci_order(env: Mapping[str, str]) -> bool:
     return (env.get("CUDA_DEVICE_ORDER") or "").strip().upper() == "PCI_BUS_ID"
 
 
-def numbering(environ: Optional[Mapping[str, str]] = None) -> str:
-    """How ``--device`` relates to nvidia-smi's GPU numbers (one line for ``yasakani info`` on a PC with several GPUs)."""
+def has_uuid(g: Optional[GpuInfo]) -> bool:
+    """True when nvidia-smi gave the GPU's UUID (``GPU-...``), the name ``CUDA_VISIBLE_DEVICES`` is set to (:func:`visible_only`)."""
+    return g is not None and bool(g.uuid) and g.uuid.upper().startswith("GPU-")
+
+
+def numbering(environ: Optional[Mapping[str, str]] = None, gpus: Optional[Sequence[GpuInfo]] = None) -> str:
+    """How ``--device`` relates to nvidia-smi's GPU numbers (one line for ``yasakani info`` on a PC with several GPUs).  With ``gpus``
+    (nvidia-smi's list) it also says whether the commands that load the model let the engine see only that GPU (0.1.6): not for a GPU
+    whose UUID nvidia-smi did not give."""
     env = os.environ if environ is None else environ
     if "CUDA_VISIBLE_DEVICES" in env:
         return "--device counts only the GPUs in CUDA_VISIBLE_DEVICES=%s, in that order" % env.get("CUDA_VISIBLE_DEVICES")
     if not _pci_order(env):
         return "--device follows CUDA_DEVICE_ORDER=%s, not the GPU numbers above" % env.get("CUDA_DEVICE_ORDER")
-    return "--device N is GPU N above (PCI bus order)"
+    line = "--device N is GPU N above (PCI bus order)"
+    if gpus is None:
+        return line
+    missing = [g.index for g in gpus if not has_uuid(g)]
+    if not missing:
+        return line + "; the engine then sees only that GPU"
+    if len(missing) == len(gpus):
+        return line + "; nvidia-smi gave no UUIDs, so the engine also sees the other GPUs"
+    return line + "; the engine then sees only that GPU, except GPU %s (nvidia-smi gave no UUID): then it also sees the other GPUs" % (
+        ", ".join(str(i) for i in missing))
+
+
+def visible_only(det: Detected, environ: Optional[Mapping[str, str]] = None) -> Optional[GpuInfo]:
+    """0.1.6 (issue #20): the GPU to make the only one CUDA sees, or None to leave CUDA's view of the GPUs as it is.
+
+    On a PC with two GPUs, the engine was reported to fail ("graph instantiate failed") when it ran on a GPU that was not CUDA's
+    device 0 while the other GPU was visible too; the same GPU passed when it was the only one visible (as the quickstart sets it).
+    So when nvidia-smi lists more than one GPU, ``CUDA_VISIBLE_DEVICES`` is not set and it is known which GPU ``--device`` is (PCI
+    bus order), the command line sets ``CUDA_VISIBLE_DEVICES`` to the UUID of that GPU before the engine library is loaded and opens
+    the engine as device 0, as the quickstart does for the GPU it checked.  None on a PC with one GPU, when ``CUDA_VISIBLE_DEVICES``
+    is set (even empty: the user's choice is kept), and when the GPU or its UUID is not known."""
+    env = os.environ if environ is None else environ
+    if "CUDA_VISIBLE_DEVICES" in env or len(det.gpus) < 2 or not det.numbered:
+        return None
+    g = det.gpu
+    return g if has_uuid(g) else None
 
 
 def select(gpus: Sequence[GpuInfo], device: int = 0, environ: Optional[Mapping[str, str]] = None) -> List[GpuInfo]:

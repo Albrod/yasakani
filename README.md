@@ -6,7 +6,7 @@ English · [日本語](README.ja.md)
 
 YASAKANI runs Qwen3.8-27B on a Windows PC with one NVIDIA RTX GPU. After setup you can chat and edit code offline, or connect your development tools to its OpenAI-compatible API.
 
-**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.5/yasakani-quickstart-0.1.5.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.5/fast_live_uncut.mp4)
+**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.6/yasakani-quickstart-0.1.6.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.6/fast_live_uncut.mp4)
 
 <a name="two-models"></a>
 <a name="what-you-need"></a>
@@ -26,15 +26,44 @@ Choose the **quality model** for everyday use and predictions closest to the ori
 
 Contributors have tested a Linux build from source. AMD and Mac are future targets. [GPU list and requirements](docs/FAQ.md#which-gpus-which-systems) · [Build on Linux](BUILDING.md#linux-building-from-source)
 
+**Several GPUs:** one process uses one GPU. `--device N` picks GPU N as `yasakani info` and nvidia-smi number them. With 0.1.5, `--device 1` on a PC with two GPUs could stop with `graph instantiate failed` ([#20](https://github.com/yasakani-dev/yasakani/issues/20)); 0.1.6 has a fix for this, but it has not yet been tried on a PC with two GPUs.
+
 ## Quick start
 
 You need 64-bit Windows 11, Python 3.10 or later, NVIDIA driver 580 or later, the Visual C++ 2015–2022 x64 runtime, and 20 GB of free disk space.
 
-1. Extract the v0.1.5 Windows quickstart ZIP to a simple path such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)
+1. Extract the v0.1.6 Windows quickstart ZIP to a simple path such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.6)
 2. Open **`START.cmd`** and choose a model. The launcher downloads the engine and model files, verifies them, and runs the GPU self-check.
 3. Select browser or terminal chat and enter your first prompt. To use another app, start the server and point the client at `http://127.0.0.1:8765/v1`.
 
 In terminal chat, enter `/effort medium` for a shorter thinking phase or `/think off` to turn it off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
+
+## Community conversions
+
+Files that other people made with the converter in [tools/convert/](tools/convert/). They are **not checked or maintained by this
+project**; the person named below keeps them working, and a conversion may be removed from this list in a release where it has fallen
+behind.
+
+**Arete-27B** (by [@audreyt](https://github.com/audreyt)): a community conversion of [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B),
+Nous Research's fine-tune of Qwen3.8-27B, made with the quality model's settings and reusing its draft model unchanged. Files:
+[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) at revision
+`659effb`; the SHA-256 of every file is in its `SHA256SUMS` (model file `arete_quality.yskn`, 12,365,242,368 bytes,
+`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`).
+
+```bat
+hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
+yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
+```
+
+Then use it as in [Quick start](#quick-start) with `--model-dir D:\models\arete-quality`. Measured by the author of this conversion on an
+RTX 5090:
+
+* Closeness to its own BF16 original (`tools/quality/`, 20 thinking windows, KV5 cache, measured with 0.1.3): KL divergence 0.0116,
+  same most likely token 95.64%. The quality model, measured the same way against Qwen3.8-27B: 0.0126 and 95.35%.
+* With 0.1.4: `yasakani verify` 11 of 11 files, `yasakani selfcheck` 3 of 3 (the same outputs as with 0.1.3). Tokens per look-ahead
+  pass: prose 2.40, thinking 2.48, code 4.68, CSV to JSON 15.04. On thinking text that is fewer than the quality model (2.48 against
+  3.24 in the author's run of both on the same card with 0.1.3), so expect it to be slower there than the speed tables above.
+* Further evaluations, with their settings and caveats, are on the [model card](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9).
 
 <a name="speed"></a>
 <a name="what-014-changed"></a>
@@ -43,10 +72,12 @@ In terminal chat, enter `/effort medium` for a shorter thinking phase or `/think
 
 All engines generated one request at a time on the same PC with one stock RTX 5090 (600 W). The fastest model led the eight other engines in all seven categories using filtered means with thinking off and the best run per task with thinking on. The largest gains came from edits that copy much of the input. On the code edit the fastest model generated **2,025 tok/s** and MegaCapybara 1.39 Tiny generated **441 tok/s**.
 
+To measure your own PC, run `yasakani bench`. `yasakani bench --edit` runs three edit tasks (the code edit, the JSONL edit and the long JSONL edit) and prints the speed, the tokens per pass and whether each answer is the expected one. The wide copy passes behind the edit numbers are used on compute capability 12.x (RTX 50 series) only, and were measured on the RTX 5090 only. [How to measure the edit speed](docs/FAQ.md#how-do-i-measure-the-edit-speed-on-my-pc)
+
 <details>
 <summary>See all seven categories with thinking off and on</summary>
 
-**Thinking off** uses the two-run mean for each task, excluding repetition loops and unrequested tool calls by the same rule for all engines. YASAKANI was measured again on November 15 with v0.1.4. Numbers are generation tok/s, excluding prompt processing.
+**Thinking off** uses the two-run mean for each task, excluding repetition loops and unrequested tool calls by the same rule for all engines. YASAKANI was measured again on November 15 with v0.1.4 (0.1.5 and 0.1.6 have the same GPU code). Numbers are generation tok/s, excluding prompt processing.
 
 | Engine | Code | Story | Translation | Structured | Code edit | JSONL edit | Long JSONL |
 |---|---|---|---|---|---|---|---|

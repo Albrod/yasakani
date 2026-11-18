@@ -6,7 +6,7 @@
 
 YASAKANI は Windows PC の RTX 1 枚で Qwen3.8-27B を動かす推論エンジンです。初回のセットアップ後は、自分の PC だけでチャットやコード編集ができます。普段使っている開発ツールからも OpenAI 互換 API で接続できます。
 
-**[Windows 版をダウンロード](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.5/yasakani-quickstart-0.1.5.zip)** · [8エンジンとの速度比較](docs/MEASUREMENTS.ja.md#思考なしreadme-と同じ表反復等を除いた平均toks) · [コード編集の実演動画](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.5/fast_live_uncut.mp4)
+**[Windows 版をダウンロード](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.6/yasakani-quickstart-0.1.6.zip)** · [8エンジンとの速度比較](docs/MEASUREMENTS.ja.md#思考なしreadme-と同じ表反復等を除いた平均toks) · [コード編集の実演動画](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.6/fast_live_uncut.mp4)
 
 <a name="2-つのモデル"></a>
 <a name="必要なもの"></a>
@@ -26,15 +26,42 @@ YASAKANI は Windows PC の RTX 1 枚で Qwen3.8-27B を動かす推論エンジ
 
 Linux には寄稿者が検証したソースビルド手順があります。AMD と Mac は今後の対応目標です。[対象 GPU の型番と要件](docs/FAQ.ja.md#どの-gpuどの-os-で動く) · [Linux のビルド手順](BUILDING.md#linux-building-from-source)
 
+**GPU が複数のとき**：1つのプロセスが使う GPU は1枚です。`--device N` で、`yasakani info` と nvidia-smi が N 番とする GPU を選びます。0.1.5 では GPU が2枚の PC で `--device 1` が `graph instantiate failed` で止まることがありました（[#20](https://github.com/yasakani-dev/yasakani/issues/20)）。0.1.6 で直しを入れましたが、2枚の GPU の PC ではまだ確かめていません。
+
 ## 使いはじめ
 
 Windows 11（64 ビット）、Python 3.10 以上、NVIDIA ドライバー 580 以上、Visual C++ 2015–2022 ランタイム（x64）、ディスクの空き 20 GB を用意してください。
 
-1. Windows 起動用 ZIP（v0.1.5）を `C:\yasakani` などの英数字のフォルダーに展開します。[配布ファイルと SHA-256](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)
+1. Windows 起動用 ZIP（v0.1.6）を `C:\yasakani` などの英数字のフォルダーに展開します。[配布ファイルと SHA-256](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.6)
 2. **`START.cmd`** を開いてモデルを選びます。初回はエンジンとモデル一式を取得し、ファイルと GPU の自己点検まで行います。
 3. メニューでブラウザーチャットかターミナルを選んで、質問を入力します。別のアプリから使う場合はサーバーを起動し、接続先を `http://127.0.0.1:8765/v1` に設定してください。
 
 ターミナルで思考時間を短くするには `/effort medium`、思考をオフにするには `/think off` を入力します。[手動インストール](python/README.md#install) · [API の使い方](python/README.md#the-server)
+
+## コミュニティの変換
+
+[tools/convert/](tools/convert/) の変換器でほかの人が作ったファイルです。**このプロジェクトは確かめておらず、保守もしていません**。
+動く状態に保つのは下に名前のある人です。新しい版に追いつかなくなった変換は、その版でこの一覧から外すことがあります。
+
+**Arete-27B**（作成：[@audreyt](https://github.com/audreyt)）：Nous Research が Qwen3.8-27B をファインチューンした [NousResearch/Arete-27B](https://huggingface.co/NousResearch/Arete-27B) を、
+コミュニティで変換したものです。品質モデルと同じ設定で作り、品質モデルの下書きモデルをそのまま使います。ファイルは
+[audreyt/Arete-27B-YASAKANI-quality](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9) のリビジョン `659effb` です。
+全ファイルの SHA-256 はその `SHA256SUMS` にあります（モデルファイル `arete_quality.yskn`、12,365,242,368 バイト、
+`541c9206ede621bd92e78ff09f838fca5e4660d834fa883b3d20cdb4ab56880a`）。
+
+```bat
+hf download audreyt/Arete-27B-YASAKANI-quality --revision 659effbdf9dc103fcc053e3da7858bcff7f14cc9 --local-dir D:\models\arete-quality
+yasakani selfcheck --model-dir D:\models\arete-quality --dll D:\yasakani\yskn.dll
+```
+
+そのあとは [使いはじめ](#使いはじめ) と同じように `--model-dir D:\models\arete-quality` を付けて使います。次の値は、この変換を作った人が RTX 5090 で測ったものです。
+
+* 元の BF16 の Arete-27B との近さ（`tools/quality/`、思考文 20 本、KV5 のキャッシュ、0.1.3 で測定）：KL 0.0116、第 1 候補一致率 95.64%。
+  品質モデルを同じ方法で Qwen3.8-27B と比べた値は 0.0126 と 95.35% です。
+* 0.1.4 で：`yasakani verify` は 11 ファイル中 11 ファイル、`yasakani selfcheck` は 3 件中 3 件が合格（出力は 0.1.3 と同じ）。
+  先読みの 1 回の計算で進んだトークン数は、文章 2.40・思考あり 2.48・コード 4.68・CSV → JSON 15.04 です。思考文では品質モデルより少なく、作った人が同じカードと 0.1.3 で両方を測ると 2.48 対 3.24 でした。
+  そのため思考文では、速さの表の値より遅くなると考えてください。
+* そのほかの評価は、設定と注意点とともに[モデルカード](https://huggingface.co/audreyt/Arete-27B-YASAKANI-quality/tree/659effbdf9dc103fcc053e3da7858bcff7f14cc9)にあります。
 
 <a name="速さ"></a>
 <a name="014-で変わったこと"></a>
@@ -43,10 +70,12 @@ Windows 11（64 ビット）、Python 3.10 以上、NVIDIA ドライバー 580 �
 
 同じ PC の RTX 5090 1枚（定格600 W）で、1件ずつ生成して比較しました。思考なしでは反復などを除いた平均、思考ありでは課題ごとの最速回を使うと、最速モデルは掲載した7分野すべてで他の8エンジンを上回りました。特に差が出たのは入力の大部分を書き戻す編集です。コード編集では最速モデルが **2,025 tok/s**、MegaCapybara 1.39 Tiny が **441 tok/s** でした。
 
+自分の PC の速さは `yasakani bench` で測れます。`yasakani bench --edit` は編集の課題3つ（コード編集・JSONL 編集・長い JSONL 編集）を動かし、速さ、1回の計算で進んだトークン数、答えが期待どおりかを表示します。編集の数字を支える広い写しの計算は計算能力 12.x（RTX 50 シリーズ）でだけ使い、測ったのは RTX 5090 だけです。[編集の速さの測り方](docs/FAQ.ja.md#編集の速さを自分のパソコンで測るには)
+
 <details>
 <summary>7分野の比較表を開く（思考なし・思考あり）</summary>
 
-**思考なし**は各課題2回の平均です。反復や指示外のツール呼び出しが出た回は全エンジン共通の基準で除外しています。YASAKANI は11月15日に v0.1.4 で再測定しました。単位は入力処理を除く生成 tok/s です。
+**思考なし**は各課題2回の平均です。反復や指示外のツール呼び出しが出た回は全エンジン共通の基準で除外しています。YASAKANI は11月15日に v0.1.4 で再測定しました（0.1.5・0.1.6 も GPU のコードは同じ）。単位は入力処理を除く生成 tok/s です。
 
 | エンジン | コード | 物語 | 翻訳 | 構造化 | コード編集 | JSONL 編集 | 長い JSONL |
 |---|---|---|---|---|---|---|---|
