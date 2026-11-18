@@ -692,6 +692,19 @@ class CliGpuTests(unittest.TestCase):
         self.assertEqual(log.read_text().splitlines()[-1], "device=0 order=PCI_BUS_ID visible=(unset)")
         self.assertNotIn("gpu: ", r.stderr)
 
+    def test_two_gpus_parallel_chooses_before_the_library_loads(self):
+        """Several requests at once load the engine library early (to look for its multi-stream entries).  The GPU of --device must
+        be chosen before that, or CUDA would see both GPUs."""
+        gpus = [self.gpu("NVIDIA RTX A2000 12GB", "8.6", 12282, 9500, 0), self.gpu("NVIDIA GeForce RTX 5090", "12.0", 32607, 2644, 1)]
+        log = self.folder.parent / "open_parallel.log"
+        r = self.run_cli(gpus, "bench", *self.common(), "--device", "1", "--n", "8", "--concurrency", "2", "--parallel-check", "off",
+                         stub=dict(STUB_OPEN_LOG=str(log)))
+        self.assertEqual(r.returncode, 0, (r.stdout, r.stderr))
+        self.assertIn("the engine sees only this GPU", r.stderr)
+        lines = log.read_text().splitlines()
+        self.assertTrue(lines, r.stderr)
+        self.assertEqual(set(lines), {"device=0 order=PCI_BUS_ID visible=GPU-1"}, r.stderr)
+
     def test_selfcheck_exit_codes(self):
         ref = self.folder.parent / "ref_gpu.json"
         args = ["--model-dir", str(self.folder), "--dll", self.dll, "--max-ctx", "4096"]
