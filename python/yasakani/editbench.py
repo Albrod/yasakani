@@ -15,10 +15,9 @@ thinking columns of the README tables were measured otherwise and are not what `
 * Tokens per pass = tokens / passes of the main model, as in ``yasakani bench``.
 * The answer is compared with the expected one as the measurement client did: white space around it and a Markdown code fence are
   ignored; otherwise it must be the same text.
-* Wide copy passes (0.1.4: a pass that copies the input checks up to 64 tokens) are used on compute capability 12.x (RTX 50 series)
-  only, and were measured on the RTX 5090 only.  The header says whether this GPU uses them; the ``wide`` column counts them.
-  0.1.7 (test build): with an engine library of 0.1.7 the header gives the widths the engine has open on this GPU (``--wide``,
-  yasakani/widecheck.py).
+* Wide copy passes (0.1.4: a pass that copies the input checks up to 64 tokens) were used on compute capability 12.x (RTX 50
+  series) only up to 0.2.0; since 0.2.1 on RTX 30 / 40 too where the check of yasakani/widecheck.py finds them correct and faster.
+  The header gives the widths the engine has open on this GPU (``--wide``); the ``wide`` column counts them.
 """
 from __future__ import annotations
 

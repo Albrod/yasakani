@@ -132,7 +132,7 @@ class SettingTests(unittest.TestCase):
             wc.mode_of(None, {"YASAKANI_WIDE": "yes"})
 
     def test_engine_env(self):
-        self.assertEqual(wc.engine_env("auto"), {})
+        self.assertEqual(wc.engine_env("auto"), {"YSKN_WIDE": "1"})     # 0.2.1: auto = on (up to 0.2.0: nothing, RTX 30 / 40 off)
         self.assertEqual([wc.engine_env(m)["YSKN_WIDE"] for m in ("off", "on", "force")], ["0", "1", "2"])
 
     def test_profile_keeps_test_settings(self):
@@ -319,13 +319,13 @@ class CliTests(unittest.TestCase):
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             build_parser().parse_args(["chat", "--wide", "maybe"])
 
-    def test_version_says_test_build(self):
+    def test_version_line_of_a_release(self):
         import io
         from yasakani.cli import build_parser
         out = io.StringIO()
         with mock.patch("sys.stdout", out), self.assertRaises(SystemExit):
             build_parser().parse_args(["--version"])
-        self.assertIn("0.1.7.dev1 (test build)", out.getvalue())
+        self.assertEqual(out.getvalue().strip(), "yasakani 0.2.1")      # a release: no "(test build)" as in 0.1.7.dev1
 
     def test_report_time_in_help(self):
         import io
@@ -340,7 +340,7 @@ class CliTests(unittest.TestCase):
     def test_version_is_pep440(self):
         import re as _re
         from yasakani import __version__
-        self.assertEqual(__version__, "0.1.7.dev1")
+        self.assertEqual(__version__, "0.2.1")
         self.assertIsNotNone(_re.fullmatch(r"\d+\.\d+\.\d+(\.dev\d+)?", __version__))
 
 
@@ -383,13 +383,21 @@ class StubTests(unittest.TestCase):
         return wc.setup(eng, ids, cache=self.cache, run=run or FakeRun(), environ={"YASAKANI_NVIDIA_SMI": "x"},
                         busy=busy or (lambda u: None), **kw)
 
-    def test_auto_on_rtx30_is_off(self):
+    def test_auto_on_rtx30_measures(self):
+        """0.2.1: the default (auto) opens on RTX 30 / 40 the widths the check finds correct and faster (up to 0.2.0 it left them off)."""
         with self.open(86) as eng:
+            st = eng.wide_state()
+            self.assertEqual((st.allowed, st.mask, st.xw_rows), (True, 0, 16))     # allowed, closed until the check opens widths
+            r = self.setup(eng)
+            self.assertEqual((r.status, r.mask), ("measured", 7))
+            self.assertTrue(r.gate.ok)
+            self.assertEqual(eng.wide_state().mask, 7)
+        with self.open(89, "off") as eng:                             # --wide off still turns them off
             st = eng.wide_state()
             self.assertEqual((st.allowed, st.mask, st.xw_rows), (False, 0, 16))
             r = self.setup(eng)
             self.assertEqual((r.status, r.mask), ("off", 0))
-            self.assertIn("as in 0.1.6", r.line)
+            self.assertNotIn("--wide on", r.line)
 
     def test_on_rtx30_measures_and_keeps(self):
         with self.open(86, "on") as eng:
