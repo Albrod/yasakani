@@ -2,6 +2,7 @@
 // Copyright (c) 2026 the YASAKANI authors
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -19,6 +20,33 @@ int fill_byte() { static const int f = [] { const char* e = std::getenv("YSKN_DE
 }
 void* devmem_owner() { return t_owner; }
 void devmem_set_owner(void* owner) { t_owner = owner; }
+
+cudaError_t copy_weight_to_device(void* dst, const void* src, size_t bytes) {
+  if (bytes == 0) return cudaSuccess;
+#if defined(__linux__) && defined(__aarch64__)
+  int device = 0;
+  cudaError_t e = cudaGetDevice(&device);
+  if (e != cudaSuccess) return e;
+  cudaDeviceProp props{};
+  e = cudaGetDeviceProperties(&props, device);
+  if (e != cudaSuccess) return e;
+  if (props.integrated && props.major == 12 && props.minor == 1) {
+    // Direct CUDA copies from file-backed mappings can stall on GB10.
+    constexpr size_t chunk = 4 * 1024 * 1024;
+    thread_local std::vector<unsigned char> staging(chunk);
+    for (size_t off = 0; off < bytes;) {
+      const size_t n = std::min(bytes - off, chunk);
+      std::memcpy(staging.data(), static_cast<const unsigned char*>(src) + off, n);
+      e = cudaMemcpy(static_cast<unsigned char*>(dst) + off, staging.data(), n, cudaMemcpyHostToDevice);
+      if (e != cudaSuccess) return e;
+      off += n;
+    }
+    return cudaSuccess;
+  }
+#endif
+  return cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);
+}
+
 cudaError_t tracked_malloc(void** p, size_t n) {
   const cudaError_t e = ::cudaMalloc(p, n);
   if (e == cudaSuccess && *p && t_owner) {
