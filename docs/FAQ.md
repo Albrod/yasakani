@@ -285,7 +285,7 @@ Known limits:
 * Reading a prompt pauses all others. Reading 66,416 tokens takes about 20 seconds.
 * The next turn after tool calls must come within the kept time (1 second for a short conversation). Later, it reads the conversation again. The answer is the same.
 * The wait limit counts only waiting caused by kept places and next turns. A next turn that runs alone (because no place is free) is not stopped for a new request, so a new request can wait longer than the limit.
-* Over long runs the GPU memory of the whole card rose by up to 71 MiB. In the last 30-minute run the server's own GPU memory did not change.
+* Over long runs the GPU memory of the whole card rose by up to 71 MiB. In a 30-minute run with a development build the server's own GPU memory did not change; in the 30-minute run with the release build of 0.2.0 it grew by 6.0 MiB.
 
 ## Can I use other models, for example Qwen4?
 
