@@ -5,7 +5,8 @@
 * Listens on 127.0.0.1 by default.  The ``Host`` header must name the address the server is bound to, and a request that carries an
   ``Origin`` must come from that same address (so a web page open in your browser cannot talk to the server).  To serve other
   machines use ``--host 0.0.0.0 --api-key KEY``.
-* One request is generated at a time; the others wait.
+* One request is generated at a time; the others wait.  With ``--parallel N`` (experimental) up to N requests are generated at once
+  (yasakani/sched.py); more wait, and with more than ``--max-queue`` waiting a request is answered 503 with ``Retry-After``.
 * A stream carries one chunk per token (several chunks arrive together, about 64 times a second on Windows).
 * Tool calling: ``tools`` (functions) with ``tool_choice`` "auto" or "none".  The model's own chat template describes the tools to
   the model; the calls it writes come back as ``tool_calls`` (in a stream: one chunk per finished call, with the whole arguments).
@@ -22,6 +23,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import select
 import socket
 import sys
 import threading
@@ -57,6 +59,8 @@ class ApiState:
         self.runner: Optional[ChatRunner] = None          # None while the model loads
         self.gen_lock = threading.Lock()
         self.version = ""
+        self.sched = None                                   # serve --parallel N (N >= 2): the scheduler (yasakani.sched); None: gen_lock
+        self.image_lock = threading.Lock()                  # with the scheduler: images are read and encoded one request at a time
 
 
 class SingleServer(ThreadingHTTPServer):
@@ -186,7 +190,38 @@ def timings_json(u: Usage) -> dict:
              predicted_per_second=per_s(u.completion_tokens, predicted_ms))
     if u.draft_n > 0:
         d.update(draft_n=u.draft_n, draft_n_accepted=u.draft_n_accepted)
+    if u.queue_ms is not None:                            # served by the scheduler (--parallel N): its wait, the streams that shared
+        d.update(queue_ms=u.queue_ms, parallel_avg=u.parallel_avg, snap_mode=u.snap_mode)    # its passes, how its prompt was read
     return d
+
+
+def client_gone(sock: socket.socket) -> bool:
+    """The client closed the connection (or it broke): looks at the socket without reading from it.  POSIX uses poll() (select()
+    cannot take a socket numbered 1024 or more).  When the socket cannot be looked at, the client is not taken for gone (a stream
+    finds out by writing)."""
+    try:
+        if hasattr(select, "poll"):
+            p = select.poll()
+            p.register(sock, select.POLLIN | select.POLLPRI)
+            ev = p.poll(0)
+            if not ev:
+                return False
+            if ev[0][1] & select.POLLNVAL:
+                return False                                   # not an open socket of this process: nothing to say
+        else:
+            ready, _, _ = select.select([sock], [], [], 0)
+            if not ready:
+                return False
+        return sock.recv(1, socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)) == b""
+    except (BlockingIOError, InterruptedError, ValueError):
+        return False
+    except OSError:
+        return True
+
+
+def has_images(params: ChatParams) -> bool:
+    return any(isinstance(m.get("content"), list) and any(isinstance(q, dict) and q.get("type") == "image_url" for q in m["content"])
+               for m in params.messages)
 
 
 def make_handler(state: ApiState):
@@ -214,19 +249,24 @@ def make_handler(state: ApiState):
             self.send_header("X-Content-Type-Options", "nosniff")
             super().end_headers()
 
-        def _json(self, code, obj, close=False):
+        def _json(self, code, obj, close=False, headers=None):
             b = json.dumps(obj, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(b)))
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             if close:
                 self.send_header("Connection", "close")
                 self.close_connection = True
             self.end_headers()
             self.wfile.write(b)
 
-        def _error(self, code, message, kind="invalid_request_error", close=False, err_code=None):
-            self._json(code, dict(error=dict(message=message, type=kind, code=err_code or code)), close)
+        def _error(self, code, message, kind="invalid_request_error", close=False, err_code=None, headers=None):
+            self._json(code, dict(error=dict(message=message, type=kind, code=err_code or code)), close, headers)
+
+        def _client_gone(self) -> bool:
+            return client_gone(self.connection)
 
         def _drain(self):
             try:
@@ -276,6 +316,14 @@ def make_handler(state: ApiState):
                 if state.runner:
                     body["max_context_tokens"] = state.runner.engine.max_ctx
                     body["thinking_budget"] = cfg.default_thinking_budget
+                    sched = state.sched
+                    if sched is not None:                          # --parallel N: the context above is that of every request
+                        st = sched.status()
+                        body.update(parallel=st["parallel"], slots_busy=st["slots_busy"], slots_idle=st["slots_idle"], queued=st["queued"])
+                        if st["state"] != "ok":
+                            code, body["status"] = 503, st["state"]
+                            if st["error"]:
+                                body["error"] = st["error"]
                 return self._json(code, body)
             if self._unauthorized():
                 return
@@ -316,9 +364,43 @@ def make_handler(state: ApiState):
             self._chat(runner, body, params)
 
         def _chat(self, runner: ChatRunner, body: dict, params: ChatParams):
+            if state.sched is not None:
+                return self._chat_parallel(runner, body, params)
+            # One request at a time.  With image input, prepare_checked also reads and encodes the images on the CPU, inside this
+            # lock: while an image is encoded (about 15 s at the default limit of 1,024 image tokens on a 16-core CPU) no other
+            # request is served and nothing is sent to this client yet.
+            with state.gen_lock:
+                try:
+                    prepared = runner.prepare_checked(params)        # before any header: a request that cannot be served gets a plain 400
+                except RequestError as ex:
+                    return self._error(400, str(ex), err_code=getattr(ex, "code", None))
+                except Exception as ex:                          # noqa: BLE001 - e.g. the image encoder failed: answer, do not drop
+                    return self._error(500, str(ex)[:500] or type(ex).__name__, "server_error")
+                self._reply(runner, body, params, prepared)
+
+        def _chat_parallel(self, runner: ChatRunner, body: dict, params: ChatParams):
+            """--parallel N: the scheduler generates; the template, the tokens and the length check are made here, outside any lock
+            (only the images are read and encoded one request at a time).  A request that waits or runs without a stream is cancelled
+            when its client goes away (the socket is looked at once a second)."""
+            try:
+                if has_images(params):
+                    with state.image_lock:
+                        prepared = runner.prepare_checked(params)
+                else:
+                    prepared = runner.prepare_checked(params)
+            except RequestError as ex:
+                return self._error(400, str(ex), err_code=getattr(ex, "code", None))
+            except Exception as ex:                              # noqa: BLE001
+                return self._error(500, str(ex)[:500] or type(ex).__name__, "server_error")
+            self._reply(runner, body, params, prepared, sched=state.sched)
+
+        def _reply(self, runner: ChatRunner, body: dict, params: ChatParams, prepared, sched=None):
+            """Generate and answer.  ``sched`` (several requests at once): a stream's headers go out with its first piece of text (or
+            at its end), so that a request that cannot be queued still gets a plain error status (503 when the queue is full)."""
             cid = "chatcmpl-" + uuid.uuid4().hex[:24]
             created = int(time.time())
             stream = bool(body.get("stream"))
+            started = [False]
 
             def chunk(delta=None, finish=None, usage=None, timings=None):
                 o = dict(id=cid, object="chat.completion.chunk", created=created, model=cfg.model_id,
@@ -330,72 +412,98 @@ def make_handler(state: ApiState):
                 self.wfile.write(b"data: " + json.dumps(o, ensure_ascii=False).encode("utf-8") + b"\n\n")
                 self.wfile.flush()
 
-            # One request at a time.  With image input, prepare_checked also reads and encodes the images on the CPU, inside this
-            # lock: while an image is encoded (about 15 s at the default limit of 1,024 image tokens on a 16-core CPU) no other
-            # request is served and nothing is sent to this client yet.  Moving the encode out of the lock is a later change.
-            with state.gen_lock:
-                try:
-                    prepared = runner.prepare_checked(params)        # before any header: a request that cannot be served gets a plain 400
-                except RequestError as ex:
-                    return self._error(400, str(ex), err_code=getattr(ex, "code", None))
-                except Exception as ex:                          # noqa: BLE001 - e.g. the image encoder failed: answer, do not drop
-                    return self._error(500, str(ex)[:500] or type(ex).__name__, "server_error")
-                try:
-                    if stream:
-                        self.send_response(200)
-                        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                        self.send_header("Cache-Control", "no-cache")
-                        self.send_header("Connection", "close")
-                        self.end_headers()
-                        chunk(delta=dict(role="assistant"))
-                        n_calls = [0]
+            def start():
+                if not started[0]:
+                    started[0] = True
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    chunk(delta=dict(role="assistant"))
 
-                        def emit(kind, item):
-                            if kind == "tool_call":
-                                chunk(delta={"tool_calls": [tool_call_json(item, n_calls[0])]})
-                                n_calls[0] += 1
-                            else:
-                                chunk(delta={"reasoning_content" if kind == "reasoning" else "content": item})
+            eng = None
+            closed = [False]
+            if sched is not None:
+                from .sched import ScheduledEngine
+                # a running stream finds out by writing; until its first piece of text (and for a reply without a stream) the
+                # socket is looked at
+                eng = ScheduledEngine(sched, client_gone=lambda: not started[0] and self._client_gone())
 
-                        u = runner.run(params, emit, prepared)
-                        # the timings go with the last chunk, as with the llama.cpp server: the usage chunk when it is asked for,
-                        # else the chunk with the finish reason
-                        if (body.get("stream_options") or {}).get("include_usage"):
-                            chunk(delta={}, finish=u.finish)
-                            chunk(usage=usage_json(u), timings=timings_json(u))
+            def generated(u):
+                """The request generates nothing more: its view of the scheduler is closed before the end of the answer goes out (the
+                client may send its next turn the moment it has the answer).  An answer with tool calls keeps its stream for that turn
+                (the client sends the results at once), about as long as reading the conversation again would take: see
+                ScheduledEngine.close and Scheduler.turn_keep_s."""
+                if eng is not None and not closed[0]:
+                    closed[0] = True
+                    eng.close(next_turn=u.finish == "tool_calls")
+            try:
+                if stream:
+                    if eng is None:
+                        start()
+                    n_calls = [0]
+
+                    def emit(kind, item):
+                        start()
+                        if kind == "tool_call":
+                            chunk(delta={"tool_calls": [tool_call_json(item, n_calls[0])]})
+                            n_calls[0] += 1
                         else:
-                            chunk(delta={}, finish=u.finish, timings=timings_json(u))
+                            chunk(delta={"reasoning_content" if kind == "reasoning" else "content": item})
+
+                    u = runner.run(params, emit, prepared) if eng is None else runner.run(params, emit, prepared, eng=eng)
+                    generated(u)
+                    start()
+                    # the timings go with the last chunk, as with the llama.cpp server: the usage chunk when it is asked for,
+                    # else the chunk with the finish reason
+                    if (body.get("stream_options") or {}).get("include_usage"):
+                        chunk(delta={}, finish=u.finish)
+                        chunk(usage=usage_json(u), timings=timings_json(u))
+                    else:
+                        chunk(delta={}, finish=u.finish, timings=timings_json(u))
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    self.close_connection = True
+                else:
+                    parts = {"reasoning": [], "content": [], "tool_call": []}
+
+                    def collect(kind, item):
+                        parts[kind].append(item)
+                    u = runner.run(params, collect, prepared) if eng is None else runner.run(params, collect, prepared, eng=eng)
+                    generated(u)
+                    msg = dict(role="assistant", content="".join(parts["content"]))
+                    if parts["reasoning"]:
+                        msg["reasoning_content"] = "".join(parts["reasoning"])
+                    if parts["tool_call"]:
+                        msg["tool_calls"] = [tool_call_json(c) for c in parts["tool_call"]]
+                        if not msg["content"]:
+                            msg["content"] = None
+                    self._json(200, dict(id=cid, object="chat.completion", created=created, model=cfg.model_id,
+                                         choices=[dict(index=0, message=msg, finish_reason=u.finish)], usage=usage_json(u),
+                                         timings=timings_json(u)))
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self.close_connection = True                   # the client went away: the engine was already stopped
+            except Exception as ex:                              # noqa: BLE001
+                full = getattr(ex, "retry_after", None) is not None          # the scheduler's queue is full (QueueFull)
+                code = 400 if isinstance(ex, RequestError) else (503 if full else 500)
+                msg = str(ex)[:500] or type(ex).__name__
+                try:
+                    if stream and started[0]:
+                        self.wfile.write(b"data: " + json.dumps(dict(error=dict(message=msg, type="server_error", code=code))).encode() + b"\n\n")
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
                         self.close_connection = True
+                    elif full:
+                        self._error(503, msg, "unavailable", headers={"Retry-After": str(int(ex.retry_after))})
                     else:
-                        parts = {"reasoning": [], "content": [], "tool_call": []}
-                        u = runner.run(params, lambda kind, item: parts[kind].append(item), prepared)
-                        msg = dict(role="assistant", content="".join(parts["content"]))
-                        if parts["reasoning"]:
-                            msg["reasoning_content"] = "".join(parts["reasoning"])
-                        if parts["tool_call"]:
-                            msg["tool_calls"] = [tool_call_json(c) for c in parts["tool_call"]]
-                            if not msg["content"]:
-                                msg["content"] = None
-                        self._json(200, dict(id=cid, object="chat.completion", created=created, model=cfg.model_id,
-                                             choices=[dict(index=0, message=msg, finish_reason=u.finish)], usage=usage_json(u),
-                                             timings=timings_json(u)))
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                    self.close_connection = True               # the client went away: the engine was already stopped
-                except Exception as ex:                          # noqa: BLE001
-                    code = 400 if isinstance(ex, RequestError) else 500
-                    msg = str(ex)[:500] or type(ex).__name__
-                    try:
-                        if stream:
-                            self.wfile.write(b"data: " + json.dumps(dict(error=dict(message=msg, type="server_error", code=code))).encode() + b"\n\n")
-                            self.wfile.write(b"data: [DONE]\n\n")
-                            self.wfile.flush()
-                            self.close_connection = True
-                        else:
-                            self._error(code, msg, "server_error" if code == 500 else "invalid_request_error")
-                    except Exception:                            # noqa: BLE001
-                        self.close_connection = True
+                        self._error(code, msg, "server_error" if code == 500 else "invalid_request_error")
+                except Exception:                                # noqa: BLE001
+                    self.close_connection = True
+            finally:
+                if eng is not None and not closed[0]:              # an error: nothing kept
+                    closed[0] = True
+                    eng.close()
 
     return Handler
 

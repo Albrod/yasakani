@@ -39,6 +39,24 @@ SIGNATURES: Dict[str, Tuple[list, object]] = {
     "yskn_state_hash": ([P, P, I, P], I),
 }
 
+# The multi-stream pass (several requests in one pass; 0.2.0): experimental entries that are not in include/yskn_abi.h.  They are
+# looked up at run time; a library without all of them serves one request at a time (``NativeLib.supports_parallel`` is False).
+MS_SIGNATURES: Dict[str, Tuple[list, object]] = {
+    "yskn_ms_info": ([P, P, I, P], I),
+    "yskn_ms_bind2": ([P, P, I, I], I),
+    "yskn_ms_opt": ([P, I, I], I),
+    "yskn_ms_load": ([P, I, P], I),
+    "yskn_ms_unload": ([P, I, P, I], I),
+    "yskn_live_drop": ([P], I),
+    "yskn_ms_set_sampling": ([P, I, I, I, I, I, I, C.c_uint32], I),
+    "yskn_ms_draft": ([P, I, P, P, P, I], I),
+    "yskn_ms_step2": ([P, I, P, P, I, P, P, P, P], I),
+    "yskn_ms_commit": ([P, I, P, P], I),
+    "yskn_ms_flush": ([P], I),
+    "yskn_ms_slot_pos": ([P, I, P], I),
+    "yskn_ms_slot_hash": ([P, I, P, I, P], I),
+}
+
 _VC_HINT = ("The engine library could not be loaded.  On Windows it needs the Microsoft Visual C++ 2015-2022 x64 runtime "
             "(https://aka.ms/vs/17/release/vc_redist.x64.exe) and a recent NVIDIA driver.  Details: ")
 
@@ -125,6 +143,13 @@ class NativeLib:
             f = getattr(self.dll, name, None)
             if f is not None:
                 f.argtypes, f.restype = sig
+                self.fn[name] = f
+        # the multi-stream pass (optional, as yskn_set_visual): all of its entries or none are used
+        found = {name: getattr(self.dll, name, None) for name in MS_SIGNATURES}
+        self.supports_parallel = all(f is not None for f in found.values())
+        if self.supports_parallel:
+            for name, f in found.items():
+                f.argtypes, f.restype = MS_SIGNATURES[name]
                 self.fn[name] = f
 
     def last_error(self) -> str:

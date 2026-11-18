@@ -70,6 +70,9 @@ class Usage:
     snap_mode: int = 0
     loop_guard: Optional[dict] = None
     tool_calls: int = 0
+    queue_ms: Optional[float] = None              # served in parallel (serve --parallel): time the request waited for a stream slot
+    parallel_avg: Optional[float] = None          # served in parallel: streams that shared its passes, on average
+    ms_passes: int = 0                            # served in parallel: passes of the request in the multi-stream pass
 
 
 class StopFilter:
@@ -198,8 +201,22 @@ def clean_tools(tools) -> Optional[List[dict]]:
     return out
 
 
+def _note_parallel(usage: Usage, r: GenResult) -> None:
+    """A stage served by the scheduler (serve --parallel) reports its wait and the streams that shared its passes; the request's
+    values sum the waits and average the streams over the passes of all of its stages.  Nothing changes for a stage of the engine."""
+    st = r.stats or {}
+    if "queue_ms" not in st:
+        return
+    passes = int(st.get("ms_passes", 0))
+    shared = (usage.parallel_avg or 0.0) * usage.ms_passes + float(st.get("parallel_avg", 1.0)) * passes
+    usage.queue_ms = (usage.queue_ms or 0.0) + float(st["queue_ms"])
+    usage.ms_passes += passes
+    usage.parallel_avg = shared / usage.ms_passes if usage.ms_passes else 1.0
+
+
 class ChatRunner:
-    """Runs chat requests on one engine, one at a time."""
+    """Runs chat requests on one engine, one at a time (or, with ``eng`` given to :meth:`run`, on that engine: the server's
+    :class:`yasakani.sched.ScheduledEngine` when it serves several requests at once)."""
 
     def __init__(self, engine: Engine, fmt: ChatFormatter, seed0: int = 1, *, vision=None):
         self.engine = engine
@@ -264,24 +281,27 @@ class ChatRunner:
             raise context_length_error(len(prompt), self.engine.max_ctx)
         return prepared
 
-    def run(self, p: ChatParams, emit: Callable[[str, str], None], prepared=None) -> Usage:
+    def run(self, p: ChatParams, emit: Callable[[str, str], None], prepared=None, eng=None) -> Usage:
         """Generate the reply, calling ``emit("reasoning" | "content", text)`` as text becomes available.  Raises ``RequestError`` for
         a request that cannot be served, ``YasakaniError`` for an engine failure.  ``prepared`` is the result of ``prepare_checked``
-        when the caller has already made it (the server does, to answer a request it cannot serve before it starts a stream)."""
+        when the caller has already made it (the server does, to answer a request it cannot serve before it starts a stream).
+        ``eng``: what generates (default: this runner's engine); every call of the request, image input included, goes to it."""
+        if eng is None:
+            eng = self.engine
         if prepared is None:
             prepared = self.prepare_checked(p)
         visual = getattr(prepared, "visual", None)
         if visual is not None:
-            with self.engine.visual_input(**visual):
-                return self._run(p, emit, prepared)
-        return self._run(p, emit, prepared)
+            with eng.visual_input(**visual):
+                return self._run(p, emit, prepared, eng)
+        return self._run(p, emit, prepared, eng)
 
     def close(self):
         if self.vision is not None:
             self.vision.close()
 
-    def _run(self, p, emit, prepared):
-        eng = self.engine
+    def _run(self, p, emit, prepared, eng=None):
+        eng = self.engine if eng is None else eng
         prompt, in_reasoning = prepared if prepared is not None else self.prepare_checked(p)
         max_new = max(1, int(p.max_tokens))
         seed = p.seed if p.seed is not None else self.next_seed()
@@ -341,6 +361,7 @@ class ChatRunner:
         usage.cached_tokens, usage.snap_mode = r1.cached_tokens, r1.snap_mode
         usage.passes, usage.prefill_ms, usage.gen_ms = r1.passes, r1.prefill_ms, r1.gen_ms
         usage.prompt_ms, usage.draft_n, usage.draft_n_accepted = r1.prefill_ms, r1.draft_n, r1.draft_n_accepted
+        _note_parallel(usage, r1)
         if (n1 < max_new and state["hit"] is None and not stopf.hit and finish == "length" and len(out_ids) == n1
                 and len(prompt) + n1 < eng.max_ctx - CONTEXT_MARGIN):
             head = out_ids
@@ -351,6 +372,7 @@ class ChatRunner:
             finish = r1b.finish
             usage.passes, usage.prefill_ms, usage.gen_ms = usage.passes + r1b.passes, usage.prefill_ms + r1b.prefill_ms, usage.gen_ms + r1b.gen_ms
             usage.draft_n, usage.draft_n_accepted = usage.draft_n + r1b.draft_n, usage.draft_n_accepted + r1b.draft_n_accepted
+            _note_parallel(usage, r1b)
         hit = state["hit"]
         produced = len(out_ids)
         if hit is not None:
@@ -364,7 +386,7 @@ class ChatRunner:
             usage.loop_guard = info
             ended = finish == "stop" and n_out == produced          # the model's own end of text is among the ids kept
             if hit.where == "reasoning" and not ended and not stopf.hit:
-                finish = self._finish_after_loop(p, prompt, out_ids, usage, stops, stopf, emit, deliver, info, max_new)
+                finish = self._finish_after_loop(p, prompt, out_ids, usage, stops, stopf, emit, deliver, info, max_new, eng)
             else:
                 finish = "length" if not stopf.hit else "stop"
         if stopf.hit:
@@ -382,9 +404,9 @@ class ChatRunner:
             usage.finish = "tool_calls"
         return usage
 
-    def _finish_after_loop(self, p, prompt, out_ids, usage, stops, stopf, emit, deliver, info, max_new) -> str:
+    def _finish_after_loop(self, p, prompt, out_ids, usage, stops, stopf, emit, deliver, info, max_new, eng=None) -> str:
         """The thinking looped: close it with the bridge sentence and let the model write the answer on the same sequence."""
-        eng = self.engine
+        eng = self.engine if eng is None else eng
         gen = len(out_ids)
         seq = np.concatenate([prompt, out_ids, self.bridge]).astype(np.int32)
         n2 = min(max_new - 1 - gen - len(self.bridge), eng.max_ctx - len(seq) - CONTEXT_MARGIN)
@@ -420,6 +442,7 @@ class ChatRunner:
         usage.gen_ms += r2.gen_ms
         usage.draft_n += r2.draft_n
         usage.draft_n_accepted += r2.draft_n_accepted
+        _note_parallel(usage, r2)
         if hit2["hit"] is not None:
             info["answer_loop"] = dict(kind=hit2["hit"].kind, period=hit2["hit"].period, at=hit2["hit"].at)
             return "length"

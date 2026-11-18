@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.1.6`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time. Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
+Status: version `0.2.0`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
 
 ## What you need
 
@@ -57,7 +57,7 @@ can be given with `--model-dir` or `YASAKANI_MODEL_DIR`.
 | `yasakani selfcheck` | runs three short fixed greedy prompts and compares the output with `selfcheck.json`: *does this installation reproduce the reference output?* |
 | `yasakani chat` | chat in the terminal. `/think on\|off`, `/effort low\|medium\|xhigh`, `/reset`, `/exit`; Ctrl+C stops the answer being written |
 | `yasakani serve` | starts the OpenAI-compatible server (below) |
-| `yasakani bench` | speed measurement: greedy, fixed length, your own prompts with `--prompts-file`; `--json` for a machine-readable result; `--edit` runs the edit tasks of the speed tables ([below](#bench---edit-the-edit-tasks-of-the-speed-tables)) |
+| `yasakani bench` | speed measurement: greedy, fixed length, your own prompts with `--prompts-file`; `--json` for a machine-readable result; `--edit` runs the edit tasks of the speed tables ([below](#bench---edit-the-edit-tasks-of-the-speed-tables)); `--concurrency N` sends N requests at once (experimental) |
 | `yasakani update` | looks for a newer release on GitHub; the only command that contacts the network ([below](#yasakani-update)) |
 
 Loading the model takes about a minute; `serve` answers `/health` with `503 loading` until it is ready.
@@ -299,6 +299,57 @@ Without flash attention the GPU memory of an encode grows with the square of the
 17 GiB) it did not fit next to the model, so with the variable set `--vision-max-image-tokens` can be at most 2,048. The projector
 (0.93 GB) and its work memory then stay on the GPU next to the model. The image test above has not been repeated in this mode. The
 variable is ignored on Windows.
+
+### Several requests at once (experimental)
+
+```bat
+yasakani serve --model-dir D:\models\qwen38-quality --dll D:\yasakani\yskn.dll --parallel 4
+```
+
+`--parallel N` (or the environment variable `YASAKANI_PARALLEL`) lets the server generate up to N requests at once on the one engine.
+The default is 1: one request at a time, as before. This is experimental: it has been tested on the RTX 5090 only, and far less than one
+request at a time.
+
+* **Context.** Every request has a context of its own, and all of them have the same length. Without `--max-ctx` it is chosen from the free
+  GPU memory, on every card: N + 1 contexts of 22,400 bytes per token and about 256 MiB per request must fit beside the model (the same
+  rounding and the same rule for `bdraft2_k8.shead` as above). The server prints the length at start and `/health` reports it as
+  `max_context_tokens`. If not even 16,384 tokens fit, the server stops and names the largest N that fits.
+* **The check at start.** The first time the server starts with an engine library, a GPU and a driver, it lets N short requests run at once
+  and compares their tokens with those of the same requests one at a time; they must be the same. The result is kept (in
+  `%LOCALAPPDATA%\yasakani\parallel_check.json`, or in the folder `YASAKANI_CACHE_DIR` names), so the next start skips the check. If the
+  tokens differ, the server says so and serves one request at a time. It does the same when the engine library has no entries for several
+  requests at once (an older `yskn.dll`) or when its settings do not allow them. `yasakani selfcheck --parallel N` runs the same check on
+  demand.
+* **The same answers.** A request gets the tokens that the same conversation gets when it is sent alone to a new server, provided its prompt
+  is read the same way (`timings.snap_mode` and `timings.cache_n`, below) and it has its own `seed`. Without a `seed` each request takes the
+  next one in the order the requests arrive, as before. With a stop string the answer is the same up to the stop.
+* **What waits.** A request with images runs alone: the others pause until it is done. While a prompt is read (for a long one, seconds),
+  the others pause too. A request whose generation goes on in a second part (after a thinking budget or a loop cut) keeps its place for
+  that part, so that the part is read as when the request is alone: for 2 seconds after its client has received the first part, and for
+  up to 30 seconds while a slow client is still receiving it. More than `--max-queue` waiting requests (default 64) are answered 503
+  with `Retry-After: 2`. A request that is waiting, or that runs without a stream, is cancelled when its client closes the connection.
+* **The next turn after tool calls.** An answer that ends with tool calls keeps its place for the next request of that conversation
+  (with the tool results): that request continues it instead of reading the whole conversation again, and is read before the requests
+  that wait. The place is kept from the end of the answer about as long as reading the conversation again would take, which is what
+  keeping it saves: 1 second for a short conversation, about 4 seconds for 16,000 tokens and at most 30 seconds (times measured on
+  the RTX 5090; a slower card reads slower). `--keep-turn SECONDS` (or the environment variable `YASAKANI_KEEP_TURN`) keeps it that
+  long instead, `--keep-turn off` not at all. Once the next request has come, the place stays kept for it until it is read, also when
+  the server is busy reading other prompts meanwhile. A request that was sent before the answer ended is not its next turn and does not
+  take its place.
+* **How long a new request waits for next turns.** Next turns come before new requests, so a new request that finds every place kept
+  for a next turn, or taken by next turns that came after it, waits. It counts that time (not the time it waits for other requests),
+  and once it has waited so as long as reading a kept conversation again would take and 0.25 seconds more, it takes the next place
+  kept for a next turn, before the next turns that came after it, and that conversation's next turn reads the conversation again. So
+  next turns do not hold a new request back much longer than the reading the keep saves: at most until the next turn that runs in a
+  place when that time is up has ended. `--max-wait SECONDS` (or `YASAKANI_MAX_WAIT`) sets this time for every kept place. Places kept
+  for the second part of a request (above) are never taken. The answers are the same either way; only how the next turn's prompt is
+  read (`timings.snap_mode`) and the waiting change.
+* **What you see.** `/health` adds `parallel`, `slots_busy`, `slots_idle` and `queued`. `timings` adds `queue_ms` (the time the request
+  waited), `parallel_avg` (how many requests shared its passes on average) and `snap_mode` (how its prompt was read: 0 from the start,
+  1 continuing the request before it, 2 from a saved state). A stream starts with its first piece of text.
+* **Speed.** One pass of the engine carries at most 16 rows for all requests together, so each request is slower than alone, and the requests
+  together are not always faster than one after another. When one request is left, it goes back to the speed of a single request.
+  `yasakani bench --concurrency N` measures N requests at once on your GPU.
 
 ### Safety of the server
 

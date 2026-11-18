@@ -36,6 +36,13 @@ FULL_CONTEXT_MIN_TOTAL_MIB = 30000    # cards with this much memory keep the mod
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the released models fit on (fastest model only)
 QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
 HEAD_SLOWER = "about 3%"              # each pass without the output head, measured on the RTX 5090
+# serve --parallel N (experimental): the carrier and every one of the N stream slots hold the KV of a whole context
+POSITION_TABLE_BYTES = 256            # the carrier's position table per token of context (the rest of KV_BYTES_PER_TOKEN is its KV)
+SLOT_ALLOC_MIB = 64                   # one slot takes this much more than the engine counts (yskn_ms_info): the driver rounds the
+                                      # slot's many buffers up (measured 32 to 48 MiB per slot on the RTX 5090)
+SLOT_MIB = 256                        # one slot besides its KV (recurrent states, histories, drafter memory): the engine reports
+                                      # 187 MiB for the released models (yskn_ms_info), + SLOT_ALLOC_MIB, rounded up here
+PARALLEL_MAX = 64                     # stream slots at most (the engine's limit)
 
 QUERY_FIELDS = ("index", "uuid", "name", "compute_cap", "memory.total", "memory.used", "driver_version")
 _TESTED = re.compile(r"(^|\s)RTX 5090$")
@@ -303,6 +310,7 @@ class ContextPlan:
     env: Dict[str, str] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
     free_mib: Optional[int] = None
+    parallel: int = 1                     # stream slots the context was chosen for (plan_parallel; 1 = one request at a time)
 
 
 def overhead_mib(weights_bytes: int) -> int:
@@ -406,3 +414,128 @@ def plan_given_context(pack, det: Detected, max_ctx: int) -> ContextPlan:
                           "context in the free GPU memory (%d of %d MiB free); each pass takes %s longer (measured on the RTX 5090)"
                           % (pack.draft_head.name, sizes[2] / (1 << 30), plan.max_ctx, g.free_mib, g.total_mib, HEAD_SLOWER))
     return plan
+
+
+# ---- several requests at once (serve --parallel N; experimental) ------------------------------------------------------------------
+def parallel_fit(free_mib: float, files_bytes: int, overhead: int, n: int, kv_bytes: int = KV_BYTES_PER_TOKEN,
+                 slot_bytes: int = SLOT_MIB * MIB) -> int:
+    """How many tokens of context fit for the carrier and ``n`` stream slots, all with the same context:
+    (n + 1) x context x kv_bytes + n x slot_bytes + files + overhead + margin <= free (0 when nothing fits)."""
+    room = free_mib - files_bytes / MIB - overhead - MARGIN_MIB - n * slot_bytes / MIB
+    return max(0, int(room * MIB // ((n + 1) * kv_bytes)))
+
+
+def choose_parallel(free_mib: float, weights_bytes: int, draft_bytes: int, head_bytes: int, model_max: int, n: int,
+                    kv_bytes: int = KV_BYTES_PER_TOKEN, slot_bytes: int = SLOT_MIB * MIB) -> Tuple[int, bool]:
+    """:func:`choose` for ``n`` stream slots: (context, head_off).  The same steps and the same rule for the draft model's output head
+    (left out under HEAD_OFF_BELOW when that gives more room)."""
+    over = overhead_mib(weights_bytes)
+
+    def ctx(files):
+        k = parallel_fit(free_mib, files, over, n, kv_bytes, slot_bytes)
+        return model_max if k >= model_max else (k // CONTEXT_STEP) * CONTEXT_STEP
+
+    with_head = ctx(weights_bytes + draft_bytes + head_bytes)
+    if with_head >= min(HEAD_OFF_BELOW, model_max):
+        return with_head, False
+    without = ctx(weights_bytes + draft_bytes)
+    if without > with_head:
+        return without, True
+    return with_head, False
+
+
+def plan_parallel(pack, det: Detected, n: int) -> ContextPlan:
+    """The context for ``n`` requests at once (serve --parallel n): the carrier and every stream slot take the same context, the
+    longest that fits the free GPU memory, a multiple of CONTEXT_STEP and at most the model's own; on every card (the RTX 5090
+    included, where the model's own context does not fit n + 1 times).  The draft model's output head is left out by the rule of
+    :func:`choose`.  Raises YasakaniError when not even MIN_CONTEXT tokens fit (naming the most streams that do).  When nvidia-smi gives
+    no free memory, the plan is for one request at a time (``parallel`` 1, with a note)."""
+    n = int(n)
+    plan = ContextPlan(parallel=n)
+    g = det.worst()
+    if g is None or g.total_mib is None or g.free_mib is None:
+        plan.parallel = 1
+        plan.notes.append("note: --parallel %d chooses the context from the free GPU memory, and nvidia-smi could not tell it; serving "
+                          "one request at a time (give --max-ctx to choose the context yourself)" % n)
+        return plan
+    plan.free_mib = g.free_mib
+    sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
+    ctx, head_off = choose_parallel(g.free_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx, n)
+    if ctx < MIN_CONTEXT:
+        fits = [m for m in range(n - 1, 1, -1)
+                if choose_parallel(g.free_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx, m)[0] >= MIN_CONTEXT]
+        raise YasakaniError(
+            "--parallel %d does not fit in the free GPU memory (%d of %d MiB free): every request needs a context of at least %d tokens "
+            "of its own.  %s" % (n, g.free_mib, g.total_mib, MIN_CONTEXT, ("--parallel %d fits." % fits[0]) if fits
+                                 else "Even --parallel 2 does not fit: serve one request at a time."))
+    if head_off:
+        plan.env["YSKN_BDR_SHEAD"] = "0"
+        plan.notes.append("note: to leave room for the contexts, the output head of the draft model (%s, %.1f GiB) is not loaded; "
+                          "each pass takes %s longer (measured on the RTX 5090)"
+                          % (pack.draft_head.name, sizes[2] / (1 << 30), HEAD_SLOWER))
+    plan.max_ctx = ctx
+    plan.notes.append("context: %d tokens for each of %d requests at once, chosen from the free GPU memory (%d of %d MiB free); "
+                      "--max-ctx sets it yourself" % (ctx, n, g.free_mib, g.total_mib))
+    return plan
+
+
+def plan_given_parallel(pack, det: Detected, max_ctx: int, n: int) -> ContextPlan:
+    """The plan for ``n`` requests at once with a context given by --max-ctx: the context stays as given (as for one request, it is
+    tried even where the rule says it does not fit, with a warning); the draft model's output head is left out when the contexts fit
+    only without it.  Unchanged when nvidia-smi gave no answer."""
+    plan = ContextPlan(max_ctx=int(max_ctx), parallel=int(n))
+    g = det.worst()
+    if g is None or g.total_mib is None or g.free_mib is None:
+        return plan
+    plan.free_mib = g.free_mib
+    sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
+    over = overhead_mib(sizes[0])
+    if parallel_fit(g.free_mib, sum(sizes), over, n) >= plan.max_ctx:
+        return plan
+    if parallel_fit(g.free_mib, sizes[0] + sizes[1], over, n) >= plan.max_ctx:
+        plan.env["YSKN_BDR_SHEAD"] = "0"
+        plan.notes.append("note: the output head of the draft model (%s, %.1f GiB) is not loaded: it does not fit beside %d requests "
+                          "with %d tokens of context each in the free GPU memory (%d of %d MiB free); each pass takes %s longer "
+                          "(measured on the RTX 5090)" % (pack.draft_head.name, sizes[2] / (1 << 30), n, plan.max_ctx, g.free_mib,
+                                                          g.total_mib, HEAD_SLOWER))
+        return plan
+    plan.notes.append("warning: %d requests with %d tokens of context each do not fit in the free GPU memory (%d of %d MiB free); "
+                      "trying anyway.  When the GPU memory overflows, Windows keeps part of it in ordinary memory and everything becomes "
+                      "several times slower, without an error.  Lower --max-ctx or --parallel."
+                      % (n, plan.max_ctx, g.free_mib, g.total_mib))
+    return plan
+
+
+def parallel_need_mib(files_bytes: int, weights_bytes: int, ctx: int, n: int, kv_bytes: int, slot_bytes: int) -> float:
+    """GPU memory for the model, the carrier's context and ``n`` stream slots by the engine's own numbers (yskn_ms_info: the KV bytes
+    of one position of one sequence in its KV format, the bytes of one slot besides its KV): (n + 1) x ctx x kv_bytes + the carrier's
+    position table + n x (slot_bytes + SLOT_ALLOC_MIB) + the files, the overhead and the margin."""
+    return (files_bytes / MIB + overhead_mib(weights_bytes) + MARGIN_MIB
+            + (ctx * (kv_bytes + POSITION_TABLE_BYTES) + n * (ctx * kv_bytes + slot_bytes + SLOT_ALLOC_MIB * MIB)) / MIB)
+
+
+def check_parallel(pack, plan: Optional[ContextPlan], info, n: int) -> Tuple[int, Optional[str]]:
+    """After the model is open: how many of ``n`` stream slots to make, by what the engine says of itself (``info``, a
+    :class:`yasakani.engine.MsInfo`): 1 when the multi-stream pass does not take the engine's settings (e.g. an 8-bit KV), else the
+    most slots up to ``n`` whose KV (in the engine's own KV format) fits the free memory the plan was made for.  Returns that number
+    and a note (None when it is ``n``).  Without a known free memory the number stays ``n`` (a binding that does not fit fails, and the
+    server then serves one request at a time)."""
+    n = int(n)
+    if info.unsupported:
+        return 1, ("note: --parallel %d is off: the multi-stream pass does not take this engine's settings (%s); serving one request "
+                   "at a time" % (n, info.reason))
+    if plan is None or plan.free_mib is None:
+        return n, None
+    w = pack.weights.stat().st_size
+    files = w + pack.draft.stat().st_size + (pack.draft_head.stat().st_size if info.draft_head else 0)
+    m = n
+    while m >= 2 and parallel_need_mib(files, w, info.max_ctx, m, info.kv_bytes_per_position, info.slot_bytes) > plan.free_mib:
+        m -= 1
+    if m == n:
+        return n, None
+    need = parallel_need_mib(files, w, info.max_ctx, n, info.kv_bytes_per_position, info.slot_bytes)
+    if m >= 2:
+        return m, ("note: by the engine's own numbers %d requests with %d tokens of context each need about %d MiB and %d MiB are free; "
+                   "serving %d at a time" % (n, info.max_ctx, need, plan.free_mib, m))
+    return 1, ("note: by the engine's own numbers %d requests with %d tokens of context each need about %d MiB and %d MiB are free, and "
+               "not even 2 fit; serving one request at a time" % (n, info.max_ctx, need, plan.free_mib))

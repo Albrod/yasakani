@@ -20,12 +20,14 @@ from typing import List, Optional, Sequence
 
 from . import __version__
 from . import gpu as gpus
-from ._native import YasakaniError, find_library, library_loaded, pci_bus_order
+from ._native import NativeLib, YasakaniError, find_library, library_loaded, pci_bus_order
 from .runtime import ModelPack, RuntimeProfile
 from .selfcheck import FORMAT as SELFCHECK_FORMAT
 from .selfcheck import cases as _selfcheck_cases, ids_sha as _ids_sha, run as _selfcheck_run    # noqa: F401  (names of 0.1.3: bench scripts use them)
 
 DEFAULT_PORT = 8765
+DEFAULT_MAX_QUEUE = 64                           # serve --parallel N: requests that may wait for a stream
+CHECK_FILE = "parallel_check.json"               # results of the start-up check of --parallel (once per library, GPU and driver)
 
 
 # ---- small helpers ----------------------------------------------------------------------------------------------------------------
@@ -169,8 +171,11 @@ def _vision(args):
     return vision
 
 
-def _open_stack(args, *, warm: bool = True):
-    """Model folder -> (pack, engine, formatter, runner).  The tokenizer is loaded first so a broken folder fails before the long load."""
+def _open_stack(args, *, warm: bool = True, parallel: int = 1):
+    """Model folder -> (pack, engine, formatter, runner).  The tokenizer is loaded first so a broken folder fails before the long load.
+    ``parallel`` N >= 2 (serve --parallel N): the context is chosen for N requests at once (``gpu.plan_parallel``); afterwards
+    ``args.parallel_planned`` is the N the engine was opened for (1 when the engine library has no multi-stream entries or the free GPU
+    memory is not known) and ``args.context_plan`` the plan."""
     from .chat import ChatRunner
     from .engine import Engine
     from .textio import ChatFormatter
@@ -182,18 +187,34 @@ def _open_stack(args, *, warm: bool = True):
     note = gpus.untested_note(det)
     if note:
         _say(note)
-    if args.max_ctx is None:                     # 0.1.3: a context that fits the free GPU memory (unchanged on the RTX 5090)
+    # several GPUs: the engine sees only the chosen one, as its device 0.  Before any engine library is loaded (--parallel loads it
+    # below to look for the multi-stream entries): CUDA reads CUDA_VISIBLE_DEVICES only once.
+    device = _visible_gpu(det, args.device)
+    n, lib, plan = int(parallel or 1), None, None
+    if n >= 2:                                   # several requests at once, if the engine library has the entries
+        lib = NativeLib(args.dll)
+        if not lib.supports_parallel:
+            _say("note: this engine library has no multi-stream entries (yskn_ms_*), so --parallel %d is off: serving one request at "
+                 "a time" % n)
+            n = 1
+    if n >= 2:
+        plan = gpus.plan_parallel(pack, det, n) if args.max_ctx is None else gpus.plan_given_parallel(pack, det, args.max_ctx, n)
+        if plan.parallel < 2:                    # the free memory is not known
+            for line in plan.notes:
+                _say(line)
+            n, plan = 1, None
+    if plan is None and args.max_ctx is None:    # 0.1.3: a context that fits the free GPU memory (unchanged on the RTX 5090)
         plan = gpus.plan_context(pack, det)
-    else:                                        # a given context is used as it is; the draft model's output head only where it fits
+    elif plan is None:                           # a given context is used as it is; the draft model's output head only where it fits
         plan = gpus.plan_given_context(pack, det, args.max_ctx)
+    args.parallel_planned, args.context_plan = n, plan
     for line in plan.notes:
         _say(line)
     max_ctx = plan.max_ctx
     profile = RuntimeProfile.default(pack, plan.env) if plan.env else None
-    device = _visible_gpu(det, args.device)      # 0.1.6: several GPUs: the engine sees only the chosen one, as its device 0
     _say("loading the model (%s of weights) ..." % _human(pack.weights.stat().st_size))
     t0 = time.time()
-    eng = Engine(pack, max_ctx=max_ctx, device=device, dll=args.dll, profile=profile)
+    eng = Engine(pack, max_ctx=max_ctx, device=device, dll=args.dll, profile=profile, **({"lib": lib} if lib is not None else {}))
     try:
         if eng.removed_env:
             _say("note: ignored %d YSKN_* setting(s) from the environment: %s" % (len(eng.removed_env), ", ".join(sorted(eng.removed_env))))
@@ -208,6 +229,187 @@ def _open_stack(args, *, warm: bool = True):
     if note:
         _say(note)
     return pack, eng, fmt, runner
+
+
+# ---- several requests at once (serve --parallel N; experimental) ------------------------------------------------------------------
+def _parallel_count(value, env: bool = False) -> int:
+    """--parallel N (serve: else $YASAKANI_PARALLEL), else 1."""
+    if value is None and env:
+        v = (os.environ.get("YASAKANI_PARALLEL") or "").strip()
+        if v:
+            try:
+                value = int(v)
+            except ValueError:
+                raise YasakaniError("YASAKANI_PARALLEL must be a whole number, not %r" % v)
+    n = 1 if value is None else int(value)
+    if not 1 <= n <= gpus.PARALLEL_MAX:
+        raise YasakaniError("--parallel must be between 1 and %d" % gpus.PARALLEL_MAX)
+    return n
+
+
+def _seconds_option(value, env: str, option: str, *, off: bool = False) -> Optional[float]:
+    """An option given as "auto" (None), "off" (0; only where ``off``) or seconds; when it is not given, the environment variable
+    ``env``; else "auto"."""
+    from .sched import KEEP_TURN_LIMIT_S
+    raw = value if value is not None else ((os.environ.get(env) or "").strip() or "auto")
+    v = str(raw).strip().lower()
+    if v == "auto":
+        return None
+    if off and v == "off":
+        return 0.0
+    try:
+        x = float(v)
+    except ValueError:
+        x = float("nan")
+    if not 0.0 <= x <= KEEP_TURN_LIMIT_S:                     # also NaN
+        raise YasakaniError("%s (or %s) must be auto%s or seconds from 0 to %g, not %r"
+                            % (option, env, ", off" if off else "", KEEP_TURN_LIMIT_S, raw))
+    return x
+
+
+def _turn_settings(args) -> dict:
+    """--keep-turn and --max-wait (or $YASAKANI_KEEP_TURN, $YASAKANI_MAX_WAIT): the arguments of the scheduler for the next turn after
+    tool calls."""
+    return dict(keep_turn=_seconds_option(getattr(args, "keep_turn", None), "YASAKANI_KEEP_TURN", "--keep-turn", off=True),
+                max_wait=_seconds_option(getattr(args, "max_wait", None), "YASAKANI_MAX_WAIT", "--max-wait"))
+
+
+def _turn_line(sched) -> str:
+    """What the server says at start about the stream kept for the next turn after tool calls."""
+    from .sched import KEEP_TURN_MAX_S, KEEP_TURN_MIN_S, WAIT_FLOOR_S
+    if sched.keep_turn == 0.0:
+        return "after tool calls nothing is kept for the next turn"
+    if sched.keep_turn is None:
+        keep = "about as long as reading the conversation again takes (%g to %g s)" % (KEEP_TURN_MIN_S, KEEP_TURN_MAX_S)
+    else:
+        keep = "%g s" % sched.keep_turn
+    if sched.max_wait is None:
+        wait = "as long as reading that conversation again takes, and %g s" % WAIT_FLOOR_S
+    else:
+        wait = "%g s" % sched.max_wait
+    return ("after tool calls a request's place is kept for its next turn %s; a new request waits for next turns at most %s"
+            % (keep, wait))
+
+
+def _cache_dir() -> Path:
+    """Where the package keeps results between runs: $YASAKANI_CACHE_DIR, else the user's cache folder."""
+    d = os.environ.get("YASAKANI_CACHE_DIR")
+    if d:
+        return Path(d)
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "yasakani"
+    return Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "yasakani"
+
+
+def _check_key(args, pack, eng, sched) -> Optional[str]:
+    """What the start-up check of --parallel depends on: the engine library (its SHA-256), the GPU and its driver, the model, the
+    package and the slots.  None when the GPU is not known (the check then runs at every start)."""
+    det = getattr(args, "gpu_detected", None)
+    g = det.gpu if det is not None else None
+    if g is None:
+        return None
+    try:
+        lib = hashlib.sha256(Path(eng.lib.path).read_bytes()).hexdigest()
+    except (OSError, AttributeError):
+        return None
+    parts = dict(library=lib, gpu=g.name, uuid=g.uuid, compute_capability=g.cc_text, driver=g.driver, model=pack.model_id,
+                 weights=pack.weights.stat().st_size, version=__version__, slots=sched.n_slots, rows=sched.rows, drafter=sched.drafter)
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+
+
+def _check_cache(path: Path) -> dict:
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _check_remember(path: Path, key: str, record: dict) -> None:
+    """Keep one result in the cache file (a file that cannot be written only costs the check at the next start)."""
+    try:
+        d = _check_cache(path)
+        d[key] = record
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(d, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except OSError:
+        pass
+
+
+def _parallel_check(args, pack, eng, fmt, sched, *, use_cache: bool = True) -> Optional[bool]:
+    """The start-up check of --parallel: N short requests at once in the stream slots must give the ids each gives alone (the
+    single path).  The result is kept per engine library, GPU and driver.  True passed, False differs, None could not be run."""
+    from . import sched as S
+    path = _cache_dir() / CHECK_FILE
+    key = _check_key(args, pack, eng, sched)
+    if use_cache and key is not None:
+        rec = _check_cache(path).get(key)
+        if isinstance(rec, dict) and "ok" in rec:
+            if rec["ok"]:
+                _say("parallel check: passed before with this engine library, GPU and driver")
+                return True
+            _say("parallel check: failed before with this engine library, GPU and driver (%s).  Delete %s to check again."
+                 % (rec.get("detail"), path))
+            return False
+    _say("checking that %d requests at once give the same output as one at a time (once per engine library, GPU and driver) ..."
+         % sched.n_slots)
+    try:
+        res = S.consistency_check(sched, S.check_prompts(fmt, sched.n_slots))
+    except YasakaniError as ex:
+        _say("parallel check could not run: %s" % ex)
+        return None
+    if res.compared == 0:
+        _say("parallel check could not compare: %s" % res.line())
+        return None
+    if key is not None:
+        _check_remember(path, key, dict(ok=res.ok, detail=res.line(), version=__version__,
+                                        checked=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())))
+    _say("parallel check %s: %s" % ("passed" if res.ok else "FAILED", res.line()))
+    return res.ok
+
+
+def _start_parallel(args, pack, eng, fmt, *, check: bool = True):
+    """After the model is open (and warmed up): the scheduler for ``args.parallel_planned`` requests at once, or None (one request
+    at a time; the reason is printed).  ``check`` (--parallel-check): "auto" the start-up check once per engine library, GPU and
+    driver, "always" at every start, "off" none; True is "auto", False none."""
+    from .sched import Scheduler
+    n = int(getattr(args, "parallel_planned", 1) or 1)
+    if n < 2:
+        return None
+    try:
+        info = eng.ms_info()
+    except YasakaniError as ex:
+        _say("note: --parallel %d is off (%s); serving one request at a time" % (n, ex))
+        return None
+    m, note = gpus.check_parallel(pack, getattr(args, "context_plan", None), info, n)
+    if note:
+        _say(note)
+    if m < 2:
+        args.parallel_planned = 1
+        return None
+    turn = _turn_settings(args)
+    try:
+        sched = Scheduler(eng, m, rows=getattr(args, "parallel_rows", 16), max_queue=getattr(args, "max_queue", DEFAULT_MAX_QUEUE),
+                          reuse=not getattr(args, "no_slot_reuse", False), **turn)
+    except (YasakaniError, ValueError) as ex:
+        _say("note: --parallel %d is off: the stream slots could not be made (%s); serving one request at a time" % (m, ex))
+        args.parallel_planned = 1
+        return None
+    args.parallel_planned = m
+    mode = getattr(args, "parallel_check", "auto") if check is True else ("off" if check is False else check)
+    if mode != "off":
+        ok = _parallel_check(args, pack, eng, fmt, sched, use_cache=mode != "always")
+        if not ok:
+            why = ("%d requests at once gave other output than one at a time on this GPU (please report it on GitHub Issues with the "
+                   "output of yasakani info)" % m) if ok is False else "the start-up check did not run"
+            _say("note: --parallel %d is off: %s; serving one request at a time" % (m, why))
+            sched.close()
+            eng.reset()                          # nothing of the check stays on the engine
+            args.parallel_planned = 1
+            return None
+    return sched
 
 
 # ---- info -------------------------------------------------------------------------------------------------------------------------
@@ -287,6 +489,10 @@ def cmd_serve(args) -> int:
     local = args.host in ("127.0.0.1", "localhost", "::1")
     if not local and not args.api_key:
         raise YasakaniError("refusing to listen on %s without --api-key: anyone who can reach this computer could use the GPU" % args.host)
+    n = _parallel_count(getattr(args, "parallel", None), env=True)
+    if getattr(args, "max_queue", DEFAULT_MAX_QUEUE) < 1:
+        raise YasakaniError("--max-queue must be 1 or more")
+    _turn_settings(args)                         # a wrong value stops here, before the model loads
     cfg = ServerConfig(host=args.host, port=args.port, api_key=args.api_key, default_max_tokens=args.default_max_tokens,
                        max_tokens_cap=args.max_tokens_cap)
     state = ApiState(cfg)
@@ -301,18 +507,31 @@ def cmd_serve(args) -> int:
     threading.Thread(target=httpd.serve_forever, kwargs=dict(poll_interval=0.2), name="yasakani-http", daemon=True).start()
     base = "http://%s:%d" % ("[%s]" % args.host if ":" in args.host else args.host, cfg.port)
     _say("listening on %s  (answers /health while the model loads)" % base)
-    eng = None
+    eng = sched = None
     try:
-        pack, eng, fmt, runner = _open_stack(args, warm=not args.no_warmup)
+        if n >= 2:
+            pack, eng, fmt, runner = _open_stack(args, warm=not args.no_warmup, parallel=n)
+            sched = _start_parallel(args, pack, eng, fmt)
+            state.sched = sched
+        else:
+            pack, eng, fmt, runner = _open_stack(args, warm=not args.no_warmup)
         cfg.model_id = pack.model_id
         state.runner = runner
         _say("ready: OpenAI-compatible API at %s/v1   (model id %r%s%s)" % (base, cfg.model_id, ", API key required" if cfg.api_key else "",
                                                                          ", image input on" if runner.vision is not None else ""))
+        if sched is not None:
+            _say("serving up to %d requests at once (experimental), each with a context of %d tokens; up to %d more wait"
+                 % (sched.n_slots, eng.max_ctx, sched.max_queue))
+            _say(_turn_line(sched))
         if runner.vision is not None:
             _say(runner.vision.summary())
         _say("stop with Ctrl+C")
         while True:
             time.sleep(0.5)
+            if sched is not None and sched.error is not None:     # every request got its error; the server does not wait on
+                time.sleep(1.0)
+                _say("error: the engine failed (%s); the server stops" % sched.error)
+                return 1
     except KeyboardInterrupt:
         _say("stopping ...")
         return 0
@@ -320,6 +539,8 @@ def cmd_serve(args) -> int:
         runner_ = state.runner
         state.runner = None
         httpd.shutdown()
+        if sched is not None:
+            sched.close()
         if eng is not None:
             eng.cancel()
             with state.gen_lock:
@@ -460,11 +681,91 @@ def _load_prompts(path: Optional[str]):
     return out
 
 
+def _bench_params(args, text):
+    from .chat import ChatParams
+    kw = {} if args.think else {"enable_thinking": False}
+    return ChatParams(messages=[{"role": "user", "content": text}], max_tokens=args.n, temperature=0.0, ignore_eos=True,
+                      loop_guard=False, template_kwargs=dict(kw))
+
+
+def _bench_concurrent(args, n: int) -> int:
+    """bench --concurrency N: the prompts x --runs as requests, N at a time on the scheduler of serve --parallel N."""
+    from .sched import ScheduledEngine
+    prompts = _load_prompts(args.prompts_file)
+    pack, eng, fmt, runner = _open_stack(args, warm=True, parallel=n)
+    sched = None
+    jobs = [(name, text, run) for name, text in prompts for run in range(args.runs)]
+    rows: List[Optional[dict]] = [None] * len(jobs)
+    errors: List[BaseException] = []
+    lock = threading.Lock()
+    todo = list(range(len(jobs)))
+    try:
+        sched = _start_parallel(args, pack, eng, fmt)
+        if sched is None:
+            raise YasakaniError("--concurrency %d cannot run here (see the note above)" % n)
+        _say("GPU: " + "; ".join(_gpu_lines()))
+
+        def worker():
+            while True:
+                with lock:
+                    if not todo or errors:
+                        return
+                    i = todo.pop(0)
+                name, text, run = jobs[i]
+                t0 = time.perf_counter()
+                try:
+                    with ScheduledEngine(sched) as se:
+                        u = runner.run(_bench_params(args, text), lambda kind, t: None, eng=se)
+                except BaseException as ex:          # noqa: BLE001  (reported on the main thread)
+                    with lock:
+                        errors.append(ex)
+                    return
+                sec = time.perf_counter() - t0
+                rows[i] = dict(test=name, run=run + 1, prompt_tokens=u.prompt_tokens, tokens=u.completion_tokens, seconds=round(sec, 3),
+                               tokens_per_s=round(u.completion_tokens / sec, 1) if sec > 0 else 0.0,
+                               waited_s=round((u.queue_ms or 0.0) / 1000.0, 3), streams_per_pass=round(u.parallel_avg or 1.0, 2))
+                if not args.json:
+                    r = rows[i]
+                    print("%-12s run %d  prompt %5d  generated %5d  %7.1f tokens/s  (%.1f s, waited %.1f s, %.1f streams per pass)" %
+                          (name, r["run"], r["prompt_tokens"], r["tokens"], r["tokens_per_s"], r["seconds"], r["waited_s"],
+                           r["streams_per_pass"]), flush=True)
+        t0 = time.perf_counter()
+        threads = [threading.Thread(target=worker, name="yasakani-bench-%d" % k, daemon=True) for k in range(min(n, len(jobs)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        wall = time.perf_counter() - t0
+        if errors:
+            raise errors[0]
+    finally:
+        if sched is not None:
+            sched.close()
+        eng.close()
+    total = sum(r["tokens"] for r in rows)
+    each = sum(r["tokens_per_s"] for r in rows) / len(rows)
+    if args.json:
+        print(json.dumps(dict(version=__version__, model=pack.model_id, gpu=_gpu_lines(), concurrency=sched.n_slots, tokens_per_test=args.n,
+                              runs=rows, seconds=round(wall, 3), total_tokens=total, total_tokens_per_s=round(total / wall, 1),
+                              mean_tokens_per_s=round(each, 1)), indent=1))
+    else:
+        print("%d requests, %d at a time: %d tokens in %.1f s = %.1f tokens/s in total, %.1f tokens/s per request on average   "
+              "(greedy, thinking %s, %d tokens each; the times are measured here, from sending a request to its last token)"
+              % (len(rows), sched.n_slots, total, wall, total / wall, each, "on" if args.think else "off", args.n))
+    return 0
+
+
 def cmd_bench(args) -> int:
     from .chat import ChatParams
     if getattr(args, "edit", False):
+        if _parallel_count(getattr(args, "concurrency", None)) >= 2:
+            raise YasakaniError("--edit runs one request at a time; leave out --concurrency")
         return _bench_edit(args)
     n_tokens = 512 if args.n is None else args.n
+    n = _parallel_count(getattr(args, "concurrency", None))
+    if n >= 2:
+        args.n = n_tokens
+        return _bench_concurrent(args, n)
     prompts = _load_prompts(args.prompts_file)
     pack, eng, fmt, runner = _open_stack(args, warm=True)
     rows = []
@@ -573,66 +874,105 @@ def _selfcheck_consistency(eng, fmt, rc: int) -> int:
     return rc
 
 
-def cmd_selfcheck(args) -> int:
-    from . import selfcheck as sc
-    pack, eng, fmt, runner = _open_stack(args, warm=True)
+SELFCHECK_PARALLEL = ("several requests at once (--parallel %d): short requests in the stream slots must give the ids each gives alone, "
+                      "exactly:")
+
+
+def _selfcheck_parallel(args, pack, eng, fmt, rc: int) -> int:
+    """selfcheck --parallel N, after the checks of one request passed with exit code ``rc``: the start-up check of serve --parallel N,
+    run now (its result is kept for serve).  Exit code 1 when the output differs, 2 when it cannot run here."""
+    print(SELFCHECK_PARALLEL % getattr(args, "parallel", 0))
+    sched = _start_parallel(args, pack, eng, fmt, check=False)
+    if sched is None:
+        print("  NOT RUN: the engine cannot serve several requests at once here (see the note above).")
+        return 2
     try:
-        got = sc.run(eng, fmt)
-        if args.write:
-            det = getattr(args, "gpu_detected", None)
-            if det is None or not det.tested:
-                print(SELFCHECK_WRITE_OTHER)
-            rec = sc.reference_record(eng, got, pack.model_id, __version__, gpu=det.gpu.name if det is not None and det.gpu else None)
-            Path(args.write).write_text(sc.dumps(rec) + "\n", encoding="utf-8")
-            print("wrote %d reference record(s) to %s" % (len(got), args.write))
-            return 0
-        ref_path = Path(args.reference) if args.reference else pack.root / "selfcheck.json"
-        if not ref_path.is_file():
-            print("no reference file (%s).  Download selfcheck.json next to the model files, or pass --reference FILE." % ref_path)
-            return 2
-        ref = json.loads(ref_path.read_text(encoding="utf-8"))
-        if ref.get("format") != SELFCHECK_FORMAT:
-            print("the reference file has an unknown format (%r)" % ref.get("format"))
-            return 2
-        det = getattr(args, "gpu_detected", None)
-        other = det is not None and det.untested           # a GPU that is known and is not the RTX 5090
-        want = {c["name"]: c for c in ref.get("cases", [])}
-        bad = differs = 0
-        for g in got:
-            w = want.get(g["name"])
-            if w is None:
-                print("  %-14s not in the reference file" % g["name"])
-                bad += 1
-            elif w["prompt_sha256"] != g["prompt_sha256"]:
-                print("  %-14s FAIL  the prompt ids differ (tokenizer or chat template files are not the reference ones)" % g["name"])
-                bad += 1
-            elif w["sha256"] != g["sha256"] or w["tokens"] != g["tokens"]:
-                n = next((i for i, (a, b) in enumerate(zip(w["head"], g["head"])) if a != b), None)
-                print("  %-14s %s  the output differs%s" % (g["name"], "DIFF" if other else "FAIL",
-                                                            "" if n is None else " (first different token: #%d)" % (n + 1)))
-                differs += 1
-            else:
-                print("  %-14s PASS  (%d tokens)" % (g["name"], g["tokens"]))
-        if bad or (differs and not other):
-            print("self-check FAILED for %d case(s)." % (bad + differs))
-            return 1
-        if not other or (not differs and (len(sc.full_data(ref)) < len(got) or not eng.supports_forced)):
-            print(SELFCHECK_PASSED)                         # the RTX 5090 (or an unknown GPU): the same output; as before 0.1.4
-            return _selfcheck_consistency(eng, fmt, 0)
-        # 0.1.4: on a GPU other than the RTX 5090 the predictions on the reference output decide (teacher forcing, yasakani/selfcheck.py)
-        print(SELFCHECK_OTHER_GPU % differs if differs else SELFCHECK_OTHER_SAME)
-        res = sc.close_check(eng, got, ref)
-        for line in sc.close_lines(res):
-            print(line)
-        fails = res.failures()
-        if not fails:
-            print(SELFCHECK_CLOSE_PASS if differs else SELFCHECK_PASSED)
-            return _selfcheck_consistency(eng, fmt, 3 if differs else 0)
-        print("self-check FAILED: %s." % "; ".join(fails))
-        print(SELFCHECK_CLOSE_FAIL)
+        ok = _parallel_check(args, pack, eng, fmt, sched, use_cache=False)
+    finally:
+        sched.close()
+    if ok is None:
+        print("  NOT RUN: the check could not run (see the note above).")
+        return 2
+    if not ok:
+        print("self-check FAILED: %d requests at once gave other output than one at a time.  Please report it on GitHub Issues with the "
+              "output of yasakani info and of this self-check." % sched.n_slots)
         return 1
+    print("  PASS  (%d requests at once)" % sched.n_slots)
+    return rc
+
+
+def cmd_selfcheck(args) -> int:
+    n = _parallel_count(getattr(args, "parallel", None))
+    if n >= 2:
+        pack, eng, fmt, runner = _open_stack(args, warm=True, parallel=n)
+    else:
+        pack, eng, fmt, runner = _open_stack(args, warm=True)
+    try:
+        rc = _selfcheck_one(args, pack, eng, fmt)
+        if n >= 2 and not args.write and rc in (0, 3):
+            rc = _selfcheck_parallel(args, pack, eng, fmt, rc)
+        return rc
     finally:
         eng.close()
+
+
+def _selfcheck_one(args, pack, eng, fmt) -> int:
+    """The checks of one request (as before 0.2.0)."""
+    from . import selfcheck as sc
+    got = sc.run(eng, fmt)
+    if args.write:
+        det = getattr(args, "gpu_detected", None)
+        if det is None or not det.tested:
+            print(SELFCHECK_WRITE_OTHER)
+        rec = sc.reference_record(eng, got, pack.model_id, __version__, gpu=det.gpu.name if det is not None and det.gpu else None)
+        Path(args.write).write_text(sc.dumps(rec) + "\n", encoding="utf-8")
+        print("wrote %d reference record(s) to %s" % (len(got), args.write))
+        return 0
+    ref_path = Path(args.reference) if args.reference else pack.root / "selfcheck.json"
+    if not ref_path.is_file():
+        print("no reference file (%s).  Download selfcheck.json next to the model files, or pass --reference FILE." % ref_path)
+        return 2
+    ref = json.loads(ref_path.read_text(encoding="utf-8"))
+    if ref.get("format") != SELFCHECK_FORMAT:
+        print("the reference file has an unknown format (%r)" % ref.get("format"))
+        return 2
+    det = getattr(args, "gpu_detected", None)
+    other = det is not None and det.untested           # a GPU that is known and is not the RTX 5090
+    want = {c["name"]: c for c in ref.get("cases", [])}
+    bad = differs = 0
+    for g in got:
+        w = want.get(g["name"])
+        if w is None:
+            print("  %-14s not in the reference file" % g["name"])
+            bad += 1
+        elif w["prompt_sha256"] != g["prompt_sha256"]:
+            print("  %-14s FAIL  the prompt ids differ (tokenizer or chat template files are not the reference ones)" % g["name"])
+            bad += 1
+        elif w["sha256"] != g["sha256"] or w["tokens"] != g["tokens"]:
+            n = next((i for i, (a, b) in enumerate(zip(w["head"], g["head"])) if a != b), None)
+            print("  %-14s %s  the output differs%s" % (g["name"], "DIFF" if other else "FAIL",
+                                                        "" if n is None else " (first different token: #%d)" % (n + 1)))
+            differs += 1
+        else:
+            print("  %-14s PASS  (%d tokens)" % (g["name"], g["tokens"]))
+    if bad or (differs and not other):
+        print("self-check FAILED for %d case(s)." % (bad + differs))
+        return 1
+    if not other or (not differs and (len(sc.full_data(ref)) < len(got) or not eng.supports_forced)):
+        print(SELFCHECK_PASSED)                         # the RTX 5090 (or an unknown GPU): the same output; as before 0.1.4
+        return _selfcheck_consistency(eng, fmt, 0)
+    # 0.1.4: on a GPU other than the RTX 5090 the predictions on the reference output decide (teacher forcing, yasakani/selfcheck.py)
+    print(SELFCHECK_OTHER_GPU % differs if differs else SELFCHECK_OTHER_SAME)
+    res = sc.close_check(eng, got, ref)
+    for line in sc.close_lines(res):
+        print(line)
+    fails = res.failures()
+    if not fails:
+        print(SELFCHECK_CLOSE_PASS if differs else SELFCHECK_PASSED)
+        return _selfcheck_consistency(eng, fmt, 3 if differs else 0)
+    print("self-check FAILED: %s." % "; ".join(fails))
+    print(SELFCHECK_CLOSE_FAIL)
+    return 1
 
 
 # ---- entry point ------------------------------------------------------------------------------------------------------------------
@@ -659,6 +999,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--default-max-tokens", type=int, default=32768, help="answer limit when a request does not give one")
     sp.add_argument("--max-tokens-cap", type=int, default=None, help="upper limit for any request")
     sp.add_argument("--no-warmup", action="store_true", help="skip the short warm-up run at start")
+    sp.add_argument("--parallel", type=int, default=None, metavar="N",
+                    help="experimental: generate up to N requests at once (default 1, or $YASAKANI_PARALLEL).  Every request has a "
+                         "context of its own, all of the same length, chosen from the free GPU memory unless --max-ctx gives it; at "
+                         "the first start with an engine library, GPU and driver, a short check compares N requests at once with one "
+                         "at a time")
+    sp.add_argument("--max-queue", type=int, default=DEFAULT_MAX_QUEUE, metavar="Q",
+                    help="with --parallel: requests that may wait for a free stream (default %d); more are answered 503 with "
+                         "Retry-After" % DEFAULT_MAX_QUEUE)
+    sp.add_argument("--keep-turn", default=None, metavar="auto|off|SECONDS",
+                    help="with --parallel: after an answer with tool calls, how long the request's place (its stream) is kept for "
+                         "the next turn with the tool results, which then continues it instead of reading the conversation again. "
+                         "auto (the default, or $YASAKANI_KEEP_TURN): about as long as reading the conversation again takes, "
+                         "from 1 to 30 seconds; off: not kept")
+    sp.add_argument("--max-wait", default=None, metavar="auto|SECONDS",
+                    help="with --parallel: the longest a new request waits for next turns (places kept that way, and next turns "
+                         "that came after it and are read first); then it takes the next kept place, and that conversation's next turn "
+                         "reads it again.  auto (the default, or $YASAKANI_MAX_WAIT): as long as reading the kept conversation again "
+                         "takes, and 0.25 seconds.  Only the time in which next turns alone stood in its way counts")
+    _add_parallel_hidden(sp)
     _add_vision_args(sp)
     sp.set_defaults(func=cmd_serve)
 
@@ -684,6 +1043,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_engine_args(sp)
     sp.add_argument("--reference", help="reference file (default: selfcheck.json in the model folder)")
     sp.add_argument("--write", metavar="FILE", help="write a new reference file instead of checking (for people who publish a model folder)")
+    sp.add_argument("--parallel", type=int, default=None, metavar="N",
+                    help="experimental: then also check that N requests at once (serve --parallel N) give the same output as one at "
+                         "a time (exit code 1 if not, 2 if this engine cannot serve several requests at once)")
+    _add_parallel_hidden(sp)
     sp.set_defaults(func=cmd_selfcheck)
 
     sp = sub.add_parser("bench", help="measure generation speed (greedy; fixed length, or with --edit the edit tasks of the speed tables; "
@@ -700,6 +1063,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="let the model think first (default: answer directly).  With --edit: temperature 1.0 (seeds from --seed0) and "
                          "an output limit of 32768 tokens for every task, so tok/s varies from run to run")
     sp.add_argument("--json", action="store_true", help="print the result as JSON")
+    sp.add_argument("--concurrency", type=int, default=None, metavar="N",
+                    help="experimental: send the requests (the prompts x --runs) N at a time, as to serve --parallel N, and report "
+                         "the tokens per second of all of them together")
+    _add_parallel_hidden(sp)
     sp.set_defaults(func=cmd_bench)
 
     sp = sub.add_parser("update", help="look for a newer release on GitHub (the only command that contacts the network).  In a folder "
@@ -713,6 +1080,13 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_update(args) -> int:
     from .update import cmd_update as run
     return run(args)
+
+
+def _add_parallel_hidden(sp: argparse.ArgumentParser) -> None:
+    """Options for tests of several requests at once (not in the help)."""
+    sp.add_argument("--parallel-rows", type=int, default=16, help=argparse.SUPPRESS)        # rows of one pass at most (1..16)
+    sp.add_argument("--no-slot-reuse", action="store_true", help=argparse.SUPPRESS)         # finished conversations do not keep their KV
+    sp.add_argument("--parallel-check", choices=("auto", "always", "off"), default="auto", help=argparse.SUPPRESS)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

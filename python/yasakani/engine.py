@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -21,6 +21,28 @@ from .runtime import (DEFAULT_SPEC, EOS_IDS, N_STATS, STAT_INDEX, STATE_FIELDS, 
 OPT_TEMPERATURE, OPT_TOP_P, OPT_TOP_K, OPT_SEED, OPT_SAMPLER, OPT_MIN_P = 10, 11, 12, 13, 16, 29
 _NO_STOP = 0x7FFFFFFF                      # a stop id no token can have (ignore_eos)
 CONTEXT_MARGIN = 64                        # ids kept free at the end of the context
+
+# ---- the multi-stream pass (experimental entries of the engine library, 0.2.0) --------------------------------------------------
+# One engine (the carrier) holds stream slots: each holds the state of one request.  A request is read by the carrier (generate with
+# max_new=1), then ms_load copies that state into a slot; a pass carries up to 16 rows of several slots.  The rows of a slot are next to
+# each other: its frontier (the token it emitted last, not in its KV yet) first, then its drafts.  After every pass, ms_commit says how
+# many drafts of each slot the pass confirmed (ms_accept counts them).  A stream gives the same ids as the same request alone.
+MS_ROWS = 16                               # rows of one pass at most
+MS_TOP = 8                                 # entries of a row's top list
+CFG_FRONTIER = 46                          # the 47th value of the generation call: 1 = the frontier form (only that form sends it)
+MS_UNSUPPORTED = {                         # yskn_ms_info out[1]: why the multi-stream pass does not take this engine's settings
+    1: "the KV is kept in 16 bits (the multi-stream pass is built for KV5 only)",
+    2: "the KV is kept in 8 bits (the multi-stream pass is built for KV5 only)",
+    3: "image input is on",
+    4: "the built-in draft head is loaded",
+    5: "the attention settings are not the package's",
+    6: "the exact-sum GEMV is off",
+    7: "a debug skip mask is set",
+    8: "the kept conv outputs are off",
+    9: "the weights are not shared",
+    10: "the pass tables are not made for 16 rows",
+    11: "the attention settings of this process (environment) are not the package's",
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +90,83 @@ class Forced:
     argmax: np.ndarray                  # int32: the most likely next id
     nll: np.ndarray                     # float32: -log p(ids[i + 1]), natural log
     margin: Optional[np.ndarray] = None # float32: logit of the most likely id minus the logit of the second one (margins=True only)
+
+
+@dataclass(frozen=True)
+class MsInfo:
+    """What the engine library says about the multi-stream pass of an engine (yskn_ms_info; works before :meth:`Engine.ms_open`)."""
+    unsupported: int                    # 0 = the pass takes this engine's settings; else a key of MS_UNSUPPORTED
+    kv_format: int                      # 5 = KV5, 8 = 8-bit, 16 = 16-bit
+    kv5_bits: int                       # bits of a packed KV5 code (0 when not KV5)
+    kv_bytes_per_position: int          # KV of one position of one sequence; the carrier and every slot take max_ctx positions of it
+    slot_bytes: int                     # one slot besides its KV (recurrent states and histories, the drafter memory)
+    max_ctx: int                        # positions of the carrier and of every slot
+    max_rows: int                       # rows of one pass at most
+    max_slots: int
+    drafter: bool                       # the drafter is loaded
+    draft_head: bool                    # the drafter's output head is loaded
+    slots_made: int
+    slots_bound: int
+    snapshot_bytes: int                 # pinned host memory of one saved prompt state
+    snapshot_slots: int                 # saved prompt states at most
+
+    @property
+    def reason(self) -> str:
+        """Why the pass does not take these settings ("" when it does)."""
+        if not self.unsupported:
+            return ""
+        return MS_UNSUPPORTED.get(self.unsupported, "unsupported settings (code %d)" % self.unsupported)
+
+
+@dataclass
+class MsPass:
+    """One multi-stream pass: ``toks[r]`` = the token of row r (drafts that the drafter made filled in), ``argmax[r]`` = the token the
+    pass gave after row r (sampled when the row's slot samples).  The top lists (``tops=True``) hold MS_TOP entries per row."""
+    argmax: List[int]
+    toks: List[int]
+    top_ids: Optional[np.ndarray] = None   # int32 (rows, MS_TOP)
+    top_vals: Optional[np.ndarray] = None  # float32 (rows, MS_TOP)
+
+
+def stop_pair(stop_ids: Optional[Sequence[int]], spec: Dict[str, int]) -> Tuple[int, ...]:
+    """The stop ids a generation call ends at, as the engine takes them (the single path and the scheduler both decide here):
+    ``None`` = none (``()``); an empty sequence = the engine's own two (``eos1`` and ``eos2`` of the speculation settings ``spec``:
+    the model's end ids unless changed); else the first two ids given (the first one twice when one is given; a third and later ones
+    are not stop ids)."""
+    if stop_ids is None:
+        return ()
+    s = [int(x) for x in stop_ids]
+    if not s:
+        return (int(spec["eos1"]), int(spec["eos2"]))
+    return (s[0], s[1] if len(s) > 1 else s[0])
+
+
+def ms_accept(rows: Sequence[int], argmax: Sequence[int], stops=()) -> Tuple[int, List[int]]:
+    """The drafts of one stream that a pass confirmed.  ``rows`` = the stream's rows of the pass (its frontier, then its drafts),
+    ``argmax`` = the tokens the pass gave after them.  A draft is confirmed while it equals the token the pass gave after the row before
+    it, from the first draft on.  A confirmed draft that is a stop id ends the stream there: it is the stream's last id and is not
+    committed (the last id of a stream is never in its KV, as on the single path).  Returns the number of drafts to commit
+    (:meth:`Engine.ms_commit`) and the stream's new ids: the committed drafts and the token after the last of them."""
+    n = len(rows) - 1
+    if n < 0 or len(argmax) != n + 1:
+        raise ValueError("a stream has one token after each of its rows")
+    a = 0
+    while a < n and rows[a + 1] == argmax[a] and rows[a + 1] not in stops:
+        a += 1
+    return a, [int(x) for x in rows[1:a + 1]] + [int(argmax[a])]
+
+
+class _MsBuffers:
+    """Arrays the multi-stream calls write and read (made once; their addresses are kept)."""
+
+    def __init__(self):
+        self.slots, self.toks, self.dev, self.am, self.rt = (np.zeros(MS_ROWS, np.int32) for _ in range(5))
+        self.cs, self.ca = np.zeros(64, np.int32), np.zeros(64, np.int32)
+        self.ti = np.zeros((MS_ROWS, MS_TOP), np.int32)
+        self.tv = np.zeros((MS_ROWS, MS_TOP), np.float32)
+        self.pos = C.c_int(0)
+        for k in ("slots", "toks", "dev", "am", "rt", "cs", "ca", "ti", "tv"):
+            setattr(self, "p_" + k, getattr(self, k).ctypes.data)
 
 
 def forced_passes(n: int, rows: int) -> List[int]:
@@ -138,6 +237,10 @@ class Engine:
             raise
         self.spec: Dict[str, int] = dict(DEFAULT_SPEC)
         self.sampling: Optional[Sampling] = None
+        self.ms_slots = 0                                   # slots of the current multi-stream binding (ms_open)
+        self.ms_drafter = False                             # the drafter makes the drafts of the slots
+        self._slot_sampling: List[Optional[Sampling]] = []  # the sampling each slot made so far holds (None = not known)
+        self._msb: Optional[_MsBuffers] = None
 
     # ---- plumbing --------------------------------------------------------------------------------------------------------------
     def _check(self, rc: int) -> None:
@@ -248,10 +351,16 @@ class Engine:
 
     def generate(self, prompt: Sequence[int], max_new: int, *, stop_ids: Optional[Sequence[int]] = EOS_IDS,
                  on_tokens: Optional[Callable[[np.ndarray], None]] = None, spec: Optional[Dict[str, int]] = None,
-                 poll_s: float = 0.001) -> GenResult:
+                 poll_s: float = 0.001, frontier: bool = False) -> GenResult:
         """Generate up to ``max_new`` ids (the first one comes from the prompt pass).  ``on_tokens(ids)`` is called on the calling
         thread with all ids produced so far whenever new ones are committed.  If it raises, the generation is cancelled and the
-        exception is re-raised after the engine has stopped.  ``stop_ids=None`` ignores stop ids (always runs to ``max_new``)."""
+        exception is re-raised after the engine has stopped.  ``stop_ids=None`` ignores stop ids (always runs to ``max_new``); the
+        other forms: :func:`stop_pair`.
+
+        ``frontier=True`` (engine libraries with the multi-stream pass): the last prompt id is the token the carrier's stream emitted
+        last (right after :meth:`ms_unload`, or after a generation of this engine), it is not read again: the first pass checks it with
+        its drafts, as the stream's next pass would.  The prompt without that id must be the engine's live sequence; else the engine
+        refuses the call and nothing changes.  The result has the same form as without it (the first id is the one after the prompt)."""
         prompt_arr = np.ascontiguousarray(np.asarray(prompt, dtype=np.int32))
         n_gen = self.plan(len(prompt_arr), max_new)
         cfg = dict(self.spec)
@@ -261,15 +370,16 @@ class Engine:
             if k not in cfg:
                 raise ValueError("unknown speculation setting: " + k)
             cfg[k] = int(v)
-        if stop_ids is None:
-            cfg["eos1"] = cfg["eos2"] = _NO_STOP
-            stops = ()
-        else:
-            stops = tuple(int(x) for x in stop_ids)
-            if stops:
-                cfg["eos1"] = stops[0]
-                cfg["eos2"] = stops[1] if len(stops) > 1 else stops[0]
+        stops = stop_pair(stop_ids, cfg)
+        cfg["eos1"], cfg["eos2"] = stops if stops else (_NO_STOP, _NO_STOP)
         cfa = spec_array(cfg)
+        if frontier:                                         # the 47th value; every other call sends the 46 values of 0.1.x
+            if not self.supports_parallel:
+                raise YasakaniError("the engine library has no multi-stream entries (the frontier form needs them)")
+            if int(cfg["snap"]) != 1:
+                raise ValueError("the frontier form needs prompt snapshots (snap = 1)")
+            cfa = np.ascontiguousarray(np.append(cfa, np.int32(1)).astype(np.int32))
+            assert len(cfa) == CFG_FRONTIER + 1
         out = np.full(n_gen + 1, -1, np.int32)
         st = np.zeros(N_STATS, np.float64)
         tm = np.zeros(2, np.float64)
@@ -391,6 +501,179 @@ class Engine:
                 if done:                                             # an earlier error is the one to report
                     self._check(rc)
         return Forced(argmax=am, nll=nll, margin=mg)
+
+    # ---- multi-stream pass -----------------------------------------------------------------------------------------------------
+    # Experimental entries of the engine library (see the notes at MS_ROWS).  The calls of one engine are made on one thread (the
+    # engine's last error is per thread); only cancel() may come from another one.  Rules of the engine library that callers keep:
+    #   - ms_open once (a new binding drops the carrier's live sequence: the next read of a request is not a continuation);
+    #   - read a request with generate(prompt, 1) and call ms_load right after it (nothing in between), so that the slot knows its
+    #     start and frontier and ms_unload can hand the stream back for a continuation;
+    #   - ms_commit after every pass (also with nothing accepted) before any other call of the carrier;
+    #   - back to one request at a time: ms_unload, then right away generate(ids + [frontier]) (frontier=True or not).
+    @property
+    def supports_parallel(self) -> bool:
+        """The engine library has the multi-stream entries (yskn_ms_*)."""
+        return bool(getattr(self.lib, "supports_parallel", False))
+
+    def _need_ms(self) -> None:
+        if not self.supports_parallel:
+            raise YasakaniError("the engine library has no multi-stream entries (yskn_ms_*): serve one request at a time")
+
+    def _need_bound(self) -> _MsBuffers:
+        self._need_ms()
+        if self._msb is None or self.ms_slots < 1:
+            raise YasakaniError("the multi-stream slots are not set up (call ms_open first)")
+        return self._msb
+
+    def ms_info(self) -> MsInfo:
+        """What the engine library says about the multi-stream pass of this engine (also before :meth:`ms_open`)."""
+        self._need_ms()
+        out = np.zeros(15, np.int64)
+        n = C.c_int(0)
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_info"](self._e, out.ctypes.data, len(out), C.byref(n)))
+        v = [int(x) for x in out[:n.value]] + [0] * (15 - n.value)
+        if v[0] != 1:
+            raise YasakaniError("the engine library describes its multi-stream pass in a form this package does not know (%d)" % v[0])
+        return MsInfo(unsupported=v[1], kv_format=v[2], kv5_bits=v[3], kv_bytes_per_position=v[4], slot_bytes=v[5], max_ctx=v[6],
+                      max_rows=v[7], max_slots=v[8], drafter=bool(v[9]), draft_head=bool(v[10]), slots_made=v[11], slots_bound=v[12],
+                      snapshot_bytes=v[13], snapshot_slots=v[14])
+
+    def ms_open(self, n_slots: int, *, drafter: bool = True) -> MsInfo:
+        """Make (or bind again) ``n_slots`` stream slots on this engine and let the drafter make their drafts (``drafter=False``:
+        only drafts the caller gives).  Call it once: a new binding drops the live sequence of the carrier.  Slots made before keep their
+        streams and sampling; a new slot starts with the carrier's sampling.  Raises when the library or the settings do not allow the
+        pass (the reason is in the message)."""
+        self._need_ms()
+        n = int(n_slots)
+        with self._lock:
+            info = self.ms_info()
+            if info.unsupported:
+                raise YasakaniError("the multi-stream pass does not take this engine's settings: " + info.reason)
+            if not 1 <= n <= info.max_slots:
+                raise ValueError("stream slots: 1..%d" % info.max_slots)
+            rc = self._f["yskn_ms_bind2"](self._e, None, 0, n)
+            if rc != 0:                                     # a failure after the checks (out of memory) leaves no binding
+                self.ms_slots = 0
+                self._check(rc)
+            while len(self._slot_sampling) < n:
+                self._slot_sampling.append(self.sampling)
+            self.ms_slots = n
+            if self._msb is None:
+                self._msb = _MsBuffers()
+            self.ms_drafter = False
+            self._check(self._f["yskn_ms_opt"](self._e, 1, 1 if drafter else 0))
+            self.ms_drafter = bool(drafter)
+            return self.ms_info()
+
+    def ms_load(self, slot: int) -> None:
+        """Copy the carrier's state (the request it read last) into ``slot``, with the carrier's sampling (set the slot's own values
+        with :meth:`ms_set_sampling` after this).  Call it right after the read (generate with max_new=1)."""
+        self._need_bound()
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_load"](self._e, int(slot), self._e))
+            self._slot_sampling[int(slot)] = self.sampling
+
+    def ms_unload(self, slot: int, ids: Sequence[int]) -> None:
+        """Hand the stream of ``slot`` back to the carrier.  ``ids`` = the tokens the slot holds (its position = len(ids)): the prompt
+        it was loaded with and the ids it emitted, all but the last one (its frontier).  The carrier takes the slot's sampling too
+        (:attr:`sampling` follows).  Continue it right away with ``generate(ids + [frontier], ...)``."""
+        self._need_bound()
+        arr = np.ascontiguousarray(np.asarray(ids, dtype=np.int32))
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_unload"](self._e, int(slot), arr.ctypes.data, len(arr)))
+            self.sampling = self._slot_sampling[int(slot)]
+
+    def live_drop(self) -> None:
+        """Drop the carrier's live sequence: the next read of a request does not continue what the carrier holds (its saved prompt
+        states stay)."""
+        self._need_ms()
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_live_drop"](self._e))
+
+    def ms_set_sampling(self, slot: int, s: Sampling) -> Sampling:
+        """The sampling of one slot from its next pass on (the values :meth:`set_sampling` gives the carrier)."""
+        self._need_bound()
+        s = s.normalized()
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_set_sampling"](self._e, int(slot), int(round(s.temperature * 1000)), int(round(s.top_p * 1000)),
+                                                        int(s.top_k), int(round(s.min_p * 1000)), int(s.mode), int(s.seed) & 0xFFFFFFFF))
+            self._slot_sampling[int(slot)] = s
+        return s
+
+    def slot_sampling(self, slot: int) -> Optional[Sampling]:
+        """The sampling ``slot`` holds as far as this object knows (None = not known)."""
+        return self._slot_sampling[int(slot)] if 0 <= int(slot) < len(self._slot_sampling) else None
+
+    def ms_pass(self, slots: Sequence[int], toks: Sequence[int], dev: Optional[Sequence[int]] = None, *, tops: bool = False) -> MsPass:
+        """One pass of up to 16 rows.  ``slots[r]`` = the slot of row r (the rows of a slot next to each other), ``toks[r]`` = its token:
+        the slot's frontier at its first row, then the caller's drafts.  ``dev`` (needs the drafter, see :meth:`ms_open`): ``dev[r] !=
+        0`` at the first row of a slot lets the drafter fill the slot's other rows (their values in ``toks`` are not used).  Call
+        :meth:`ms_commit` right after it."""
+        b = self._need_bound()
+        m = len(slots)
+        if not 1 <= m <= MS_ROWS or len(toks) != m or (dev is not None and len(dev) != m):
+            raise ValueError("a pass has 1..%d rows, with one slot and one token (and one dev flag) per row" % MS_ROWS)
+        b.slots[:m] = slots
+        b.toks[:m] = toks
+        g = 1 if int(self.spec.get("use_graph", 1)) else 0
+        with self._lock:
+            self._need_open()
+            f, e = self._f, self._e
+            if dev is not None:
+                b.dev[:m] = dev
+                self._check(f["yskn_ms_draft"](e, m, b.p_slots, b.p_toks, b.p_dev, g))
+                tp = None
+            else:
+                tp = b.p_toks
+            self._check(f["yskn_ms_step2"](e, m, b.p_slots, tp, g, b.p_am, b.p_rt, b.p_ti if tops else None, b.p_tv if tops else None))
+            res = MsPass(argmax=b.am[:m].tolist(), toks=b.rt[:m].tolist())
+            if tops:
+                res.top_ids, res.top_vals = b.ti[:m].copy(), b.tv[:m].copy()
+        return res
+
+    def ms_commit(self, slots: Sequence[int], n_accept: Sequence[int]) -> None:
+        """Right after every :meth:`ms_pass` (also with no slot): ``n_accept[i]`` = how many drafts of ``slots[i]`` the pass confirmed
+        (:func:`ms_accept`).  The engine checks every item first and refuses drafts the pass did not confirm (nothing changes)."""
+        b = self._need_bound()
+        n = len(slots)
+        if len(n_accept) != n or n > len(b.cs):
+            raise ValueError("one accepted count per slot, at most %d slots" % len(b.cs))
+        b.cs[:n] = slots
+        b.ca[:n] = n_accept
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_commit"](self._e, n, b.p_cs, b.p_ca))
+
+    def ms_flush(self) -> None:
+        """Finish the pending work of the slots (a pass that is not committed counts as no draft accepted)."""
+        self._need_ms()
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_flush"](self._e))
+
+    def ms_slot_pos(self, slot: int) -> int:
+        """The position of ``slot``: the number of tokens it holds."""
+        b = self._need_bound()
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_slot_pos"](self._e, int(slot), C.byref(b.pos)))
+            return int(b.pos.value)
+
+    def ms_slot_hash(self, slot: int) -> np.ndarray:
+        """The hashes :meth:`state_hash` would give for an engine in the slot's state."""
+        self._need_bound()
+        out = np.zeros(512, np.uint64)
+        n = C.c_int(0)
+        with self._lock:
+            self._need_open()
+            self._check(self._f["yskn_ms_slot_hash"](self._e, int(slot), out.ctypes.data, len(out), C.byref(n)))
+        return out[:n.value].copy()
 
     # ---- warm-up ---------------------------------------------------------------------------------------------------------------
     def warmup(self, prompts: Sequence[Sequence[int]], n_gen: int = 32) -> None:
