@@ -436,3 +436,150 @@ The answers of a continued read and of a fresh read were the same. The GPU memor
 A different question reuses the document when the document comes before it, the question part is up to about 4,000 tokens and no other
 request comes in between.
 
+## Several requests at once (experimental)
+
+These measurements are of `yasakani serve --parallel N` (new in 0.2.0, experimental). They are not compared with other engines. The tables of one request at a time above are not changed by them.
+
+### Builds and common conditions
+
+* GPU: one RTX 5090 (32 GB), Windows 11. Other programs (the desktop and so on) used about 1.8 to 2.7 GB of GPU memory.
+* Engine library: the same `yskn.dll` for all runs below, SHA-256 starting `25610427`. The comparison for one request at a time is the 0.1.5 library, SHA-256 starting `918560d6`.
+* Python package: development builds of 0.2.0 on top of 0.1.5. Three versions were measured. They differ only in how the scheduler waits and keeps places, not in the engine:
+  * build A, November 17, 21:41 to November 18, 03:11;
+  * build B, November 18, 05:26 to 08:56;
+  * build C, November 18, 10:10 to 11:47. Its scheduler and server are those of 0.2.0.
+* The `yskn.dll` of 0.2.0 was built from the same GPU source files into the same compiled GPU files as the library above. It differs in one C++ file, which has the GPU selection of 0.1.6 ([#20](https://github.com/yasakani-dev/yasakani/issues/20)), also for the new entry points.
+* Speed runs: no other GPU job, one uncounted warm-up request first.
+* "Same" means the same token ids, finish reason, tool calls (names and argument strings), text, thinking and token counts as the same conversation sent alone to a new server with the same settings and seed. Timings and tok/s are not compared.
+
+### One request at a time is unchanged
+
+`--parallel 1` (and `--parallel 4` with one request at a time) against the 0.1.5 server. The 3 own tasks and the 12 published prompts, thinking off, temperature 1.0, top-p 0.95, top-k 20, seed 1, context 32,768. Three runs of each server in the order 0.1.5, 1, 4, 4, 1, 0.1.5, 0.1.5, 1, 4. Speed = all completion tokens / engine generation time, summed over the tasks, mean of the three runs.
+
+| Build | Model | `--parallel 1` vs 0.1.5 | `--parallel 4`, one at a time, vs 0.1.5 | Token ids |
+|---|---|---|---|---|
+| A | fastest | +0.06% | +0.03% | same, 15 of 15 in every run |
+| A | quality | -0.04% | -0.02% | same, 15 of 15 |
+| B | fastest | -0.5% | -0.9% | same, 15 of 15 |
+| B | quality | +0.42% | -0.03% | same, 15 of 15 |
+
+Build A: 717 to 719 tok/s (fastest) and 623 to 625 tok/s (quality) across all runs. Build B, fastest: the first 0.1.5 run directly after the warm-up was slow (672 tok/s); the row leaves it out (with it: +1.68% and +1.28%). Build C was not timed this way; it changes only the scheduler, which `--parallel 1` does not use.
+
+Also on 35 prompts per model, `--parallel 1` gave the same token ids as 0.1.5 and read each prompt the same way (builds A and B).
+
+### Speed with several requests at once
+
+Build A, fastest model, `--parallel 16 --max-ctx 16384`, thinking off, temperature 1.0, top-p 0.95, top-k 20, streamed. Each task has 16 requests with seeds 1 to 16. The published prompts have an output limit of 768 tokens, the own tasks 8,192 tokens. For each task the 16 requests were sent one by one, then the first N of them at once, on the same server. Throughput = all completion tokens / (time from the first send to the last end). The table gives throughput at once / throughput one by one, mean of 2 runs (the task order and the order of "one by one" and "at once" reversed in the second run). In brackets: throughput at N = 16 in tok/s. Every request at once gave the same token ids as one by one (962 requests).
+
+| Task | N = 2 | N = 4 | N = 8 | N = 16 |
+|---|---|---|---|---|
+| Code edit (`edit_code`) | 0.42 | 0.54 | 0.55 | 0.53 (1,037) |
+| JSONL edit (`edit_jsonl`) | 0.59 | 0.55 | 0.52 | 0.50 (1,099) |
+| Long JSONL (`jsonl_orders_8k`) | 0.96 | 0.95 | 0.93 | 0.92 (1,103) |
+| Mixed (4 code edits, 4 JSONL edits, 8 published prompts) | | | | 0.99 (1,040) |
+| structured_jsonl | 1.15 | 1.17 | 1.16 | 1.11 (1,110) |
+| code_typescript | 1.07 | 1.67 | 2.00 | 2.53 (1,066) |
+| structured_csv | 1.51 | 1.85 | 1.85 | 2.03 (1,185) |
+| translation_zh_en | 1.48 | 1.88 | 2.10 | 2.17 (1,165) |
+| structured_sql | 1.52 | 1.94 | 2.15 | 2.19 (1,184) |
+| translation_en_zh | 1.41 | 2.00 | 2.42 | 2.54 (1,149) |
+| code_cuda | 1.45 | 1.96 | 2.51 | 2.63 (1,100) |
+| code_python | 1.37 | 2.14 | 2.68 | 2.98 (1,181) |
+| translation_markdown | 1.44 | 2.18 | 2.67 | 3.02 (1,165) |
+| story_en_mystery | 1.41 | 2.48 | 3.49 | 4.11 (1,173) |
+| story_zh_scifi | 1.45 | 2.73 | 4.42 | 6.12 (1,157) |
+| story_zh_dialogue | 1.42 | 2.69 | 4.61 | 6.56 (1,156) |
+
+* With N = 4 or more, all 12 published prompts were faster than one by one. The two edits, the long JSONL and the mixed load were not.
+* A shared pass carries at most 16 rows for all requests together, while one request alone checks up to 64 copied tokens per pass (on compute capability 12.x). We think this is why the edits are slower at once.
+* We do not give N = 1: for the edits it changed between runs (1.54 and 1.55 in the first run, 0.67 and 0.65 in the second), most likely because the second read of the same prompt used a saved state.
+* Not measured: the quality model, thinking on.
+
+### The same answers
+
+Requests compared with the same conversation sent alone. "Read another way" means the prompt was read differently (for example from the start instead of continuing the previous answer); the output was still the same, but the promise does not cover this case.
+
+| Build | Same | Read another way, same output | Not sent (a planned tool turn; neither run made the tool call) | Different |
+|---|---|---|---|---|
+| A | about 12,000 | about 1,960 | 41 | 0 |
+| B | about 11,200 | about 1,450 | 19 | 0 |
+| C | 7,328 | 1,277 | 21 | 0 |
+
+The loads: requests that join and leave while others run, prompts that cross position 4,096, contexts up to 229,376 tokens, server features (tools, images, thinking budget), cancellation, engine failures, next turns sent 0 to 45 ms after a tool-call answer, and long mixed runs (below). Both models in most loads; the long runs and the keep comparison with the fastest model only.
+
+### Context and GPU memory
+
+Build A, quality model, context chosen by the server. "Used" is the highest GPU memory during the load minus the use before the start. "Estimate" is the server's own estimate. All requests answered 200, none ran out of memory.
+
+| N | Context per request | Used | Estimate |
+|---|---|---|---|
+| 2 | 196,608 | 29,770 MiB | 30,067 MiB |
+| 4 | 114,688 | 29,831 MiB | 30,202 MiB |
+| 8 | 65,536 | 29,670 MiB | 30,194 MiB |
+| 16 | 16,384 | 26,505 MiB | 26,960 MiB |
+
+Fastest model: 229,376 tokens at N = 2 and 131,072 at N = 4. The length depends on the free memory: in an earlier run of the same test, with other programs using about 1.1 GB instead of 1.8 to 1.9 GB, N = 2 got one step more, 245,760. The server reserves N + 1 contexts of 22,400 bytes per token and about 256 MiB per request beside the model.
+
+### Reading a prompt
+
+`--parallel 1`, the server reset before every request, median of 3 runs (a first run not counted). All prompts were read from the start. Seconds.
+
+| Tokens | Fastest model | Quality model |
+|---|---|---|
+| 468 | 0.133 | 0.136 |
+| 996 | 0.241 | 0.243 |
+| 2,028 | 0.471 | 0.473 |
+| 4,110 | 0.952 | 0.958 |
+| 8,255 | 1.973 | 1.983 |
+| 16,533 | 4.122 | 4.143 |
+| 33,149 | 8.898 | 8.940 |
+| 66,416 | 20.47 | 20.55 |
+| 132,876 | 51.58 | 51.79 |
+| 202,775 | 95.70 | 96.12 |
+
+With `--parallel 4` (fastest model, up to 66,416 tokens) reading took the same time within 1%. While a prompt is read, all other requests pause. `--keep-turn auto` keeps a place about as long as this table says reading the conversation again would take (at least 1, at most 30 seconds).
+
+### Keeping places for the next turn
+
+Fastest model, `--parallel 4 --max-ctx 65536`, thinking off. 6 agents, each reads a file in 8 parts through a tool (one call per turn). Tool times 0.05, 0.5, 3 and 15 seconds, each twice per agent in a shuffled order. The next turn is sent as soon as the answer ends. Conversations grow to 8,719 to 40,957 tokens. Half greedy, half seeded. 3 chat users send short streamed requests (48 to 160 tokens) every 1 to 6 seconds until the agents finish. Build B, 3 runs per setting, the order reversed between runs, mean. Every request was compared with the same request alone: 0 differences.
+
+| Setting | All agents done | Read again | Next turns that continued | Chat, first token, p95 | Total tok/s |
+|---|---|---|---|---|---|
+| keep nothing | 178.1 s | 41 times, 154.0 s | 7 of 48 | 21.8 s | 22.6 |
+| keep 2 s, no wait limit | 123.3 s | 24 times, 84.6 s | 24 of 48 | 25.8 s | 31.7 |
+| `auto` / `auto` (default) | 94.2 s | 19 times, 45.9 s | 29 of 48 | 17.2 s | 42.3 |
+| `auto`, no wait limit | 94.3 s | 19 times, 45.9 s | 29 of 48 | 17.2 s | 42.6 |
+
+Build C changed how the wait limit counts. The same load, 3 runs each:
+
+| Setting (build C) | All agents done | Read again | Chat, first token, mean / p95 | Total tok/s |
+|---|---|---|---|---|
+| `auto` / `auto` (default) | 100.6 s | 23 times, 56.5 s | 3.85 s / 15.6 s | 40.6 |
+| `auto`, no wait limit | 96.1 s | 19 times, 47.4 s | 4.51 s / 19.2 s | 40.7 |
+
+* The chat p50 jumps between about 0.3 seconds and several seconds with one or two requests, so we do not compare it.
+* A fixed keep of 30 seconds was best for the agents (74.1 s, read again 10 times) in 2 runs, but the chat p50 differed widely between them (0.47 and 1.73 s). We have not made it the default.
+
+The wait limit, build C: `--parallel 2 --max-ctx 32768`. Agents call a tool 30 times in a row and send each next turn 20 ms after the answer; new requests arrive meanwhile. Longest wait of a new request:
+
+| Model | `auto` | `--max-wait 1` | no wait limit |
+|---|---|---|---|
+| fastest | 1,529 ms | 2,122 ms | 7,977 ms |
+| quality | 1,322 ms | 1,622 ms | 7,448 ms |
+
+### Long runs
+
+Fastest model, `--parallel 8 --max-ctx 32768`, images on. A large set of conversations with tool calls and images mixed in, sent again and again.
+
+| Build | Length | Requests | Different | Stuck | Memory |
+|---|---|---|---|---|---|
+| A | 60 min | 10,178 | 0 | 0 | process +34 MiB (+0.13%), GPU -140 MiB |
+| C | 30 min | 4,993 | 0 | 0 | the server's own GPU memory unchanged (22,782.5 MiB, 127 readings); whole GPU +21.5 MiB; process +159 MiB (+0.61%) |
+
+In a 30-minute run with build B the whole GPU rose by 71 MiB. The use without the server rose by 121 MiB in the same time, so we think it came from other programs; Windows does not report GPU memory per process in nvidia-smi.
+
+### Not measured
+
+* GPUs other than the RTX 5090, including 24 GB and 16 GB cards.
+* The speed of the quality model at once, and speed with thinking on.
+* Linux with `--parallel`.

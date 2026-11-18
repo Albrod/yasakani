@@ -166,6 +166,125 @@ API key will do). If it does not connect:
   and run `START.cmd` again (the model is not downloaded again). Tool calling is new and has been tested far less than plain chat.
   An agent screen is in the harness (see "Development and support" in the [README](../README.md)).
 
+## Several requests at once (experimental)
+
+All numbers in this section were measured on one RTX 5090 (32 GB) with a development build of 0.2.0, November 17 and 18, 2026. Full conditions: [MEASUREMENTS.md](MEASUREMENTS.md#several-requests-at-once-experimental).
+
+### How do I turn it on?
+
+Start the server with `--parallel N` (or set `YASAKANI_PARALLEL=N`):
+
+```bat
+yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
+```
+
+The default is 1: one request at a time, the same path as before. The first time the server starts with an engine library, a GPU and a driver, it runs N short requests at once and compares their tokens with the same requests sent one by one. If they differ, it serves one request at a time and says so. The result is saved, so later starts skip the check. `yasakani selfcheck --parallel N` runs the same check on demand. `yasakani bench --concurrency N` measures N requests at once on your GPU.
+
+### When does it help, and when not?
+
+It helps when several different requests write new text. It does not help with edits, where most of the answer is a copy of the input. One request alone checks up to 64 copied tokens per pass on RTX 50 cards, but a shared pass carries at most 16 rows for all requests together. We think this is why.
+
+Fastest model, thinking off, temperature 1.0, top-p 0.95, top-k 20, seeds 1 to 16, `--parallel 16 --max-ctx 16384`. Each task was sent 16 times one by one, then N of those at once. The number is (all output tokens / time from the first send to the last end) at once, divided by the same for one by one. Mean of 2 runs, one uncounted request first.
+
+| Task | N = 4 | N = 16 |
+|---|---|---|
+| Story: Chinese dialogue | 2.69 | 6.56 |
+| Story: Chinese science fiction | 2.73 | 6.12 |
+| Story: English mystery | 2.48 | 4.11 |
+| Translation: Markdown | 2.18 | 3.02 |
+| Code: Python | 2.14 | 2.98 |
+| Code: CUDA | 1.96 | 2.63 |
+| Translation: English to Chinese | 2.00 | 2.54 |
+| Code: TypeScript | 1.67 | 2.53 |
+| Structured: SQL | 1.94 | 2.19 |
+| Translation: Chinese to English | 1.88 | 2.17 |
+| Structured: CSV | 1.85 | 2.03 |
+| Structured: JSONL | 1.17 | 1.11 |
+| Long JSONL (own task) | 0.95 | 0.92 |
+| Code edit (own task) | 0.54 | 0.53 |
+| JSONL edit (own task) | 0.55 | 0.50 |
+| Mixed: 4 code edits, 4 JSONL edits, 8 published prompts | | 0.99 (16 at once) |
+
+Below 1 means slower than one by one. With N = 2 the edits were 0.42 and 0.59. Each single request is always slower than when it runs alone. The quality model was not measured this way.
+
+### Are the answers the same as one at a time?
+
+Yes, under two conditions. The request has its own `seed`, and its prompt is read the same way, which `timings.snap_mode` shows (0 from the start, 1 continuing the request before it, 2 from a saved state). With a stop string the answer is the same up to the stop. We compared the token ids, the finish reason, tool calls, text, thinking and the token counts.
+
+### How much GPU memory does it need, and how long can the context be?
+
+All requests get the same context length. Without `--max-ctx` the server picks it from the free GPU memory and prints it at start. It reserves N + 1 contexts of 22,400 bytes per token and about 256 MiB per request. For example, one 65,536-token context with its request is about 1,656 MiB. If not even 16,384 tokens fit, the server stops and names the largest N that fits.
+
+Measured on the 32 GB RTX 5090, with the desktop using about 1.8 to 1.9 GB:
+
+| N | Quality model | Fastest model |
+|---|---|---|
+| 1 | 262,144 | 262,144 |
+| 2 | 196,608 | 229,376 |
+| 4 | 114,688 | 131,072 |
+| 8 | 65,536 | not measured |
+| 16 | 16,384 | not measured |
+
+With the quality model all four ran under load without running out of memory. The memory used stayed 297 to 524 MiB below the server's estimate.
+
+### What do `--keep-turn` and `--max-wait` do?
+
+When an answer ends with tool calls, the client usually sends the next turn with the tool results soon after. `--keep-turn` keeps that conversation's place for a while. The next turn then continues where the answer stopped and does not read the whole conversation again. While its place is kept, other requests cannot use it.
+
+`--max-wait` limits how long a new request waits because of kept places and next turns. After that time it takes the next kept place, and that conversation reads its prompt again. The time it spends waiting behind requests that came before it does not count.
+
+Both default to `auto`. `auto` keeps a place about as long as reading the conversation again would take, from 1 to 30 seconds (1 second for a short conversation, about 4 seconds for 16,000 tokens). The wait limit is that time plus 0.25 seconds. So a kept place never holds others back much longer than the time it saves. Use `--keep-turn off` to keep nothing, or give seconds.
+
+Comparison on one load: fastest model, `--parallel 4 --max-ctx 65536`, thinking off. 6 agents read a file in 8 parts through a tool (the tool took 0.05, 0.5, 3 or 15 seconds, 2 times each), so their conversations grew to 8,719 to 40,957 tokens. At the same time 3 chat users sent short streamed requests every 1 to 6 seconds. Mean of 3 runs.
+
+| Setting | All agents done | Conversations read again | Chat, first token, p95 | Total tok/s |
+|---|---|---|---|---|
+| keep nothing (`off`) | 178.1 s | 41 times, 154.0 s | 21.8 s | 22.6 |
+| keep 2 seconds, no wait limit | 123.3 s | 24 times, 84.6 s | 25.8 s | 31.7 |
+| `auto` (default) | 94.2 s | 19 times, 45.9 s | 17.2 s | 42.3 |
+| `auto`, after the last fix of the wait limit | 100.6 s | 23 times, 56.5 s | 15.6 s | 40.6 |
+
+The last row was measured later the same day, after the wait limit was fixed to count all waiting caused by next turns. The agents got 5% slower and the chats faster. The chat p95 stays high in all settings because reading a long prompt pauses everything. In a second load (`--parallel 2 --max-ctx 32768`, agents that call a tool 30 times in a row and send each next turn 20 ms after the answer, plus new requests) the wait limit cut the longest wait of a new request from 7,977 ms to 1,529 ms (fastest model) and from 7,448 ms to 1,322 ms (quality model).
+
+### What happens when every place is busy?
+
+New requests wait in a queue. When more than `--max-queue` requests wait (default 64), the server answers 503 with `Retry-After: 2`. `/health` shows `parallel`, `slots_busy`, `slots_idle` and `queued`. `timings` shows `queue_ms` (the time the request waited).
+
+### Can I send images?
+
+Yes. A request with images runs alone: the other requests pause until it is done. In our tests, all requests with images gave the same answers as one at a time.
+
+### What happens when a client disconnects?
+
+The request stops and frees its place. This works while it waits, while it streams, and while it generates without a stream. A request with a second part (after a thinking budget or a loop cut) keeps its place for that part for 2 seconds after the client got the first part, and up to 30 seconds for a slow client.
+
+### Do seeds work?
+
+Yes. A request with a `seed` gets the same tokens as alone. A request without a `seed` takes the next seed in the order requests arrive, as in one-at-a-time serving. Its result therefore depends on what else was sent.
+
+### What was tested, and what was not?
+
+Tested on the RTX 5090 only, with both models:
+
+* One at a time (`--parallel 1`), with a development build that has the same GPU code as 0.2.0: the same tokens as 0.1.5 on 35 prompts per model, and within 1% of its speed on 15 tasks (thinking off).
+* Several at once: about 35,000 requests compared with the same conversation sent alone. None differed. This includes requests that join and leave mid-run, contexts up to 229,376 tokens, tool calls, images, cancellation and engine failures.
+* A 60-minute run with 10,178 mixed requests (text, tools and images, fastest model, N = 8): no difference, nothing stuck, and memory did not keep growing.
+
+Not tested:
+
+* Other GPUs, including 24 GB and 16 GB cards. On them the start-up check decides.
+* Speed with the quality model, and with thinking on.
+* Linux with `--parallel`.
+* Two GPUs.
+
+Known limits:
+
+* The 16-row pass is shared, so each request is slower than alone.
+* Reading a prompt pauses all others. Reading 66,416 tokens takes about 20 seconds.
+* The next turn after tool calls must come within the kept time (1 second for a short conversation). Later, it reads the conversation again. The answer is the same.
+* The wait limit counts only waiting caused by kept places and next turns. A next turn that runs alone (because no place is free) is not stopped for a new request, so a new request can wait longer than the limit.
+* Over long runs the GPU memory of the whole card rose by up to 71 MiB. In the last 30-minute run the server's own GPU memory did not change.
+
 ## Can I use other models, for example Qwen4?
 
 Not in this release: it runs Qwen3.8-27B only. The program that made the two model files ([tools/convert/](../tools/convert/), added on
@@ -181,7 +300,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-From the release after v0.1.6, the quickstart (`START.cmd`) can update itself.
+Since 0.2.0, the quickstart (`START.cmd`) can update itself. From v0.1.6 or older, download the 0.2.0 quickstart ZIP by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, when the menu opens, the quickstart first prints that it asks github.com, then sends one HTTPS request:
   `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest`, with the User-Agent `yasakani-quickstart` and nothing else about

@@ -310,6 +310,16 @@ yasakani serve --model-dir D:\models\qwen38-quality --dll D:\yasakani\yskn.dll -
 The default is 1: one request at a time, as before. This is experimental: it has been tested on the RTX 5090 only, and far less than one
 request at a time.
 
+| Option | Default | What it sets |
+|---|---|---|
+| `--parallel N` | 1 (or `YASAKANI_PARALLEL`) | requests generated at once, 1 to 64 |
+| `--max-queue Q` | 64 | requests that may wait for a free place; more are answered 503 |
+| `--keep-turn auto\|off\|SECONDS` | `auto` (or `YASAKANI_KEEP_TURN`) | how long the place of an answer with tool calls is kept for its next turn. `auto`: about as long as reading the conversation again takes, 1 to 30 seconds. Seconds: 0 to 600 |
+| `--max-wait auto\|SECONDS` | `auto` (or `YASAKANI_MAX_WAIT`) | how long a new request waits for next turns before it takes a kept place. `auto`: the reading time of the kept conversation (at most 30 seconds) and 0.25 seconds. Seconds: 0 to 600 |
+
+`--max-queue`, `--keep-turn` and `--max-wait` only matter with `--parallel` 2 or more. `yasakani selfcheck --parallel N` and
+`yasakani bench --concurrency N` are described below.
+
 * **Context.** Every request has a context of its own, and all of them have the same length. Without `--max-ctx` it is chosen from the free
   GPU memory, on every card: N + 1 contexts of 22,400 bytes per token and about 256 MiB per request must fit beside the model (the same
   rounding and the same rule for `bdraft2_k8.shead` as above). The server prints the length at start and `/health` reports it as
