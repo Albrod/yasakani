@@ -30,7 +30,7 @@ JSONL 編集は自作の課題です。60行の JSONL のうち1行だけ直し�
 
 Linux には寄稿者が検証したソースビルド手順があります。AMD と Mac は今後の対応目標です。[対象 GPU の型番と要件](docs/FAQ.ja.md#どの-gpuどの-os-で動く) · [Linux のビルド手順](BUILDING.md#linux-building-from-source)
 
-**GPU が複数のとき**：1つのプロセスが使う GPU は1枚です。`--device N` で、`yasakani info` と nvidia-smi が N 番とする GPU を選びます。0.1.5 では GPU が2枚の PC で `--device 1` が `graph instantiate failed` で止まることがありました（[#20](https://github.com/yasakani-dev/yasakani/issues/20)）。0.1.6 で直しを入れました。ただし GPU が2枚の PC ではまだ確かめていません。
+**GPU が複数のとき**：1つのプロセスが使う GPU は1枚です。`--device N` で、`yasakani info` と nvidia-smi が N 番とする GPU を選びます。0.1.5 では GPU が2枚の PC で `--device 1` が `graph instantiate failed` で止まることがありました（[#20](https://github.com/yasakani-dev/yasakani/issues/20)）。0.1.6 で直しを入れました。2026年11月18日に、[#20](https://github.com/yasakani-dev/yasakani/issues/20) の報告者が GPU 2枚（RTX A2000 と RTX 5060 Ti）の PC で直ったことを確かめました。私たち自身は GPU 2枚では試していません。
 
 ## 使いはじめ
 
@@ -122,7 +122,7 @@ Windows 11（64 ビット）、Python 3.10 以上、NVIDIA ドライバー 580 �
 yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
 ```
 
-既定は `--parallel 1` で、今までどおり1件ずつです。この版と GPU のコードが同じ開発中のビルドで確かめました（RTX 5090、両モデル、思考なし）。`--parallel 1` のトークンは各モデル35問で 0.1.5 と同じで、15課題の速さの差は 0.1.5 と比べて1%以内でした。
+既定は `--parallel 1` で、今までどおり1件ずつです。この版と GPU のコードが同じ開発中のビルドで確かめました（RTX 5090、両モデル、思考なし）。`--parallel 1` のトークンは各モデル35問で 0.1.5 と同じで、15課題の速さの差は 0.1.5 と比べて1%以内でした。0.2.0 のビルドそのものでも（2026年11月18日）、`--parallel 1` のトークンは各モデル35問で 0.1.6 と同じで、同じ15課題の速さの差は 0.1.6 と比べて −0.02%（最速モデル）・−0.07%（品質モデル）でした。
 
 `--parallel N` でも、各答えのトークンはその会話だけを同じ設定の新しいサーバーに送ったときと同じです。条件は、依頼が自分の `seed` を持つことと、入力の読み方（`timings.snap_mode`）が同じことです。
 

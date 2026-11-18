@@ -30,7 +30,7 @@ All speed numbers in this repository were measured on the RTX 5090. Other cards 
 
 Contributors have tested a Linux build from source. AMD and Mac are future targets. [GPU list and requirements](docs/FAQ.md#which-gpus-which-systems) · [Build on Linux](BUILDING.md#linux-building-from-source)
 
-**Several GPUs:** one process uses one GPU. `--device N` picks GPU N as `yasakani info` and nvidia-smi number them. With 0.1.5, `--device 1` on a PC with two GPUs could stop with `graph instantiate failed` ([#20](https://github.com/yasakani-dev/yasakani/issues/20)). 0.1.6 includes a fix. We have not yet tried it on a PC with two GPUs.
+**Several GPUs:** one process uses one GPU. `--device N` picks GPU N as `yasakani info` and nvidia-smi number them. With 0.1.5, `--device 1` on a PC with two GPUs could stop with `graph instantiate failed` ([#20](https://github.com/yasakani-dev/yasakani/issues/20)). 0.1.6 includes a fix. On November 18, 2026 the reporter of [#20](https://github.com/yasakani-dev/yasakani/issues/20) confirmed that it works on a PC with two GPUs (RTX A2000 and RTX 5060 Ti). We have not tried two GPUs ourselves.
 
 ## Quick start
 
@@ -122,7 +122,7 @@ New in 0.2.0. The server can generate several requests at the same time on one G
 yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
 ```
 
-The default is `--parallel 1`: one request at a time, as before. We checked this with a development build that has the same GPU code as this release (RTX 5090, both models, thinking off): `--parallel 1` gave the same tokens as 0.1.5 on 35 prompts per model, and its speed on 15 tasks was within 1% of 0.1.5.
+The default is `--parallel 1`: one request at a time, as before. We checked this with a development build that has the same GPU code as this release (RTX 5090, both models, thinking off): `--parallel 1` gave the same tokens as 0.1.5 on 35 prompts per model, and its speed on 15 tasks was within 1% of 0.1.5. With the 0.2.0 build itself (November 18, 2026), `--parallel 1` gave the same tokens as 0.1.6 on 35 prompts per model, and its speed on the same 15 tasks differed from 0.1.6 by -0.02% (fastest model) and -0.07% (quality model).
 
 With `--parallel N`, each answer has the same tokens as when that conversation is sent alone to a new server with the same settings. This holds when the request has its own `seed` and its prompt is read the same way (`timings.snap_mode`).
 

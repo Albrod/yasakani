@@ -223,7 +223,8 @@ Use `120` for the RTX 50 series, `89` for the RTX 40 series or `86` for the RTX 
 
 One process uses one GPU. On a PC with several GPUs, choose it with `--device N` (GPU N of `yasakani info` and nvidia-smi) or with the
 `CUDA_VISIBLE_DEVICES` environment variable. With 0.1.5, `--device` could fail while the other GPUs were visible
-([#20](https://github.com/yasakani-dev/yasakani/issues/20)); 0.1.6 has a fix for this, not yet tried on a PC with two GPUs.
+([#20](https://github.com/yasakani-dev/yasakani/issues/20)); 0.1.6 has a fix for this, confirmed by the
+reporter of #20 on a PC with two GPUs on November 18, 2026.
 
 ## Measurement builds: a plain 8-bit or an FP16 key-value cache
 

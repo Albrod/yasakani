@@ -104,7 +104,8 @@ new one.
 
 Two GPUs in one PC: one process uses one GPU, chosen with `--device N` (GPU N of `yasakani info` and nvidia-smi). With 0.1.5 this
 could fail with `graph instantiate failed` while the other GPU was visible ([#20](https://github.com/yasakani-dev/yasakani/issues/20)).
-0.1.6 has a fix for this; it has not yet been tried on a PC with two GPUs. A `CUDA_VISIBLE_DEVICES` you set yourself is kept. See
+0.1.6 has a fix for this. On November 18, 2026 the reporter of #20 confirmed that it works on a PC with two GPUs (RTX A2000 and
+RTX 5060 Ti); we have not tried two GPUs ourselves. A `CUDA_VISIBLE_DEVICES` you set yourself is kept. See
 [What you need](../README.md#what-you-need).
 
 ## How much memory and disk does it need?
@@ -267,6 +268,7 @@ Yes. A request with a `seed` gets the same tokens as alone. A request without a 
 Tested on the RTX 5090 only, with both models:
 
 * One at a time (`--parallel 1`), with a development build that has the same GPU code as 0.2.0: the same tokens as 0.1.5 on 35 prompts per model, and within 1% of its speed on 15 tasks (thinking off).
+* With the 0.2.0 build: the same tokens as 0.1.6 on 35 prompts per model, and a speed difference of -0.02% (fastest) and -0.07% (quality) on the same 15 tasks.
 * Several at once: about 35,000 requests compared with the same conversation sent alone. None differed. This includes requests that join and leave mid-run, contexts up to 229,376 tokens, tool calls, images, cancellation and engine failures.
 * A 60-minute run with 10,178 mixed requests (text, tools and images, fastest model, N = 8): no difference, nothing stuck, and memory did not keep growing.
 
