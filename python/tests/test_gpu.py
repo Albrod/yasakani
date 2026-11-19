@@ -671,7 +671,7 @@ class EditCopyTests(unittest.TestCase):
     given.  The same on every card and with every prompt reading."""
 
     def test_default(self):
-        self.assertEqual(G.EDIT_COPY_DEFAULT, "off")
+        self.assertEqual(G.EDIT_COPY_DEFAULT, "on")
         self.assertIn(G.EDIT_COPY_DEFAULT, G.EDIT_COPY_MODES)
         self.assertEqual(G.EDIT_COPY_MODES, ("on", "off"))
 

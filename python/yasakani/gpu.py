@@ -54,7 +54,7 @@ NEW_PREFILL_RESERVE_MIB = 1800        # what the planners leave free for it: are
 # neither is given; changing it is all it takes to change the default.
 EDIT_COPY_MODES = ("on", "off")
 EDIT_COPY_ENV = "YASAKANI_EDIT_COPY"
-EDIT_COPY_DEFAULT = "off"
+EDIT_COPY_DEFAULT = "on"
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the released models fit on (fastest model only)
 QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
 HEAD_SLOWER = "about 3%"              # each pass without the output head, measured on the RTX 5090
