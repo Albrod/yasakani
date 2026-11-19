@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
 #pragma once
-#include <cstdio>
+#include "prefill_mode.hpp"
 
 
 
@@ -243,12 +243,7 @@ void launch_tb_fast(const TbFastArgs& A, cudaStream_t st) {
   if (A.nrow <= 0) return;
   if (A.has_cdq && (A.stage & 1)) {
     if ((A.has_cdq & 2) && !A.vit2_off && tbf_vit2_env()) {                  
-      if ((A.has_cdq & TBF_ALL_FIVE) && A.nm == 9 && A.nrow == 1024) {
-        static thread_local bool reported = false;
-        if (!reported) {
-          std::fprintf(stderr, "[prefill kv shared row] 1024 rows, nine multipliers\n");
-          reported = true;
-        }
+      if ((A.has_cdq & TBF_ALL_FIVE) && A.nm == 9 && A.nrow == 1024 && q35_prefill_v2()) {
         tbf5_shared_row_kernel<<<2 * A.nrow, 288, 0, st>>>(A);
       } else {
         tbf2_vit_kernel<<<(A.nrow * A.nm * 2 + 3) / 4, 128, 0, st>>>(A);

@@ -16,7 +16,9 @@ correct and faster.  The check lowers the chance of a slower or different result
 
 The check (once per GPU, driver, engine library, package and model; kept in ``wide_check.json``, see :func:`cache_dir`):
   1. Correctness: the engine reads a text of about 2,400 tokens in passes of 17, 31, 32, 33, 47, 48, 63 and 64 rows and again in
-     passes of 16; the most likely ids and the NLL must be the same bit for bit.  The engine computes both with the same integer
+     passes of 16, then a text of about 4,200 tokens whose last two passes of 64 rows cross and follow position 4,096 (from there the
+     attention is split into 42 parts instead of 31, and passes of 64 rows use kernels of their own); the most likely ids and the NLL
+     must be the same bit for bit.  The engine computes both with the same integer
      sums, so any difference is an error on this GPU: then no wide pass is used, passes of 17..64 rows no longer use the exact-sum
      GEMV (set_opt 31 = 0, on RTX 50 too), and ``yasakani selfcheck`` fails.
   2. Time: at 4,096 tokens of context it runs copy cycles as the generation does (the pass, the commit of all its rows, the drafter
@@ -58,8 +60,8 @@ MODE_ENV = "YASAKANI_WIDE"
 CACHE_ENV = "YASAKANI_CACHE_DIR"
 CACHE_FILE = "wide_check.json"
 CACHE_FORMAT = "yasakani-wide-check-1"
-CHECK_VERSION = 2                 # of the measurement and the rule below (part of the key of a kept result; 2: the text read in
-                                  # pieces, display_attached in the key)
+CHECK_VERSION = 3                 # of the measurement and the rule below (part of the key of a kept result; 2: the text read in
+                                  # pieces, display_attached in the key; 3: passes of 64 rows after position 4,096 compared too)
 CACHE_KEEP = 16                   # results kept in the file (newest first)
 CACHE_DAYS = 30                   # a kept result older than this is measured again
 WIDTHS = (32, 48, 64)
@@ -68,6 +70,9 @@ MARGIN = 0.8                      # W rows may take at most MARGIN x W / 16 time
 CONTEXT = 4096                    # tokens of context for the time check
 GATE_START = 2048                 # tokens read before the correctness check
 GATE_ROWS = (17, 31, 32, 33, 47, 48, 63, 64)
+LONG_START = CONTEXT - 32         # the correctness check again from here: the first pass of 64 rows crosses position 4,096, the
+LONG_ROWS = (64, 64)              # second lies after it
+CHECK_IDS = max(CONTEXT + 64, LONG_START + sum(LONG_ROWS) + 1)    # ids of the text both checks read (4,193)
 ROUNDS = 3
 SLICE_S = 0.6                     # seconds of cycles of one width in one round
 WARM_S = 0.5
@@ -252,7 +257,7 @@ def busy_reason(uuid: str, run: Callable = subprocess.run, environ=None, sleep: 
 
 
 # ---- the text the checks read -------------------------------------------------------------------------------------------------
-def check_ids(fmt, need: int = CONTEXT + 64) -> List[int]:
+def check_ids(fmt, need: int = CHECK_IDS) -> List[int]:
     """Token ids of a real text: the prompt of the code edit task (thinking off) and its expected answer, repeated to ``need``."""
     from . import editbench
     task = next((t for t in editbench.load_tasks() if t.name == TEXT_TASK), None)
@@ -382,35 +387,40 @@ class Gate:
         return not self.error and self.positions > 0 and not self.argmax_diff and not self.nll_diff
 
 
-def correctness(engine, ids: Sequence[int], rows: Sequence[int] = GATE_ROWS, start: int = GATE_START) -> Gate:
+def correctness(engine, ids: Sequence[int], rows: Sequence[int] = GATE_ROWS, start: int = GATE_START,
+                more: Sequence[Tuple[int, Sequence[int]]] = ((LONG_START, LONG_ROWS),)) -> Gate:
     """Read ``ids[:start]``, then for each M of ``rows``: one pass of M rows (not accepted) and the same M positions in passes of at
-    most 16 rows (accepted).  The most likely ids and the NLL (as 32-bit floats) must be equal.  The state is reset afterwards."""
+    most 16 rows (accepted).  The most likely ids and the NLL (as 32-bit floats) must be equal.  The same again from a fresh read for
+    each (start, rows) of ``more``.  The state is reset afterwards."""
     import numpy as np
     from .engine import forced_passes
     g = Gate()
-    need = start + sum(rows) + 1
+    parts = [(start, tuple(rows))] + [(int(s), tuple(r)) for s, r in more]
+    need = max(s + sum(r) + 1 for s, r in parts)
     if len(ids) < need:
         raise ValueError("the correctness check needs %d ids" % need)
     try:
-        engine.read_prompt(ids[:start])
-        p = start
-        for m in rows:
-            a_am, a_nll = engine.verify_rows(ids[p:p + m], ids[p + 1:p + m + 1], commit=False)
-            b_am, b_nll = [], []
-            q = p
-            for k in forced_passes(m, 16):
-                am, nll = engine.verify_rows(ids[q:q + k], ids[q + 1:q + k + 1], commit=True)
-                b_am.append(am)
-                b_nll.append(nll)
-                q += k
-            b_am, b_nll = np.concatenate(b_am), np.concatenate(b_nll)
-            da = int((a_am != b_am).sum())
-            dn = int((a_nll.view(np.uint32) != b_nll.view(np.uint32)).sum())
-            g.per_rows[m] = (da, dn)
-            g.argmax_diff += da
-            g.nll_diff += dn
-            g.positions += m
-            p += m
+        for start, rows in parts:
+            engine.read_prompt(ids[:start])
+            p = start
+            for m in rows:
+                a_am, a_nll = engine.verify_rows(ids[p:p + m], ids[p + 1:p + m + 1], commit=False)
+                b_am, b_nll = [], []
+                q = p
+                for k in forced_passes(m, 16):
+                    am, nll = engine.verify_rows(ids[q:q + k], ids[q + 1:q + k + 1], commit=True)
+                    b_am.append(am)
+                    b_nll.append(nll)
+                    q += k
+                b_am, b_nll = np.concatenate(b_am), np.concatenate(b_nll)
+                da = int((a_am != b_am).sum())
+                dn = int((a_nll.view(np.uint32) != b_nll.view(np.uint32)).sum())
+                a0, n0 = g.per_rows.get(m, (0, 0))
+                g.per_rows[m] = (a0 + da, n0 + dn)
+                g.argmax_diff += da
+                g.nll_diff += dn
+                g.positions += m
+                p += m
     except YasakaniError as ex:
         g.error = str(ex)
     finally:

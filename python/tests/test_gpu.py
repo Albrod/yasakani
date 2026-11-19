@@ -437,6 +437,38 @@ class ContextRuleTests(unittest.TestCase):
         self.assertEqual((prof.env["YSKN_Q35_PMAX"], prof.env["YSKN_Q35_LAYER_ROWS"]), ("1024", "4096"))
 
 
+class PrefillModeTests(unittest.TestCase):
+    """--prefill / YASAKANI_PREFILL: auto (default) or old (the engine reads YSKN_Q35_PF_V2=0 and the sizes of 0.1.7)."""
+
+    def test_mode_of(self):
+        self.assertEqual(G.prefill_mode_of(None, {}), "auto")
+        self.assertEqual(G.prefill_mode_of("", {}), "auto")
+        self.assertEqual(G.prefill_mode_of(None, {"YASAKANI_PREFILL": " OLD "}), "old")
+        self.assertEqual(G.prefill_mode_of("auto", {"YASAKANI_PREFILL": "old"}), "auto")          # the option wins
+        for bad in ("new", "0"):
+            with self.assertRaises(YasakaniError) as cm:
+                G.prefill_mode_of(bad, {})
+            self.assertIn("--prefill", str(cm.exception))
+        with self.assertRaises(YasakaniError):
+            G.prefill_mode_of(None, {"YASAKANI_PREFILL": "off"})
+
+    def test_plan(self):
+        self.assertEqual(G.OLD_PREFILL_ENV, {"YSKN_Q35_PF_V2": "0", "YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"})
+        r5090 = det_of(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 1107))
+        r3090 = det_of(smi_line(0, "NVIDIA GeForce RTX 3090", "8.6", 24576, 1000))
+        for det in (r5090, r3090):
+            auto = G.plan_context(FakePack(FASTEST), det)
+            old = G.use_prefill(G.plan_context(FakePack(FASTEST), det), "old")
+            self.assertNotIn("YSKN_Q35_PF_V2", G.use_prefill(G.plan_context(FakePack(FASTEST), det), "auto").env)
+            self.assertEqual(old.env, dict(auto.env, **G.OLD_PREFILL_ENV))
+            self.assertEqual((old.max_ctx, old.free_mib), (auto.max_ctx, auto.free_mib))      # the context is chosen as for auto
+        self.assertEqual(G.use_prefill(G.plan_context(FakePack(FASTEST), r5090), "auto").env, {})
+        from yasakani.runtime import RuntimeProfile
+        with tempfile.TemporaryDirectory() as t:
+            prof = RuntimeProfile.default(support.make_pack(Path(t)), G.use_prefill(G.ContextPlan(), "old").env)
+        self.assertEqual([prof.env[k] for k in ("YSKN_Q35_PF_V2", "YSKN_Q35_PMAX", "YSKN_Q35_LAYER_ROWS")], ["0", "1024", "4096"])
+
+
 class QuickstartTests(unittest.TestCase):
     """The quickstart's own copy of the decision and the rule (it runs before the package is installed)."""
 
@@ -859,6 +891,34 @@ class OpenStackTests(unittest.TestCase):
             self.assertTrue(args.gpu_detected.untested)
         finally:
             eng.close()
+
+    def test_prefill_old_reaches_the_engine(self):
+        """--prefill old and YASAKANI_PREFILL=old set YSKN_Q35_PF_V2=0 for the engine; auto leaves the default."""
+        from yasakani import cli
+        folder = support.make_real_folder("prefill")
+        self.addCleanup(shutil.rmtree, folder.parent, True)
+        gpus = G.parse(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 1107))
+        saved = {k: v for k, v in os.environ.items() if k.startswith("YSKN_") or k == "YASAKANI_PREFILL"}
+
+        def restore():
+            for k in [k for k in os.environ if k.startswith("YSKN_") or k == "YASAKANI_PREFILL"]:
+                del os.environ[k]
+            os.environ.update(saved)
+        self.addCleanup(restore)
+        base = ["chat", "--model-dir", str(folder), "--dll", str(support.stub_path())]
+        for extra, env, want in (([], None, None), (["--prefill", "old"], None, "0"), ([], "old", "0"), (["--prefill", "auto"], "old", None)):
+            os.environ.pop("YASAKANI_PREFILL", None)
+            if env:
+                os.environ["YASAKANI_PREFILL"] = env
+            args = cli.build_parser().parse_args(base + extra)
+            with mock.patch.object(G, "query", return_value=gpus):
+                pack, eng, fmt, runner = cli._open_stack(args, warm=False)
+            try:
+                self.assertEqual(eng.profile.env.get("YSKN_Q35_PF_V2"), want, (extra, env))
+                self.assertEqual(os.environ.get("YSKN_Q35_PF_V2"), want, (extra, env))
+                self.assertEqual(eng.profile.env["YSKN_Q35_PMAX"], "1024" if want else "2048")
+            finally:
+                eng.close()
 
     def test_given_context_head_reaches_the_engine(self):
         """--max-ctx: the head is left out where it does not fit beside the given context, and loaded where it does."""

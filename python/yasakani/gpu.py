@@ -36,6 +36,11 @@ FULL_CONTEXT_MIN_TOTAL_MIB = 30000    # cards with this much memory keep the mod
 # Cards with less than FULL_CONTEXT_MIN_TOTAL_MIB keep the prompt-reading sizes of 0.1.7: OVERHEAD_MIB was measured with them.  The
 # larger defaults of runtime.py (2,048 rows per pass, 8,192 rows of layer work area) take about 0.6 to 0.7 GB more at load.
 SMALL_CARD_ENV = {"YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"}
+# --prefill (or YASAKANI_PREFILL): auto = the faster prompt reading (the default); old = prompt reading and passes of 64 rows as in
+# 0.1.7.  The engine reads YSKN_Q35_PF_V2=0 and then also keeps the sizes of 0.1.7; they are given here as well.
+PREFILL_MODES = ("auto", "old")
+PREFILL_MODE_ENV = "YASAKANI_PREFILL"
+OLD_PREFILL_ENV = dict(SMALL_CARD_ENV, YSKN_Q35_PF_V2="0")
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the released models fit on (fastest model only)
 QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
 HEAD_SLOWER = "about 3%"              # each pass without the output head, measured on the RTX 5090
@@ -321,6 +326,23 @@ def _small_card_env(plan: "ContextPlan", g) -> None:
     the context is chosen with stays true."""
     if g is not None and g.total_mib is not None and g.total_mib < FULL_CONTEXT_MIN_TOTAL_MIB:
         plan.env.update(SMALL_CARD_ENV)
+
+
+def prefill_mode_of(value: Optional[str] = None, environ: Optional[Mapping[str, str]] = None) -> str:
+    """auto | old: ``value`` (the command line), else ``YASAKANI_PREFILL``, else auto."""
+    env = os.environ if environ is None else environ
+    v = value if value not in (None, "") else env.get(PREFILL_MODE_ENV, "")
+    v = (v or "auto").strip().lower()
+    if v not in PREFILL_MODES:
+        raise YasakaniError("%s / --prefill must be one of %s, not %r" % (PREFILL_MODE_ENV, ", ".join(PREFILL_MODES), v))
+    return v
+
+
+def use_prefill(plan: "ContextPlan", mode: str) -> "ContextPlan":
+    """--prefill old: the engine settings of OLD_PREFILL_ENV are added to ``plan.env``.  auto changes nothing."""
+    if mode == "old":
+        plan.env.update(OLD_PREFILL_ENV)
+    return plan
 
 
 def overhead_mib(weights_bytes: int) -> int:

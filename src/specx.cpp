@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include "specx.hpp"
 #include "edit_copy.hpp"
+#include "prefill_mode.hpp"
 #include <chrono>
 #include <algorithm>
 #include <cstdio>
@@ -187,7 +188,7 @@ template <class Eng> int SpecxT<Eng>::prefill(const int32_t* ids, int n) {
   }
   std::vector<uint8_t> keep;
   if constexpr (std::is_same_v<Eng, Engine35>) {
-    if (c_.prefill_head && n - start >= 2048 && !std::getenv("YSKN_Q35_PREFILL_DENSE_HEAD")) {
+    if (c_.prefill_head && n - start >= 2048 && q35_prefill_v2() && !std::getenv("YSKN_Q35_PREFILL_DENSE_HEAD")) {
       keep.resize(n);
       std::vector<uint8_t> seen(V_);
       std::unordered_set<uint64_t> bigrams, trigrams;
@@ -209,9 +210,11 @@ template <class Eng> int SpecxT<Eng>::prefill(const int32_t* ids, int n) {
   std::vector<int32_t> am(n), ti((size_t)n * 8); std::vector<float> tv((size_t)n * 8);
   auto run = [&](int a, int b) -> int {
     if (!c_.prefill_head) return e_.prefill(ids + a, b - a);
-    if constexpr (std::is_same_v<Eng, Engine35>)
-      return e_.prefill_prompt_rows(ids + a, b - a, chunk, am.data() + a, ti.data() + (size_t)a * 8, tv.data() + (size_t)a * 8,
-                                    keep.empty() ? nullptr : keep.data() + a);
+    if constexpr (std::is_same_v<Eng, Engine35>) {
+      if (q35_prefill_v2())
+        return e_.prefill_prompt_rows(ids + a, b - a, chunk, am.data() + a, ti.data() + (size_t)a * 8, tv.data() + (size_t)a * 8,
+                                      keep.empty() ? nullptr : keep.data() + a);
+    }
     if (chunk <= 0) return e_.prefill_rows(ids + a, b - a, am.data() + a, ti.data() + (size_t)a * 8, tv.data() + (size_t)a * 8);
     int r = 0;
     for (int x = a; x < b;) {                                    // one pass per piece of the absolute grid

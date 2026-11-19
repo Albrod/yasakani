@@ -123,6 +123,58 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(wc.widths_text(7), "32, 48, 64 rows")
 
 
+class FakeGateEngine:
+    """Records the prompt reads and the passes of the correctness check; ``wrong`` = rows of the passes that differ (NLL)."""
+
+    def __init__(self, wrong=()):
+        self.pos, self.reads, self.passes, self.wrong = 0, [], [], set(wrong)
+
+    def read_prompt(self, ids):
+        self.reads.append(len(ids))
+        self.pos = len(ids)
+
+    def verify_rows(self, ids, targets, commit):
+        m = len(ids)
+        self.passes.append((self.pos, m, commit))
+        nll = np.zeros(m, np.float32) + (np.float32(0.5) if (m in self.wrong and not commit) else np.float32(0.0))
+        if commit:
+            self.pos += m
+        return np.asarray(ids, np.int32), nll
+
+    def reset(self):
+        self.pos = 0
+
+
+class CorrectnessTests(unittest.TestCase):
+    """Passes of 64 rows are compared before and after position 4,096 (from there the engine splits the attention into 42 parts and
+    passes of 64 rows use kernels of their own)."""
+
+    def test_positions(self):
+        self.assertEqual(wc.CHECK_VERSION, 3)
+        self.assertEqual((wc.LONG_START, wc.LONG_ROWS, wc.CHECK_IDS), (4064, (64, 64), 4193))
+        self.assertLessEqual(wc.CHECK_IDS, wc.CONTEXT + 128)                 # the context the check asks for is enough
+        eng = FakeGateEngine()
+        g = wc.correctness(eng, list(range(wc.CHECK_IDS)))
+        self.assertTrue(g.ok)
+        self.assertEqual(eng.reads, [wc.GATE_START, wc.LONG_START])
+        self.assertEqual(g.positions, sum(wc.GATE_ROWS) + sum(wc.LONG_ROWS))
+        wide = [(p, m) for p, m, commit in eng.passes if not commit]
+        self.assertEqual(wide[-2:], [(4064, 64), (4128, 64)])
+        self.assertTrue(wide[-2][0] + 1 < 4096 <= wide[-2][0] + 64)          # the first pass crosses position 4,096 ...
+        self.assertGreaterEqual(wide[-1][0] + 1, 4096)                        # ... the second lies after it
+        self.assertTrue(all(m <= 16 for p, m, commit in eng.passes if commit))
+        with self.assertRaises(ValueError):
+            wc.correctness(FakeGateEngine(), list(range(wc.CHECK_IDS - 1)))
+
+    def test_a_difference_after_4096_fails(self):
+        eng = FakeGateEngine(wrong={64})
+        g = wc.correctness(eng, list(range(wc.CHECK_IDS)), more=((wc.LONG_START, wc.LONG_ROWS),))
+        self.assertFalse(g.ok)
+        self.assertEqual(g.per_rows[64], (0, 64 * 3))                          # one pass of 64 before 4,096, two after
+        g = wc.correctness(FakeGateEngine(wrong={64}), list(range(wc.CHECK_IDS)), rows=(17,), more=((wc.LONG_START, (64,)),))
+        self.assertEqual((g.nll_diff, g.positions), (64, 81))
+
+
 class SettingTests(unittest.TestCase):
     def test_mode(self):
         self.assertEqual(wc.mode_of(None, {}), "auto")
@@ -379,7 +431,7 @@ class StubTests(unittest.TestCase):
         return Engine(make_pack(self.tmp, "m%d" % len(list(self.tmp.iterdir()))), max_ctx=8192, lib=self.stub.lib, wide=wide)
 
     def setup(self, eng, run=None, busy=None, **kw):
-        ids = list(range(1000, 1000 + wc.CONTEXT + 64))
+        ids = list(range(1000, 1000 + wc.CHECK_IDS))
         return wc.setup(eng, ids, cache=self.cache, run=run or FakeRun(), environ={"YASAKANI_NVIDIA_SMI": "x"},
                         busy=busy or (lambda u: None), **kw)
 
@@ -405,7 +457,7 @@ class StubTests(unittest.TestCase):
             r = self.setup(eng)
             self.assertEqual((r.status, r.mask), ("measured", 7))
             self.assertTrue(r.gate.ok)
-            self.assertEqual(r.gate.positions, sum(wc.GATE_ROWS))
+            self.assertEqual(r.gate.positions, sum(wc.GATE_ROWS) + sum(wc.LONG_ROWS))
             self.assertEqual([self.stub.opt(eng, k) for k in (39, 40, 41, 42)], [11000, 15290, 21340, 24970])
             self.assertEqual(eng.wide_state().mask, 7)
         with self.open(86, "on") as eng:                        # the same GPU, driver, library and model: the kept result
@@ -425,7 +477,7 @@ class StubTests(unittest.TestCase):
         with self.open(86, "on", STUB_TF_WIDE_NLL_SHIFT=0.001) as eng:
             r = self.setup(eng)
             self.assertEqual((r.status, r.mask), ("mismatch", 0))
-            self.assertEqual(r.gate.nll_diff, sum(wc.GATE_ROWS))
+            self.assertEqual(r.gate.nll_diff, sum(wc.GATE_ROWS) + sum(wc.LONG_ROWS))
             self.assertEqual(eng.wide_state().mask, 0)
             self.assertEqual(self.cache.load()[0]["result"]["status"], "mismatch")
 

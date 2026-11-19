@@ -8,6 +8,7 @@
 #include "q35.hpp"
 #include "kz_common.cuh"
 #include "pm_math.cuh"
+#include "prefill_mode.hpp"
 #if YSKN_KVX_MODE == 3
 #include "kvq_fast.cuh"   
 #endif
@@ -1467,12 +1468,7 @@ void launch_q35_head_first_combine(const Q35CombineArgs& A, cudaStream_t st) {
 }
 void launch_q35_combine(const Q35CombineArgs& A, cudaStream_t st) {
   const dim3 blocks(Q35_NH * Q35_HD / 512, A.M);
-  if (A.M == 64 && !A.wk && A.splits == 42 && (!A.splits_short || A.splits_short == 31)) {
-    static thread_local bool reported = false;
-    if (!reported) {
-      fprintf(stderr, "[prefill combine] rows=64 splits=42 short=%d\n", A.splits_short);
-      reported = true;
-    }
+  if (A.M == 64 && !A.wk && A.splits == 42 && (!A.splits_short || A.splits_short == 31) && q35_prefill_v2()) {
     launch_k(q35_combine_kernel<true>, blocks, dim3(512), 0, st, A);
   } else {
     launch_k(q35_combine_kernel<false>, blocks, dim3(512), 0, st, A);

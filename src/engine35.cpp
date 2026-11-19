@@ -28,6 +28,7 @@
 #include "kvq_fast.hpp"
 #include "kvq_atxpk.hpp"
 #endif
+#include "prefill_mode.hpp"
 #include "q35_atxpk.hpp"   // all modes: attn_block names Q35PkArgs and launch_q35_atx_pk
 #if YSKN_KVX_MODE == 3
 
@@ -228,8 +229,10 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   Pmax_ = pfa_ ? 512 : Mmax_;
   { const char* e = std::getenv("YSKN_Q35_PMAX"); if (e && pfa_) { const int n=std::atoi(e);
       if (n >= 512 && n <= 2048 && n % 64 == 0) Pmax_=n; } }
+  if (!q35_prefill_v2()) Pmax_ = std::min(Pmax_, 1024);
   PM_ = Pmax_;
   {const char* e=std::getenv("YSKN_Q35_LAYER_ROWS");if(e)layer_rows_=std::max(0,std::min(16384,std::atoi(e)));
+   if (!q35_prefill_v2()) layer_rows_ = std::min(layer_rows_, 4096);
    const char* o=std::getenv("YSKN_Q35_LAYER_OVERLAP");if(o)ovl_=std::atoi(o)!=0;}                              
   { const char* e = std::getenv("YSKN_Q35_KV8"); if (e && e[0]) kv8_ = std::atoi(e); }
   { const char* e = std::getenv("YSKN_Q35_KV_FP16"); if (e && e[0]) kv_fp16_ = std::atoi(e) != 0; }
@@ -252,7 +255,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
     sh_tail_ = std::max(0, ienv("YSKN_SNAP_TAIL", 4096));
     sh_sparse_ = ienv("YSKN_SNAP_SPARSE", 65536); if (sh_sparse_ > 0 && sh_sparse_ % sh_step_) sh_sparse_ = ((sh_sparse_ + sh_step_ - 1) / sh_step_) * sh_step_;
     sh_min_ = std::max(0, ienv("YSKN_SNAP_MIN", 8192));
-    sh_fill_gaps_ = ienv("YSKN_SNAP_FILL_GAPS", 1) != 0;
+    sh_fill_gaps_ = q35_prefill_v2() && ienv("YSKN_SNAP_FILL_GAPS", 1) != 0;
     int dev = 0; cudaGetDevice(&dev);
     { cudaDeviceProp dp{}; if (cudaGetDeviceProperties(&dp, dev) == cudaSuccess) {
         cc_ = dp.major * 10 + dp.minor; pci_[0] = dp.pciDomainID; pci_[1] = dp.pciBusID; pci_[2] = dp.pciDeviceID;
@@ -386,8 +389,8 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
       auto n = [](const DevTensor& t) { return (size_t)t.dev.N * t.dev.Kc; };
       for (const Q35Layer& Y : L_) g6_.weight_bytes = std::max({g6_.weight_bytes,
         n(Y.q), n(Y.k), n(Y.v), n(Y.qkv), n(Y.z), n(Y.o), n(Y.out), n(Y.gate), n(Y.up), n(Y.down)});
-      if (const char* tile = std::getenv("YSKN_Q35_G6_TILE")) g6_.tile = std::atoi(tile);
-      if (const char* stripe = std::getenv("YSKN_Q35_PF_MLP_STRIPE")) {
+      if (const char* tile = std::getenv("YSKN_Q35_G6_TILE"); tile && q35_prefill_v2()) g6_.tile = std::atoi(tile);
+      if (const char* stripe = std::getenv("YSKN_Q35_PF_MLP_STRIPE"); stripe && q35_prefill_v2()) {
         const int rows = std::atoi(stripe);
         if (rows == 256 || rows == 512 || rows == 1024) mlp_stripe_rows_ = rows;
       }
@@ -1105,6 +1108,10 @@ void Engine35::head_wide(int M, bool topk, bool nll, int first, bool prompt) {
 }
 void Engine35::head_all_rows(int M, bool topk, bool nll) {
   const bool wide = xw_head_ && xsmc_ && !in2_ && !lo_now_ && xw_rows_ > HM_;
+  if (!q35_prefill_v2() && !(wide && M <= xw_rows_)) {                 // as 0.1.7: more than xw_rows_ rows in 16-row launches
+    for (int s = 0; s < M; s += HM_) head_slice(s, std::min(HM_, M - s), false, topk, nll);
+    return;
+  }
   for (int first = 0; first < M;) {
     const int rows = std::min(wide ? xw_rows_ : HM_, M - first);
     if (rows > HM_ && (size_t)head_.dev.n_workers * HM_ * sizeof(float) >= (size_t)rows * sizeof(long long)) {

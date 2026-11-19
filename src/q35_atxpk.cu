@@ -7,6 +7,7 @@
 #include <string>
 #include "q35.hpp"
 #include "q35_atxpk.hpp"
+#include "prefill_mode.hpp"
 #include <cmath>
 #include <cstdlib>
 namespace yskn {
@@ -738,8 +739,6 @@ static bool pk_dispatch(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs
       const dim3 grid(4, A.splits, Q35_KVH), block(384);
       if (P.vp) launch_k(q35_atxpk4_kernel<5,true,6,2,false,false,false,true>, grid, block, pk4_smem<5,true,false>(), st, U);
       else launch_k(q35_atxpk4_kernel<5,false,6,2,false,false,false,true>, grid, block, pk4_smem<5,false,false>(), st, U);
-      static thread_local bool reported = false;
-      if (!reported) { fprintf(stderr, "[prefill head-first partials] rows=64 splits=42\n"); reported = true; }
       return true;
     }
     if (A.M <= 2) throw std::runtime_error("launch_q35_atx_pk: v4 needs M > 2 (set YSKN_ATX_PK3_MMAX >= 2)");
@@ -755,7 +754,7 @@ void launch_q35_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs&
   pk_dispatch(A, wk, P, st, false);
 }
 bool launch_q35_prefill_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs& P, cudaStream_t st) {
-  return pk_dispatch(A, wk, P, st, true);
+  return pk_dispatch(A, wk, P, st, q35_prefill_v2());
 }
 #endif
 }  

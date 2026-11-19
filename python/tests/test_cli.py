@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import unittest
+import unittest.mock
 import urllib.request
 from pathlib import Path
 
@@ -31,6 +32,20 @@ def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+class PrefillOptionTests(unittest.TestCase):
+    """--prefill auto | old on the commands that open the engine; not given = None (then YASAKANI_PREFILL, else auto)."""
+
+    def test_option(self):
+        from yasakani import cli
+        p = cli.build_parser()
+        for cmd in ("chat", "serve", "bench", "selfcheck"):
+            self.assertIsNone(p.parse_args([cmd]).prefill, cmd)
+            for mode in ("auto", "old"):
+                self.assertEqual(p.parse_args([cmd, "--prefill", mode]).prefill, mode, cmd)
+        with open(os.devnull, "w") as null, unittest.mock.patch("sys.stderr", null), self.assertRaises(SystemExit):
+            p.parse_args(["chat", "--prefill", "new"])
 
 
 @unittest.skipUnless(HAVE_TOK and IS_POSIX, "needs the Qwen3.8 tokenizer files (YASAKANI_TEST_MODEL_DIR) and a POSIX test machine")

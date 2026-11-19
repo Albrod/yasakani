@@ -4,6 +4,7 @@
 
 
 #include "q35_g6.hpp"
+#include "prefill_mode.hpp"
 #include "pm_math.cuh"
 #include <algorithm>
 #include <stdexcept>
@@ -317,7 +318,7 @@ template <int MB, bool BG, bool PN> static void g6_launch(Q35G6Args P, Q35G6Work
   const int waves = (tiles + resident - 1) / resident;
   // When whole tiles already occupy at least 90% of the available slots, scheduling
   // one CTA per tile avoids writing partial int64 tiles and waiting on other CTAs.
-  const bool whole = waves > 1 && (long long)tiles * 10 >= (long long)waves * resident * 9;
+  const bool whole = waves > 1 && (long long)tiles * 10 >= (long long)waves * resident * 9 && q35_prefill_v2();
   const int ctas = whole ? tiles : std::min(tiles, resident);
   mt_gemm6_kernel<MB, BG, PN><<<ctas, G6_NT, G6C<MB>::SMEM, st>>>(P, MT, G, W.partial, W.flags);
 }
@@ -372,11 +373,6 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
   }
   if (W.wide_ready && W.tile == 4 && P.M == 2048 && P.n_seg == 1 &&
       P.seg[0].t.N == 5120 && Kc == 17408) {
-    static thread_local bool reported = false;
-    if (!reported) {
-      fprintf(stderr, "[prefill wide34] rows=2048 cols=5120 K=17408\n");
-      reported = true;
-    }
     g6_launch_whole<4, 2, 4, 34>(Q, nt, groups, st);
   } else if (whole) {
     switch (W.tile) {

@@ -127,6 +127,9 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
                          "30,000 MiB, the longest that fits the free GPU memory)")
     sp.add_argument("--device", type=int, default=0, help="the GPU to use, numbered as in `yasakani info` and nvidia-smi (default 0)")
     sp.add_argument("--seed0", type=int, default=1, help="seed of the first request; every request without its own seed uses the next one")
+    sp.add_argument("--prefill", choices=gpus.PREFILL_MODES, default=None,
+                    help="prompt reading: auto (default; the faster reading) or old (prompt reading and passes of 64 tokens as in 0.1.7).  "
+                         "Default: $YASAKANI_PREFILL or auto")
     _add_wide_args(sp)
 
 
@@ -219,6 +222,7 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1):
         plan = gpus.plan_context(pack, det)
     elif plan is None:                           # a given context is used as it is; the draft model's output head only where it fits
         plan = gpus.plan_given_context(pack, det, args.max_ctx)
+    gpus.use_prefill(plan, gpus.prefill_mode_of(getattr(args, "prefill", None)))     # a wrong YASAKANI_PREFILL fails here, before the load
     args.parallel_planned, args.context_plan = n, plan
     for line in plan.notes:
         _say(line)
