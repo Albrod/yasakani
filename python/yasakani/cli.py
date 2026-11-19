@@ -134,7 +134,7 @@ def _add_wide_args(sp: argparse.ArgumentParser) -> None:
     g = sp.add_argument_group("wide copy passes")
     g.add_argument("--wide", choices=widecheck.MODES, default=None,
                    help="copy passes of up to 64 tokens: auto (default; RTX 30 / 40: only the widths a check on this GPU finds correct "
-                        "and faster; RTX 50 on, a width this GPU finds slower left out), on (the same as auto since 0.2.1), off, "
+                        "and faster; RTX 50 on, a width this GPU finds slower left out), on (the same as auto since 0.2.0), off, "
                         "force (every width without the check).  Default: $YASAKANI_WIDE or auto")
     g.add_argument("--wide-recheck", action="store_true", help="check the wide copy passes again even when a kept result fits")
 

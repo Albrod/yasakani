@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""0.1.7 (test build): wide copy passes per GPU (yasakani/widecheck.py) and ``yasakani report`` (yasakani/report.py).
+"""Wide copy passes per GPU (0.1.7 test build; on RTX 30 / 40 by default since 0.2.0; yasakani/widecheck.py) and ``yasakani report`` (yasakani/report.py).
 
 The rule, the kept results, the nvidia-smi parsing and the report text are plain Python (run everywhere).  The start-up flow runs on
 the stub library built with -DSTUB_WIDE (a C compiler is needed: skipped on Windows), whose copy cycles take the times the tests set.
@@ -132,7 +132,7 @@ class SettingTests(unittest.TestCase):
             wc.mode_of(None, {"YASAKANI_WIDE": "yes"})
 
     def test_engine_env(self):
-        self.assertEqual(wc.engine_env("auto"), {"YSKN_WIDE": "1"})     # 0.2.1: auto = on (up to 0.2.0: nothing, RTX 30 / 40 off)
+        self.assertEqual(wc.engine_env("auto"), {"YSKN_WIDE": "1"})     # 0.2.0: auto = on (up to 0.1.6: nothing, RTX 30 / 40 off)
         self.assertEqual([wc.engine_env(m)["YSKN_WIDE"] for m in ("off", "on", "force")], ["0", "1", "2"])
 
     def test_profile_keeps_test_settings(self):
@@ -249,7 +249,7 @@ class SmiTests(unittest.TestCase):
 
 
 def _rep(**over):
-    m = dict(package="yasakani 0.1.7.dev1 (test build)", os="Windows 10.0.26200", python="3.12.0",
+    m = dict(package="yasakani 0.2.0", os="Windows 10.0.26200", python="3.12.0",
              library=dict(file="yskn.dll", sha256="0123456789abcdef", build_info="cuda=13020;wide=1"),
              gpu=dict(name="NVIDIA GeForce RTX 3090", cc="8.6", total_mib=24576, sms=82, code="sm_86", driver="616.92",
                       driver_model="WDDM", power_limit_w="350.00", max_sm_mhz="2100", max_mem_mhz="9751", display_attached="Yes",
@@ -278,7 +278,7 @@ class ReportTextTests(unittest.TestCase):
     def test_markdown(self):
         from yasakani.report import render
         text = render(_rep())
-        for want in ("### YASAKANI report (yasakani 0.1.7.dev1 (test build))", "| GPU | NVIDIA GeForce RTX 3090, compute capability 8.6",
+        for want in ("### YASAKANI report (yasakani 0.2.0)", "| GPU | NVIDIA GeForce RTX 3090, compute capability 8.6",
                      "| 32 |", "1.60", "| no |", "**Correctness**", "same most likely ids and NLL bit for bit at 335 positions",
                      "| code edit | 100.0 | 120.0 | 120.0 |", "same output", "| yes |", "passes of 64 vs 16: same predictions",
                      "display attached Yes"):
@@ -325,7 +325,7 @@ class CliTests(unittest.TestCase):
         out = io.StringIO()
         with mock.patch("sys.stdout", out), self.assertRaises(SystemExit):
             build_parser().parse_args(["--version"])
-        self.assertEqual(out.getvalue().strip(), "yasakani 0.2.1")      # a release: no "(test build)" as in 0.1.7.dev1
+        self.assertEqual(out.getvalue().strip(), "yasakani 0.2.0")      # a release: no "(test build)" as in 0.1.7.dev1
 
     def test_report_time_in_help(self):
         import io
@@ -340,7 +340,7 @@ class CliTests(unittest.TestCase):
     def test_version_is_pep440(self):
         import re as _re
         from yasakani import __version__
-        self.assertEqual(__version__, "0.2.1")
+        self.assertEqual(__version__, "0.2.0")
         self.assertIsNotNone(_re.fullmatch(r"\d+\.\d+\.\d+(\.dev\d+)?", __version__))
 
 
@@ -384,7 +384,7 @@ class StubTests(unittest.TestCase):
                         busy=busy or (lambda u: None), **kw)
 
     def test_auto_on_rtx30_measures(self):
-        """0.2.1: the default (auto) opens on RTX 30 / 40 the widths the check finds correct and faster (up to 0.2.0 it left them off)."""
+        """0.2.0: the default (auto) opens on RTX 30 / 40 the widths the check finds correct and faster (up to 0.1.6 it left them off)."""
         with self.open(86) as eng:
             st = eng.wide_state()
             self.assertEqual((st.allowed, st.mask, st.xw_rows), (True, 0, 16))     # allowed, closed until the check opens widths
