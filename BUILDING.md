@@ -15,7 +15,14 @@ Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building 
 | Build tools | CMake (3.24 or newer is required) and Ninja |
 | Target | one DLL with machine code for compute capability 8.6 (`sm_86`, RTX 30 series), 8.9 (`sm_89`, RTX 40 series) and 12.0 (`sm_120`, RTX 50 series), plus PTX for `compute_120`. Tested on the RTX 5090 only |
 
-The `yskn.dll` on the release page is this build (SHA-256 `2d64c3b42bb9e689449cdd7ccd7cd5f206f70615bcadb6c0640a16396386f468`). It is
+The `yskn.dll` on the release page is the build of 0.2.0 (SHA-256 `3e06622ba04d0286dac064b4b31b8908029b01103692d9421023a211ba9739e1`,
+63,142,400 bytes). It is the source of 0.1.7 plus the new prompt reading and the edit copy ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md),
+5.5 and chapter 8): GPU code for long passes (among others `src/q35_g6.cu`, `src/q35_g6_whole.cuh`, `src/kvq_fast.cuh`,
+`src/kvq_vit2.cuh`, `src/q35_atxpk.cu`, `src/q35_atxpk4.cuh`, `src/q35_kernels.cu`, `src/misc_kernels.cu`) and host code
+(`src/engine35.cpp`, `src/specx.cpp`, `src/c_api.cpp`, `src/edit_copy.hpp`, `src/prefill_mode.hpp`). Like 0.1.7 it has machine code for
+the three GPU generations of the table above. It was built with the tool versions of the table, with the two commands below, by
+compiling the changed files again in the build folder of the earlier build and linking (about four minutes).
+The 0.1.7 build (SHA-256 `2d64c3b42bb9e689449cdd7ccd7cd5f206f70615bcadb6c0640a16396386f468`) was
 the source of 0.1.6 plus the experimental code for several requests at once (`serve --parallel N`): two new GPU files for passes of several
 requests (`src/q35_atxpk_ms.cu`, `src/q35_sample_ms.cu`), kernels for several rows in other GPU files, and host code in `src/engine35.cpp`
 and `src/c_api.cpp`. It was compiled with the two commands below into the build folder of the 0.1.5 build, one step at a time as the
@@ -57,7 +64,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The result is `build\yskn.dll` (about 58 MB; the CUDA runtime is linked statically, so no CUDA Toolkit is needed to run it). The recorded build of
+The result is `build\yskn.dll` (about 63 MB; the CUDA runtime is linked statically, so no CUDA Toolkit is needed to run it). The recorded build of
 the release took about four minutes and printed many compiler warnings; they are known.
 
 Pass the file to the tools with `--dll`:
@@ -68,6 +75,11 @@ yasakani info --model-dir D:\models\qwen38 --dll build\yskn.dll
 
 `yasakani info` prints the SHA-256 of the DLL. A build made with a different compiler or CUDA version will not be byte-identical to the file on the
 release page; that is expected. Check the model files with `yasakani verify`, and the whole installation with `yasakani selfcheck`.
+
+Two engine settings are new in 0.2.0. `YSKN_Q35_PF_V2` chooses the prompt reading: 1 (the engine's default) is the reading of 0.2.0, 0
+reads prompts and runs passes of 64 rows as 0.1.7 did. `YSKN_EDIT_COPY=1` turns the edit copy on; the engine's default is off. You do not
+set them yourself: the Python package sets both from `--prefill` (or `YASAKANI_PREFILL`) and `--edit-copy` (or `YASAKANI_EDIT_COPY`), also
+for a library you built and pass with `--dll` ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md), 5.5 and chapter 8).
 
 ## Linux (building from source)
 
@@ -93,7 +105,8 @@ model, and the CUDA 13.5 build with the quality model too. The CUDA 13.5 build f
 `nvidia/cuda:13.5.0-devel-ubuntu24.04` container (which has the toolkit) with only `build-essential cmake git python3-venv` added. The
 native Linux column is a contributor's working build; we have not tried native Linux ourselves. We built the 0.1.4 source with the steps
 below under WSL2 (Ubuntu 24.04, CUDA 13.1, GCC 13.3, Windows driver 616.92), and `yasakani selfcheck` passed with the fastest model on our
-RTX 5090 (November 15, 2026). Other distributions, compilers and CUDA versions have not been tried.
+RTX 5090 (November 15, 2026). The 0.2.0 source compiles and links with the same steps under WSL2 (Ubuntu 24.04, CUDA 13.1, code for RTX 30,
+40 and 50); nothing was run with that build. Other distributions, compilers and CUDA versions have not been tried.
 
 ### Before you build
 

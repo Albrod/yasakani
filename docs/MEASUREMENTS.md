@@ -13,6 +13,10 @@ records themselves are in [`bench/`](../bench/).
   `bae77ae6e73369dee5d33490b1ff2093f88ab57c02efa06912db6246efffaa09`; 0.1.5, 0.1.6 and the 0.1.7 test build have the same GPU code) and its Python package; its thinking-on rows on November 8 with the
   `yskn.dll` built on November 7 (sha256 `0f5d973b791c8d66034d87bdfc7f2c018718dc0e851b9a6ee6dc1eb275150bbb`, the engine of 0.1.0 to 0.1.2).
   The thinking-on table was not measured again with 0.1.4.
+* 0.2.0 changes how a prompt is read and adds the edit copy. On the 15 tasks of the speed tables (thinking off, one request at a time,
+  3 runs per version) it wrote the same tokens as 0.1.7. The summed speed differed by +0.37 % (quality model) and +0.45 % (fastest
+  model) with the edit copy on, the default, and by +0.15 % and -0.21 % with it off ([0.2.0](#measurements-020)). The rows of the
+  speed tables were not measured again with 0.2.0.
 * The quality table evaluates the same two models with an FP16 key-value (KV) cache. That is not the KV condition of the speed tables, which
   use KV5. YASAKANI's two rows of that table were measured with a research build of the engine, which can use an FP16 KV cache and return
   the distribution over the whole vocabulary; the weights are the same data as in the released model files. The `yskn.dll` of this
@@ -434,7 +438,9 @@ With documents of 65,536 and 8,192 tokens it is the same: the first request abou
 conversation and the tool result 0.04 to 0.15 s; a different question 20.0 s and 1.96 s with 0.1.1 to 0.1.3, 0.12 s and 0.09 s with 0.1.4.
 The answers of a continued read and of a fresh read were the same. The GPU memory after loading did not change between the versions.
 A different question reuses the document when the document comes before it, the question part is up to about 4,000 tokens and no other
-request comes in between.
+request comes in between (0.1.4 to 0.1.7). With the new prompt reading of 0.2.0 a long first read (in our measurements 32,768 tokens and
+more) also saves states in the middle of the prompt, so a prompt changed further back is read again from the last of them before the change
+([0.2.0](#measurements-020)).
 
 ## Several requests at once (experimental)
 
@@ -524,7 +530,7 @@ Fastest model: 229,376 tokens at N = 2 and 131,072 at N = 4. The length depends 
 
 ### Reading a prompt
 
-`--parallel 1`, the server reset before every request, median of 3 runs (a first run not counted). All prompts were read from the start. Seconds.
+`--parallel 1`, the server reset before every request, median of 3 runs (a first run not counted). All prompts were read from the start. Seconds. These are times of the prompt reading of 0.1.7; for 0.2.0 see [0.2.0](#measurements-020).
 
 | Tokens | Fastest model | Quality model |
 |---|---|---|
@@ -585,3 +591,176 @@ In a 30-minute run with build B the whole GPU rose by 71 MiB. The use without th
 * GPUs other than the RTX 5090, including 24 GB and 16 GB cards.
 * The speed of the quality model at once, and speed with thinking on.
 * Linux with `--parallel`.
+
+<a name="measurements-020"></a>
+## 0.2.0: faster prompt reading and the edit copy (added for 0.2.0)
+
+Measured on November 19, 2026 on the RTX 5090 (32 GB) of the other measurements, Windows 11, with the released models (quality model
+12.37 GB, fastest model 10.31 GB), one request at a time unless said. The comparison side is the released 0.1.7. How the new prompt
+reading and the edit copy work: [TECHNOLOGY.md](TECHNOLOGY.md), 5.5 and chapter 8.
+
+### Builds and conditions
+
+* Engine library: the `yskn.dll` of 0.2.0, SHA-256 starting `3e06622b` (the source of 0.1.7 plus the new prompt reading and the edit
+  copy, with code for RTX 30, 40 and 50 as in 0.1.7; [BUILDING.md](../BUILDING.md)). The comparison: the `yskn.dll` of 0.1.7 (SHA-256
+  starting `2d64c3b4`) with the 0.1.7 Python package.
+* Python package: the checks on the GPU used the 0.2.0 library with a package that differed from the 0.2.0 package only in its version
+  strings (0.1.7 instead of 0.2.0) and, for some checks, in an earlier form of the rule that leaves memory free for
+  `--prefill new` on cards under 30,000 MiB. That rule acts only with `--prefill new` on such cards. The runs in "Cards under
+  30,000 MiB" below used the released rule.
+* Default settings (`--prefill auto`, which is the new reading on the RTX 5090) unless said. Whether the edit copy was on or off is
+  named where it matters.
+* Input tok/s = prompt tokens / the time to read the prompt.
+
+### The answers stay the same
+
+* **Every position.** 46 cases (both models, prompts of 256 to 65,536 tokens), 589,088 positions: the predictions, the top 8 candidates
+  with their FP32 scores, the first token, the committed state and the 16 next positions were the same as with 0.1.7. This comparison
+  used a test build of the 0.2.0 engine: the released library does not export the entry it needs. The released library was compared
+  through the chat's own path (next point).
+* **The chat's own path, released library.** 22 cases (first reads of 256 to 65,536 tokens, the three changed prompts below, thinking on,
+  both models), 4 runs each: the token ids and the hash of the state were the same as with 0.1.7 in every run.
+* **Conversations.** 35 conversations per model, one request at a time, with the edit copy off and again with it on: the same token ids
+  as 0.1.7, before and after the check of the wide copy passes on the card. With the edit copy off they were also the same as the
+  answers of 0.1.6 recorded for the 0.1.7 release.
+* **`--prefill old`.** On the RTX 5090 it gave the token ids, the states, the number of saved states and the GPU memory of 0.1.7.
+* **The code for RTX 30 and 40 cards**, run on the RTX 5090 with test builds (not on an RTX 30 or 40 card): the check of the wide copy
+  passes on the card ran and opened widths (463 positions); passes of 64 rows were bit for bit equal to passes of 16 rows at 2,206
+  positions; every position of an 8,192-token prompt was the same with the new reading, with `--prefill old` and with a test build of
+  0.1.7.
+* **The check on the card** is version 3 in 0.2.0. It also compares passes of 64 rows after position 4,096 (463 positions in all). A
+  result kept by 0.1.7 is measured again once. First start on the RTX 5090, one start per version in the same run: "model ready" after
+  28 s (quality model) and 27 s (fastest model); the released 0.1.7: 27 s and 26 s.
+
+### Reading a prompt
+
+Default settings, context 69,632, one request at a time, thinking off except in the rows marked "thinking on". Each run is the first
+read of the prompt, with nothing reused. 2 runs per version, in the order 0.1.7, 0.2.0, 0.2.0, 0.1.7; the median of two runs is their
+mean.
+
+| Prompt (tokens) | Quality model, input tok/s, 0.1.7 → 0.2.0 | Time to read, 0.1.7 → 0.2.0 | Ratio | Fastest model, input tok/s, 0.1.7 → 0.2.0 | Ratio |
+|---|---|---|---|---|---|
+| 256 | 2,728 → 2,846 | 93.8 → 89.9 ms | 1.04 | 2,906 → 3,020 | 1.04 |
+| 2,048 | 4,398 → 5,007 | 465.6 → 409.1 ms | 1.14 | 4,434 → 4,959 | 1.12 |
+| 8,192 | 4,248 → 5,153 | 1.929 → 1.590 s | 1.21 | 4,259 → 5,102 | 1.20 |
+| 32,768 | 3,774 → 4,647 | 8.683 → 7.051 s | 1.23 | 3,774 → 4,601 | 1.22 |
+| 65,536 | 3,288 → 4,081 | 19.93 → 16.06 s | 1.24 | 3,277 → 4,051 | 1.24 |
+| 8,192, thinking on | 4,223 → 5,128 | 1.940 → 1.597 s | 1.21 | 4,210 → 5,101 | 1.21 |
+| 32,768, thinking on | 3,763 → 4,703 | 8.707 → 6.968 s | 1.25 | 3,744 → 4,660 | 1.24 |
+
+A known prompt of 32,768 tokens, changed at 25, 50 or 75 % of its length and read again (same conditions, thinking off). 0.1.7 read it
+again from the start: its saved states lie near the end of a prompt ([TECHNOLOGY.md](TECHNOLOGY.md), chapter 8), after these changes.
+0.2.0 starts at the last state it saved inside the first read before the change:
+
+| Change at | Quality model, 0.1.7 → 0.2.0 | Ratio | Tokens not read again | Fastest model, 0.1.7 → 0.2.0 | Ratio |
+|---|---|---|---|---|---|
+| 25 % | 8.701 → 5.776 s | 1.51 | 6,144 | 8.725 → 5.840 s | 1.49 |
+| 50 % | 8.702 → 4.238 s | 2.05 | 14,336 | 8.696 → 4.260 s | 2.04 |
+| 75 % | 8.707 → 2.070 s | 4.21 | 24,576 | 8.732 → 2.074 s | 4.21 |
+
+Long prompts, quality model, context 262,144, default settings, thinking off, one run per version, the first read with nothing reused:
+131,072 tokens in 50.35 s with 0.1.7 and 42.07 s with 0.2.0 (1.20 times as fast; 2,603 → 3,116 input tok/s); 262,016 tokens in
+141.78 s and 123.45 s (1.15 times; 1,848 → 2,122 input tok/s). The token ids and the state were the same as with 0.1.7. The peak GPU
+memory above the level before the start was 22,218 MiB with 0.1.7 and 23,595 MiB with 0.2.0 (the card showed 24,220 MiB in use at the
+peak).
+
+### GPU memory
+
+* The new reading makes a work area in GPU memory at the first long prompt and keeps it until the model is closed. RTX 5090, default
+  settings, context 69,632, the peak while reading prompts of 8,192, 32,768 and 65,536 tokens, against 0.1.7 in the same run: 1,385 to
+  1,388 MiB higher with the quality model, 1,476 to 1,479 MiB higher with the fastest model.
+* After the model is loaded and before the first long prompt the difference is about 570 MiB (above the level before the start: quality
+  model 18,051 → 18,621 MiB, fastest model 15,887 → 16,457 MiB).
+* The engine makes the area only when the GPU has that much free and 1 GiB more. Otherwise it prints
+  `[q35_layer] capacity fallback; no context reduction` on stderr once and, until the model is closed, reads prompts pass by pass
+  without the work area (the other changes of 0.2.0 stay on, and the output is the same). This is not an error.
+
+### Cards under 30,000 MiB
+
+We have no such card. The runs below were made on the RTX 5090, shown to the package as a smaller card and, where said, with another
+process holding GPU memory so that only the free memory of a smaller card was left. They are not measurements of an RTX 30 or 40 card
+or of a 16 GB or 24 GB card. A prompt of 32,768 tokens, thinking off, one run per case, all cases measured one after another with the
+released package rule (times from different runs are not compared: other work was running on the PC).
+
+* **The default (`--prefill auto`) is the reading of 0.1.7.** Shown as a 24,564 MiB card (quality model): the peak GPU memory was within
+  9 MiB of 0.1.7, the output was the same, and the prompt took 9.04 s (0.1.7: 9.00 s). Shown as a 16,384 MiB card (fastest model):
+  within 9 MiB, the same output, 9.05 s (0.1.7: 9.02 s). An earlier run of the default (one run each) also found the same token ids, the
+  same state and the same number of saved states as 0.1.7.
+* **`--prefill new` on such a card is experimental and not the default.** With it the package leaves 1,800 MiB more free when it chooses
+  the context, and says so in one line. When that would cost more than half of the context, it does not, says so, and the engine decides
+  with its own check. The output was the same as with 0.1.7 in every run.
+* **Set up as a 24 GB card** (quality model): the package chose a context of 229,376 instead of 262,144 and printed the line about the
+  1,800 MiB; the prompt was read in 7.53 s (1.20 times as fast). With another process holding GPU memory so that only the free memory of
+  a 24 GB card was left (24,067 MiB free before the start), the engine made its work area in full and read the prompt in 7.56 s. With
+  700 MiB less free it found no room, printed `[q35_layer] capacity fallback; no context reduction` and read the prompt without the work area,
+  in 8.49 s.
+* **Set up as a 16 GB card** (fastest model): the 1,800 MiB would have cost more than half of the context, so the context stayed 98,304
+  and the package said so. With only the free memory of a 16 GB card left (15,888 MiB free before the start) the engine found no room and
+  read the prompt without the work area (8.45 s; 0.1.7: 9.02 s). So at the context the package chooses, a 16 GB card does not use the new reading
+  even with `--prefill new`. A smaller `--max-ctx` leaves room for it; that has not been measured.
+* **Not measured:** any real card under 30,000 MiB (RTX 3090, 4090 or a 16 GB card). How much free memory the driver reports differs
+  between PCs: on our PC CUDA reported 400 to 600 MiB less than nvidia-smi. So we do not say that `--prefill new` uses the new reading
+  on a given 24 GB card.
+
+### Edit copy
+
+The three tasks of `yasakani bench --edit` (code edit, JSONL edit, long JSONL edit) and two rename tasks. Context 32,768, temperature
+1.0, thinking off, one request at a time. 2 runs with the edit copy off and 2 with it on per model, in the order off, on, on, off; the
+values are the mean of the 2 runs. The token ids and the state were the same in all 4 runs of every task. tok/s:
+
+| Task | Quality model, off | on | Ratio | Fastest model, off | on | Ratio |
+|---|---|---|---|---|---|---|
+| Code edit (`edit_code`) | 2,040.1 | 2,209.0 | 1.08 | 2,048.1 | 2,163.7 | 1.06 |
+| JSONL edit (`edit_jsonl`) | 2,292.2 | 2,309.3 | 1.01 | 2,284.5 | 2,286.6 | 1.00 |
+| Long JSONL edit (`edit_jsonl_long`) | 2,168.7 | 2,186.9 | 1.01 | 2,165.2 | 2,162.3 | 1.00 |
+| JSONL key renamed in every line | 1,151.4 | 2,039.8 | 1.77 | 1,244.9 | 2,009.3 | 1.61 |
+| SQL column renamed in every view | 1,168.5 | 2,101.0 | 1.80 | 1,262.7 | 2,025.2 | 1.60 |
+
+* The two rename tasks are not part of `yasakani bench --edit`, and their prompt files are not in this release. JSONL: 80 lines of four
+  fields each; the request is to rename one key in every line and return the whole file. SQL: 50 views; the request is to rename one
+  column in every view and return all of them. In both the first 1,024 tokens of the answer are timed. Without the edit copy the copy
+  passes cannot be used on these two tasks at all (every line differs from the input). With it the model needed 25 to 27 passes instead
+  of 66 to 68 for the 1,024 tokens.
+* The edit copy is on by default in 0.2.0 (`--edit-copy off` or `YASAKANI_EDIT_COPY=off` turns it off).
+* The edit copy acts when one request is generated at a time. The shared passes of `serve --parallel N` with several requests running
+  do not use it.
+
+### Speed tables unchanged
+
+The 15 tasks of the speed tables (the 12 published prompts and the 3 own tasks) with their sampling settings (thinking off, temperature
+1.0, top-p 0.95, top-k 20), one request at a time. One uncounted pass of all tasks first, then 3 runs per version; engine tok/s summed
+over all tasks, against 0.1.7. The token ids were the same, 15 of 15 in every run.
+
+| Setting | Quality model | Fastest model |
+|---|---|---|
+| Edit copy on (the default) | +0.37 % | +0.45 % |
+| Edit copy on, `--parallel 4` with one request at a time | +0.32 % | +0.50 % |
+| Edit copy off | +0.15 % (621.5 → 622.4 tok/s) | −0.21 % (718.3 → 716.8 tok/s) |
+| Edit copy off, `--parallel 4` with one request at a time | +0.10 % | −0.09 % |
+
+0.2.0 does not change the speed of generation, and the edit copy does not speed up these tasks beyond noise. Only reading a prompt and
+edits that repeat a replacement get faster. The rows of the speed tables were not measured again.
+
+### Several requests at once
+
+`serve --parallel N` (experimental), fastest model, the edit copy off. No compared request differed from the same conversation sent
+alone, in requests that join and leave (`--parallel 4` and `8`, 123 requests), cancellation (21) and engine failures (10).
+A 30-minute mixed run with tools and images (`--parallel 8`): 5,573 requests, 4,364 the same, 1,185 read another way with the same
+output, 24 not sent, 0 different; none stuck; the server's GPU memory grew by 6.0 MiB.
+The shared passes of several requests do not use the edit copy, but a request that runs alone on the server (also with
+`--parallel N`, and every request with images) does. These runs were made with it off. The edit copy only proposes tokens, so the
+outputs are expected to be the same with it on; this was not measured.
+
+With `--parallel 4 --max-ctx 16384` on the RTX 5090 the engine made its work area and used the new reading. When `--parallel N` chooses
+the contexts itself, they take the free GPU memory. The engine may then find no room and read prompts without the work area. This has not been
+measured.
+
+### Not measured
+
+* GPUs other than the RTX 5090, by us. The code for RTX 30 and 40 cards ran on the RTX 5090 only (test builds).
+* `--prefill new` on a real card under 30,000 MiB.
+* `serve --parallel N` with contexts it chooses itself, with the new reading. The quality model with several requests at once.
+* Several requests at once with the edit copy on: those runs were made with the edit copy off.
+* Linux: the engine library compiles and links (WSL, Ubuntu 24.04, CUDA 13.1, code for RTX 30, 40 and 50). Nothing was run on Linux.
+* A first installation with `START.cmd` from GitHub, which cannot run before the release.
+* The thinking-on speed table.

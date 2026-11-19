@@ -3,9 +3,9 @@
 Technical notes by the author, written as a map for people who read the source code in this repository.
 日本語: [TECHNOLOGY.ja.md](TECHNOLOGY.ja.md)
 
-* Scope: versions 0.1.0 to 0.1.6. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
+* Scope: versions 0.1.0 to 0.2.0. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
   one missing synchronization (chapter 7); 0.1.4 adds kernels for passes of 17 to 64 rows on compute capability 12.x and changes host
-  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4); 5.4 also describes the check of the wide copy passes on each card, new in 0.1.7. Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
+  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4); 5.4 also describes the check of the wide copy passes on each card, new in 0.1.7. 0.2.0 reads prompts in a new way, with new GPU code for it (chapter 8), and adds the edit copy (5.5). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).
@@ -253,7 +253,10 @@ to 0.1.3 one pass confirmed at most 16 tokens. 0.1.4 lets a copy go further:
   width stays open unless every round of the check is over that limit. The measured cycle times are also where the time-based back-off
   starts (they were the RTX 5090's on every GPU before). When the correctness check finds a difference, no width is used, passes of 17
   to 64 rows (such as the ends of prompt reads) go back to the 16-row sums also on 12.x, and `yasakani selfcheck` fails. The check reads
-  its text in pieces of at most 1,023 tokens, so that the engine does not set up the work area of long prompt reads (about 580 MiB).
+  its text in pieces of at most 1,023 tokens, so that the engine does not set up the work area of long prompt reads (about 580 MiB with
+  the sizes of 0.1.7; chapter 8). Since 0.2.0 (check version 3) it also reads a text of about 4,200 tokens whose two passes of 64 rows
+  cross and follow position 4,096, where the attention is split into more parts and passes of 64 rows use kernels of their own: 463
+  positions in all. A result kept by 0.1.7 is measured again once.
   On sm_86 / sm_89, when less than 128 MiB of GPU memory is free after the graphs of the opened widths are built, the widths are closed
   again.
 * **Time-based back-off (since 0.1.7; first in the 0.1.7 test build).** During generation the copy loop (`src/specx.cpp`) adds up the measured time of each wide pass (at most
@@ -275,6 +278,35 @@ not again: with a fixed sampling seed one structured task (CSV) was about 7% slo
 new copy lookup switched off; the cause in detail is not known); with thinking on, the thinking copies little and is not faster (the first
 1,536 tokens of the edit tasks: 0.99 to 1.02 times; the answer part was not measured); with passes of 16 rows only, the index and the
 cursor alone made the edit tasks 1.07 to 1.18 times as fast (one run each).
+
+### 5.5 Edit copy (0.2.0)
+
+Some edits make the same small replacement again and again: a key renamed in every line of a JSONL file, a column renamed in every view
+of an SQL file. The copy of 5.4 drafts the source text as it is, so each copy pass stops at the next renamed place. With the edit copy the
+drafts of the copy passes carry the replacements the model has already confirmed (`src/edit_copy.hpp`, its use in `src/specx.cpp`).
+
+* **Learning a replacement.** While the answer follows a place of the prompt that the copy cursor found, the engine compares the confirmed
+  answer with that source token by token. Where they differ, it looks for the nearest point where 4 tokens of both agree again, at most
+  6 tokens further on each side. The source tokens skipped and the answer tokens written in between are one replacement. It is learned
+  only after at least 4 unchanged tokens before it, and only from confirmed tokens, never from drafts. Up to 12 replacements are kept.
+* **Using it.** A replacement is used once the model has made it at two different places of the source. The next copy draft is then the
+  source text from the cursor on, with every kept replacement applied where its source text occurs (the longest match first). The width
+  of the pass follows 5.4: a wide pass (32, 48 or 64 rows, only widths opened on the card) only when it is expected to give more tokens
+  per millisecond than 16 rows, from the measured pass times of the GPU and the share of recent edit passes whose first replaced token
+  was accepted, and never right after a miss; otherwise up to 16 rows.
+* **Dropping it.** A replacement is no longer proposed when the answer copies its source text unchanged at more than a quarter as many
+  places as it applied it (only some records change), or after the model rejected its first replaced token at two places without a hit
+  in between (the replacement differs from record to record). A hit resets that count, and each time the replacement is seen again in
+  the answer one miss is taken back. After a pass that did not get its replaced token accepted, the edit copy pauses for 3 passes. Edit
+  passes do not count in the time-based back-off of 5.4.
+* **The output does not change.** The drafts are only proposals. The main model checks every drafted token in the pass as it checks any
+  copy draft, and only tokens it chose are kept. With sampling the random numbers are the same as without drafts (5.3), so the edit copy
+  is used with a temperature too.
+* **The setting.** `--edit-copy on|off` or `YASAKANI_EDIT_COPY`; the package passes it to the engine as `YSKN_EDIT_COPY=1` or `0`. It is
+  on by default in 0.2.0. The engine used without the package leaves it off. It needs the draft model and the copy index, as in the
+  shipping settings. Measured on the RTX 5090 only ([MEASUREMENTS.md](MEASUREMENTS.md#measurements-020)).
+* **One request at a time.** The edit copy acts when one request is generated at a time (the copy loop of one request). The shared
+  passes of `serve --parallel N` with several requests running do not use it.
 
 ## 6. KV5 (the cache for long contexts)
 
@@ -363,6 +395,14 @@ about 177,000 tokens, greedy: 3 of 3). The self-check of every GPU repeats a sma
 the look-ahead. Three requests cut by the thinking budget and one whose thinking ended before it gave the same answers with the settings of
 0.1.4 (twice), with 16-row copying and with one token per pass (greedy and with a fixed seed).
 
+0.2.0 reads prompts in a new way (chapter 8) and adds the edit copy (5.5). Both were checked against the released 0.1.7 on the RTX 5090.
+At 589,088 positions (46 cases, both models, prompts of 256 to 65,536 tokens) the predictions, the top 8 candidates with their FP32
+scores, the first token, the committed state and the next 16 positions were the same. This comparison used a test build of the 0.2.0
+engine, because the released library does not export the entry it needs. Through the chat's own path the released library gave the same
+token ids and state hash as 0.1.7 in 22 cases (first reads, prompts changed in the middle, thinking on; 4 runs each), and 35
+conversations per model gave the same token ids, with the edit copy off and with it on. The code for RTX 30 and 40 cards was run on the RTX 5090 only, with test builds
+([MEASUREMENTS.md](MEASUREMENTS.md#measurements-020)). The edit copy changes only the drafts: the main model checks every drafted token.
+
 KV5 rounds the cached values, so it changes the numbers. The released engine has no unrounded cache to switch to: with `YSKN_TB_CAP=0`
 it keeps the KV5-rounded values unpacked in 8-bit form and reads them with another attention kernel, and that can give a different text too.
 
@@ -380,19 +420,68 @@ The time of one pass with one part switched off (shipping: prose 9.70 to 9.90 ms
 | confirmation on a second stream | 9.90 ms | 12.37 ms | 1 to 3% |
 
 When a long prompt is read (17 or more rows together), the weights of one matrix at a
-time are expanded to int8 and reused (`src/q35_g6.cu`). A request that starts with the same text as the previous one reads only the new part.
+time are expanded to int8 and reused (`src/q35_g6.cu`). Up to 0.1.7 a chat request read its prompt this way, pass by pass (passes of up
+to 1,024 rows through all 64 layers), because the look-ahead needs the output layer of the prompt rows (5.2); in 0.2.0 this is still the
+reading on cards under 30,000 MiB by default and with `--prefill old` (below). A request that starts with the same text as the previous
+one reads only the new part.
 
 **Saved prompt states (0.1.4).** The engine keeps up to 8 saved states along the prompt of one conversation in pinned host memory (187 MiB
 each, about 1.5 GiB in all; no more GPU memory; 8, 8,192 and 4,096 are current defaults, not tuned): one after the last `<|im_start|>` of a prompt, and for prompts of 8,192 tokens or more also at multiples of 1,024
-in the 4,096 tokens before it and at multiples of 65,536. All of them are prefixes of one sequence. A new request continues from the live
+(since 0.2.0, with the new reading, multiples of 2,048: the grid follows the pass size) in the 4,096 tokens before it and at multiples of 65,536. All of them are prefixes of one sequence. A new request continues from the live
 state if that is a prefix of it, otherwise from the latest saved state inside the part it shares with the previous prompt, otherwise it is
-read from the start. The prompt is read in pieces that end at multiples of 1,024, so a request restored from a saved state is computed in
-the same pieces as when it is read from the start. The same 229,376-token document with a new question is therefore read again only from
+read from the start. Up to 0.1.7 the prompt is read in pieces that end at multiples of 1,024, so a request restored from a saved state is
+computed in the same pieces as when it is read from the start (0.2.0: below). The same 229,376-token document with a new question is therefore read again only from
 the last multiple of 1,024 before the question: 0.37 s to the first token instead of 115.6 s. A prompt is read from the start when an
 unrelated request came in between (it replaces the sequence), when thinking is switched on or off, after a request with an image, and when
 a prompt shorter than 8,192 tokens differs part-way. If pinned memory cannot be allocated, the engine goes on with the states it has. An older package that does not pass the number of states
 gets one, which works as in 0.1.3. The
 settings are the `YSKN_SNAP_*` entries of `DEFAULT_ENV` in `python/yasakani/runtime.py`; the code is in `src/engine35.cpp` and `src/specx.cpp`.
+
+**Reading a prompt (0.2.0).** 0.2.0 reads a prompt in a new way. The answers do not change (chapter 7). On the RTX 5090 the quality model
+read a prompt of 8,192 tokens at 5,153 input tokens/s (0.1.7: 4,248) and one of 32,768 tokens at 4,647 (0.1.7: 3,774): the first read,
+nothing reused, context 69,632, thinking off, one request at a time, median of 2 runs
+([MEASUREMENTS.md](MEASUREMENTS.md#measurements-020)). The code is in `src/engine35.cpp`
+and `src/specx.cpp`.
+
+* **Layer by layer, in larger pieces.** When 4,096 tokens or more of a prompt are left to read, the engine takes all whole pieces of
+  2,048 tokens of them, up to 8,192 tokens at a time, and runs them through the model one layer at a time: the weights of a layer are
+  expanded to int8 once and used for all these tokens, in passes of up to 2,048 rows, before the next layer. The rest is read pass by
+  pass as before, or also layer by layer when that lets the engine skip enough of the output layer (next point). Passes are cut on the absolute positions of the prompt (multiples of 2,048) and at the saved
+  states.
+* **The output layer only where it is needed.** The next-token table of the look-ahead (5.2) is filled from the predictions of the
+  prompt rows, and for each token, pair and triple of tokens only its last place in the prompt counts. When 2,048 or more new tokens are
+  read, the engine computes the output layer (about 248,000 scores per row) only for those rows and the last row of each piece, and skips
+  the others when that saves at least an eighth of the rows. The table ends the same as when every row is computed.
+* **More saved states inside a long prompt.** On a first read of 8,192 tokens or more from the start, the engine fills the saved states
+  it does not otherwise use (8 in all, as above) with states in the middle of the prompt: each at the middle of the longest stretch
+  without one, on the grid of the passes (2,048 with the new reading on cards of 30,000 MiB or more), at least 4,096 tokens from its
+  neighbours. When a known prompt then changes in the middle, it is
+  read again from the last saved state before the change, not from the start: a 32,768-token prompt changed at half its length was read
+  again in 4.24 s instead of 8.70 s (quality model, RTX 5090). These extra states are the first to be replaced when a new state is
+  needed. They use pinned host memory like the others.
+* **Kernels for long passes.** The matrix product of many rows (`src/q35_g6.cu`, `src/q35_g6_whole.cuh`) keeps the int8 inputs and the
+  exact 64-bit integer sums of chapter 4. The KV5 encoder of many rows (`src/kvq_vit2.cuh`) was reworked, and so was the attention of
+  64 rows at a time after position 4,096 (`src/q35_atxpk4.cuh`), which both the prompt reading and wide copy passes of 64 rows use; the
+  check on the card compares those passes since 0.2.0 (5.4).
+* **The work area and the memory check.** The layer-by-layer reading needs a work area in GPU memory: the int8 weights of one layer and
+  the values of up to 8,192 rows. The engine makes it at the first prompt that needs it and keeps it until the model is closed (on the
+  RTX 5090 the peak GPU memory is 1,385 to 1,388 MiB higher than with 0.1.7 with the quality model, 1,476 to 1,479 MiB with the fastest
+  model). Before it makes it, it asks CUDA how much memory is free and needs the area plus 1 GiB. If that is not there, it tries fewer
+  rows (down to 4,096) and then gives up overlapping two streams. If even that does not fit, it prints
+  `[q35_layer] capacity fallback; no context reduction` once and reads prompts pass by pass without the work area until the model is closed;
+  the other changes of 0.2.0 stay on, and the output is the same.
+  The context is not made shorter for it.
+* **Which cards.** By default (`--prefill auto`) the package uses the new reading only on cards with 30,000 MiB or more, the size of the
+  RTX 5090 we measured. On smaller cards, and when nvidia-smi does not tell the memory, it passes the settings of 0.1.7 (engine setting
+  `YSKN_Q35_PF_V2=0`, passes of up to 1,024 rows, 4,096 rows of work area), and prompts are read exactly as in 0.1.7. The context on
+  those cards is chosen from the free memory with an overhead measured with the reading of 0.1.7 (`python/yasakani/gpu.py`), and the
+  new reading needs more memory, which has not been tried on them. `--prefill old` gives the reading of 0.1.7, with the passes of 64
+  rows of 0.1.7, on any card. `--prefill new` gives the new reading on any card; under 30,000 MiB with the sizes of 0.1.7 (a work area
+  of about 579 MiB) and with 1,800 MiB more left free when the package chooses the context (unless that would cost more than half of
+  the context). That is experimental and has not been run on
+  a real card under 30,000 MiB. On the RTX 5090 set up as a 24 GB card (shown to the package as 24,564 MiB, with another process
+  holding the rest of the GPU memory) the engine found room and used the new reading; set up as a 16 GB card it found no room at the
+  context the package chose and read prompts without the work area. One line at start says which reading is used and why.
 
 ## 9. Research this builds on
 
@@ -422,5 +511,11 @@ settings are the `YSKN_SNAP_*` entries of `DEFAULT_ENV` in `python/yasakani/runt
   prompt (more than about 40,000 tokens) has not been measured. A stop string is acted on after a pass, so up to 64 tokens (16 up to 0.1.3)
   can be generated past it; the text is cut at the stop string, but those tokens count in `usage.completion_tokens`.
 * The saved prompt states take up to about 1.5 GiB of pinned host memory.
-* One request is generated at a time.
+* The new prompt reading of 0.2.0 (chapter 8) is the default only on cards with 30,000 MiB or more. On smaller cards the default is the
+  reading of 0.1.7. `--prefill new` on a smaller card is experimental and has not been run on a real card under 30,000 MiB. The new
+  reading keeps a work area in GPU memory from the first long prompt on. When `serve --parallel N` chooses its contexts itself, they
+  take the free GPU memory, and the engine may find no room and read prompts without the work area; this has not been measured.
+* The edit copy (5.5) and the new prompt reading were measured on the RTX 5090 only.
+* Without `serve --parallel N` one request is generated at a time. Since 0.1.7 `serve --parallel N` can generate several at once
+  (experimental).
 * The numbers here come from one computer. They change with the task, the context length and what else is using the GPU.
