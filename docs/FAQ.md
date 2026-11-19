@@ -480,13 +480,13 @@ Tested on the RTX 5090 only, with both models:
 * One at a time (`--parallel 1`), with a development build that has the same GPU code as 0.1.7: the same tokens as 0.1.5 on 35 prompts per model, and within 1% of its speed on 15 tasks (thinking off).
 * Several at once: about 35,000 requests compared with the same conversation sent alone. None differed. This includes requests that join and leave mid-run, contexts up to 229,376 tokens, tool calls, images, cancellation and engine failures.
 * A 60-minute run with 10,178 mixed requests (text, tools and images, fastest model, N = 8): no difference, nothing stuck, and memory did not keep growing.
-* With 0.2.0 (fastest model, edit copy off): requests that join and leave (`--parallel 4` and `8`, 123 requests), cancellation (21
-  requests) and engine failures (10): every compared request gave the same output as the same conversation sent alone. A 30-minute run
-  with mixed requests (text, tools and images, N = 8): 5,573 requests, 4,364 the same as the conversation sent alone, 1,185 read another
-  way with the same output, 24 not sent, none different; none stuck; the server's GPU memory grew by 6.0 MiB. These runs were made with
-  the [edit copy](#edit-copy-020) off. The shared passes of several requests do not use it, but a request that runs alone on the server
-  (also with `--parallel N`, and every request with images) does. The edit copy only proposes tokens, so the outputs are expected to be
-  the same with it on; this was not measured.
+* With 0.2.0 (fastest model), with the [edit copy](#edit-copy-020) on (the default) and again with it off: requests that join and
+  leave (`--parallel 4` and `8`, 123 requests), cancellation (21 requests) and engine failures (10). Every compared request gave the
+  same output as the same conversation sent alone. A 30-minute run with mixed requests (text, tools and images, N = 8), edit copy on:
+  5,473 requests, 4,293 the same as the conversation sent alone, 1,157 read another way with the same output, 23 not sent, none
+  different; none stuck; the server's GPU memory grew by 6.0 MiB. The same run with the edit copy off: 5,573 requests, 4,364 the same,
+  1,185 read another way with the same output, 24 not sent, none different; none stuck; 6.0 MiB. The shared passes of several requests
+  do not use the edit copy, but a request that runs alone on the server (also with `--parallel N`, and every request with images) does.
 
 Not tested:
 

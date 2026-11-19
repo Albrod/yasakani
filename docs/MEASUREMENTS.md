@@ -743,13 +743,19 @@ edits that repeat a replacement get faster. The rows of the speed tables were no
 
 ### Several requests at once
 
-`serve --parallel N` (experimental), fastest model, the edit copy off. No compared request differed from the same conversation sent
-alone, in requests that join and leave (`--parallel 4` and `8`, 123 requests), cancellation (21) and engine failures (10).
-A 30-minute mixed run with tools and images (`--parallel 8`): 5,573 requests, 4,364 the same, 1,185 read another way with the same
-output, 24 not sent, 0 different; none stuck; the server's GPU memory grew by 6.0 MiB.
+`serve --parallel N` (experimental), fastest model, run with the edit copy on (the default) and again with it off. Either way, no
+compared request differed from the same conversation sent alone, in requests that join and leave (`--parallel 4` and `8`, 123
+requests), cancellation (21) and engine failures (10).
+A 30-minute mixed run with tools and images (`--parallel 8`):
+
+| | Requests | The same | Read another way, same output | Not sent | Different | Server GPU memory |
+|---|---|---|---|---|---|---|
+| Edit copy on (default) | 5,473 | 4,293 | 1,157 | 23 | 0 | +6.0 MiB |
+| Edit copy off | 5,573 | 4,364 | 1,185 | 24 | 0 | +6.0 MiB |
+
+No request stuck in either run.
 The shared passes of several requests do not use the edit copy, but a request that runs alone on the server (also with
-`--parallel N`, and every request with images) does. These runs were made with it off. The edit copy only proposes tokens, so the
-outputs are expected to be the same with it on; this was not measured.
+`--parallel N`, and every request with images) does.
 
 With `--parallel 4 --max-ctx 16384` on the RTX 5090 the engine made its work area and used the new reading. When `--parallel N` chooses
 the contexts itself, they take the free GPU memory. The engine may then find no room and read prompts without the work area. This has not been
@@ -760,7 +766,6 @@ measured.
 * GPUs other than the RTX 5090, by us. The code for RTX 30 and 40 cards ran on the RTX 5090 only (test builds).
 * `--prefill new` on a real card under 30,000 MiB.
 * `serve --parallel N` with contexts it chooses itself, with the new reading. The quality model with several requests at once.
-* Several requests at once with the edit copy on: those runs were made with the edit copy off.
 * Linux: the engine library compiles and links (WSL, Ubuntu 24.04, CUDA 13.1, code for RTX 30, 40 and 50). Nothing was run on Linux.
 * A first installation with `START.cmd` from GitHub, which cannot run before the release.
 * The thinking-on speed table.
