@@ -15,13 +15,18 @@ Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building 
 | Build tools | CMake (3.24 or newer is required) and Ninja |
 | Target | one DLL with machine code for compute capability 8.6 (`sm_86`, RTX 30 series), 8.9 (`sm_89`, RTX 40 series) and 12.0 (`sm_120`, RTX 50 series), plus PTX for `compute_120`. Tested on the RTX 5090 only |
 
-The `yskn.dll` on the release page is this build (SHA-256 `0d3d513bb1c92377367b4ce8d253abed9294ee5c63a8851e0e26bffe97ed45a6`). It is
+The `yskn.dll` on the release page is this build (SHA-256 `2d64c3b42bb9e689449cdd7ccd7cd5f206f70615bcadb6c0640a16396386f468`). It is
 the source of 0.1.6 plus the experimental code for several requests at once (`serve --parallel N`): two new GPU files for passes of several
 requests (`src/q35_atxpk_ms.cu`, `src/q35_sample_ms.cu`), kernels for several rows in other GPU files, and host code in `src/engine35.cpp`
 and `src/c_api.cpp`. It was compiled with the two commands below into the build folder of the 0.1.5 build, one step at a time as the
-code was added. The last step added the weight upload of [#25](https://github.com/yasakani-dev/yasakani/pull/25) (`src/devmem.cpp`,
-`src/devmem.hpp`, `src/engine35.cpp`, `src/loader.cpp`): it compiled four C++ files again and linked, and the 26 compiled GPU files are
-byte for byte those of the build before it (`a0991ab6…7170`). The 0.1.6 build (`967de3ea…be8f`) was the
+code was added. The weight upload of [#25](https://github.com/yasakani-dev/yasakani/pull/25) (`src/devmem.cpp`, `src/devmem.hpp`,
+`src/engine35.cpp`, `src/loader.cpp`) compiled four C++ files again and linked, and the 26 compiled GPU files stayed byte for byte those
+of the build before it (`a0991ab6…7170`), giving `0d3d513b…45a6`. The last step added the wide copy passes per GPU and the
+check on the card (`include/yskn_abi.h`, `src/c_api.cpp`, `src/engine35.cpp`, `src/engine35.hpp`, `src/gpu_caps.cu`, `src/gpu_caps.hpp`,
+`src/specx.cpp`, `src/specx.hpp`): it compiled six C++ files and three GPU files again (`src/gpu_caps.cu`, and `src/pm_test.cu` and
+`src/repack.cu`, which include `include/yskn_abi.h`) and linked. The other 23 compiled GPU files are byte for byte those of
+`0d3d513b…45a6`, the GPU code of all three architectures is the same function by function (compared with `cuobjdump`), and three
+functions are exported in addition (`yskn_build_info`, `yskn_time_cycle`, `yskn_wide_state`). The 0.1.6 build (`967de3ea…be8f`) was the
 build of 0.1.5 (`918560d6…3f7a`) with the change of 0.1.6 in `src/c_api.cpp` (every entry point selects the engine's GPU,
 [#20](https://github.com/yasakani-dev/yasakani/issues/20)) compiled into its build folder with the two commands below (the CUDA compiler was named
 explicitly with `-DCMAKE_CUDA_COMPILER`): one C++ file was compiled again and linked, the exported functions are the same, and the GPU
