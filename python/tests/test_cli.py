@@ -35,17 +35,53 @@ def free_port():
 
 
 class PrefillOptionTests(unittest.TestCase):
-    """--prefill auto | old on the commands that open the engine; not given = None (then YASAKANI_PREFILL, else auto)."""
+    """--prefill auto | new | old on the commands that open the engine; not given = None (then YASAKANI_PREFILL, else auto)."""
 
     def test_option(self):
         from yasakani import cli
         p = cli.build_parser()
         for cmd in ("chat", "serve", "bench", "selfcheck"):
             self.assertIsNone(p.parse_args([cmd]).prefill, cmd)
-            for mode in ("auto", "old"):
+            for mode in ("auto", "new", "old"):
                 self.assertEqual(p.parse_args([cmd, "--prefill", mode]).prefill, mode, cmd)
         with open(os.devnull, "w") as null, unittest.mock.patch("sys.stderr", null), self.assertRaises(SystemExit):
-            p.parse_args(["chat", "--prefill", "new"])
+            p.parse_args(["chat", "--prefill", "fast"])
+
+    def test_info_lines(self):
+        """yasakani info: the setting, and per GPU the line the start would print."""
+        from yasakani import cli
+        from yasakani import gpu as G
+        found = G.parse("0, GPU-0, NVIDIA GeForce RTX 5090, 12.0, 32607, 1000, 616.92\n"
+                        "1, GPU-1, NVIDIA GeForce RTX 4090, 8.9, 24564, 1000, 616.92\n")
+        with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": ""}):
+            lines = cli._prefill_info_lines(found)
+        self.assertEqual(lines[0], "prefill  prompt reading: setting auto (YASAKANI_PREFILL / --prefill)")
+        self.assertEqual(lines[1], "         GPU 0: prompt reading: new (setting auto: 32607 MiB card)")
+        self.assertTrue(lines[2].startswith("         GPU 1: prompt reading: as in 0.1.7 (setting auto: 24564 MiB card"))
+        with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": "new"}):
+            self.assertEqual(cli._prefill_info_lines(found)[2],
+                             "         GPU 1: prompt reading: new (setting new; 24564 MiB card: prompt sizes of 0.1.7)")
+        with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": "fast"}):
+            lines = cli._prefill_info_lines(found)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("--prefill must be one of auto, new, old", lines[0])
+
+    def test_report_row(self):
+        """yasakani report: the prompt reading row under the wide passes, when the plan is known."""
+        from yasakani import report
+        m = dict(package="yasakani x", os="o", python="3",
+                 library=dict(file="yskn.dll", sha256="0" * 16, build_info="b"),
+                 gpu=dict(name="g", cc="12.0", total_mib=32607, sms=170, code="sm_120", driver="d", driver_model=None, power_limit_w=None,
+                          max_sm_mhz=None, max_mem_mhz=None, display_attached=None, display_active=None, pstate=None, temperature_c=None,
+                          sm_mhz=None, slowdown_reasons=None, free_mib_now=None),
+                 model=dict(id="m", weights="w", context=1),
+                 wide=dict(setting="on", status="-", mask=0, widths="-", reason="", cache="-", check_seconds=0.0, free_after_mib=None))
+        self.assertNotIn("Prompt reading", report.render(dict(machine=dict(m))))
+        self.assertNotIn("Prompt reading", report.render(dict(machine=dict(m, prefill=None))))
+        row = "| Prompt reading | prompt reading: new (setting auto: 32607 MiB card) |"
+        rows = report.render(dict(machine=dict(m, prefill=dict(reading="new", line="prompt reading: new (setting auto: 32607 MiB card)")))).split("\n")
+        self.assertIn(row, rows)
+        self.assertTrue(rows[rows.index(row) - 1].startswith("| Wide passes"))
 
 
 @unittest.skipUnless(HAVE_TOK and IS_POSIX, "needs the Qwen3.8 tokenizer files (YASAKANI_TEST_MODEL_DIR) and a POSIX test machine")

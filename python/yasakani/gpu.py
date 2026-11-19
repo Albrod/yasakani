@@ -36,9 +36,11 @@ FULL_CONTEXT_MIN_TOTAL_MIB = 30000    # cards with this much memory keep the mod
 # Cards with less than FULL_CONTEXT_MIN_TOTAL_MIB keep the prompt-reading sizes of 0.1.7: OVERHEAD_MIB was measured with them.  The
 # larger defaults of runtime.py (2,048 rows per pass, 8,192 rows of layer work area) take about 0.6 to 0.7 GB more at load.
 SMALL_CARD_ENV = {"YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"}
-# --prefill (or YASAKANI_PREFILL): auto = the faster prompt reading (the default); old = prompt reading and passes of 64 rows as in
+# --prefill (or YASAKANI_PREFILL): auto (the default) = the new, faster prompt reading on a card whose memory is known and at least
+# FULL_CONTEXT_MIN_TOTAL_MIB (the card it is tested on), else the reading of 0.1.7; new = the new reading on any card (under
+# FULL_CONTEXT_MIN_TOTAL_MIB or of unknown memory with the sizes of SMALL_CARD_ENV); old = prompt reading and passes of 64 rows as in
 # 0.1.7.  The engine reads YSKN_Q35_PF_V2=0 and then also keeps the sizes of 0.1.7; they are given here as well.
-PREFILL_MODES = ("auto", "old")
+PREFILL_MODES = ("auto", "new", "old")
 PREFILL_MODE_ENV = "YASAKANI_PREFILL"
 OLD_PREFILL_ENV = dict(SMALL_CARD_ENV, YSKN_Q35_PF_V2="0")
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the released models fit on (fastest model only)
@@ -319,6 +321,8 @@ class ContextPlan:
     notes: List[str] = field(default_factory=list)
     free_mib: Optional[int] = None
     parallel: int = 1                     # stream slots the context was chosen for (plan_parallel; 1 = one request at a time)
+    prefill: str = ""                     # the prompt reading use_prefill chose: "new" or "old" ("" = not chosen yet)
+    prefill_line: str = ""                # the one line on that choice, printed at start
 
 
 def _small_card_env(plan: "ContextPlan", g) -> None:
@@ -329,7 +333,7 @@ def _small_card_env(plan: "ContextPlan", g) -> None:
 
 
 def prefill_mode_of(value: Optional[str] = None, environ: Optional[Mapping[str, str]] = None) -> str:
-    """auto | old: ``value`` (the command line), else ``YASAKANI_PREFILL``, else auto."""
+    """auto | new | old: ``value`` (the command line), else ``YASAKANI_PREFILL``, else auto."""
     env = os.environ if environ is None else environ
     v = value if value not in (None, "") else env.get(PREFILL_MODE_ENV, "")
     v = (v or "auto").strip().lower()
@@ -338,10 +342,38 @@ def prefill_mode_of(value: Optional[str] = None, environ: Optional[Mapping[str, 
     return v
 
 
-def use_prefill(plan: "ContextPlan", mode: str) -> "ContextPlan":
-    """--prefill old: the engine settings of OLD_PREFILL_ENV are added to ``plan.env``.  auto changes nothing."""
+def _card_total(g) -> Optional[int]:
+    """The total memory of the card in MiB (a GpuInfo or a Detected: for several candidates, the smallest), None when not known."""
+    if isinstance(g, Detected):
+        g = g.worst()
+    return g.total_mib if g is not None else None
+
+
+def prefill_choice(mode: str, g) -> Tuple[str, Dict[str, str], str]:
+    """What ``mode`` (auto | new | old) means on the card ``g`` (a GpuInfo, a Detected or None): (reading, engine settings, line).
+    reading is "new" or "old"; the line says which reading and why, printed once at start (as the line of the wide copy passes)."""
+    total = _card_total(g)
+    big = total is not None and total >= FULL_CONTEXT_MIN_TOTAL_MIB
+    card = "%d MiB card" % total if total is not None else "card memory not known"
     if mode == "old":
-        plan.env.update(OLD_PREFILL_ENV)
+        return "old", dict(OLD_PREFILL_ENV), "prompt reading: as in 0.1.7 (setting old)"
+    if mode == "new":
+        if big:
+            return "new", {}, "prompt reading: new (setting new)"
+        return "new", dict(SMALL_CARD_ENV), "prompt reading: new (setting new; %s: prompt sizes of 0.1.7)" % card
+    if big:
+        return "new", {}, "prompt reading: new (setting auto: %s)" % card
+    why = "%s, new only from %d MiB" % (card, FULL_CONTEXT_MIN_TOTAL_MIB) if total is not None else card
+    return "old", dict(OLD_PREFILL_ENV), "prompt reading: as in 0.1.7 (setting auto: %s; --prefill new to try it)" % why
+
+
+def use_prefill(plan: "ContextPlan", mode: str, g=None) -> "ContextPlan":
+    """Add the engine settings of :func:`prefill_choice` for ``mode`` on the card ``g`` to ``plan.env`` and keep the choice in
+    ``plan.prefill`` and ``plan.prefill_line``.  old, and auto on a card under FULL_CONTEXT_MIN_TOTAL_MIB or of unknown memory, add
+    OLD_PREFILL_ENV; auto on a larger card changes nothing; new adds SMALL_CARD_ENV unless the card is known to be that large."""
+    reading, env, line = prefill_choice(mode, g)
+    plan.env.update(env)
+    plan.prefill, plan.prefill_line = reading, line
     return plan
 
 

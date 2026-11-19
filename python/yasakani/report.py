@@ -171,6 +171,8 @@ def run_report(args) -> int:
         st = eng.wide_state()
         res = eng.wide_result
         rep["machine"] = machine(eng, st, res, pack)
+        plan = getattr(args, "context_plan", None)
+        rep["machine"]["prefill"] = dict(reading=plan.prefill, line=plan.prefill_line) if plan is not None else None
         rep["check"] = res.summary() if res is not None else None
         if st is None:
             rep["note"] = "this engine library is older than 0.1.7: it cannot switch the wide copy passes, so there is nothing to compare"
@@ -216,6 +218,8 @@ def render(rep: Dict[str, object]) -> str:
          "| Wide passes | setting %s · result %s: %s%s · %s · free GPU memory after their graphs %s MiB |" % (
              w["setting"], w["status"], w["widths"], (" (" + w["reason"] + ")") if w["reason"] else "", w["cache"], _v(w["free_after_mib"])),
          ""]
+    if m.get("prefill"):
+        L.insert(-1, "| Prompt reading | %s |" % m["prefill"]["line"])
     if rep.get("note"):
         L += ["**Note**: " + rep["note"], ""]
     c = rep.get("check")

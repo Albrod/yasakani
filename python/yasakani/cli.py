@@ -128,8 +128,9 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--device", type=int, default=0, help="the GPU to use, numbered as in `yasakani info` and nvidia-smi (default 0)")
     sp.add_argument("--seed0", type=int, default=1, help="seed of the first request; every request without its own seed uses the next one")
     sp.add_argument("--prefill", choices=gpus.PREFILL_MODES, default=None,
-                    help="prompt reading: auto (default; the faster reading) or old (prompt reading and passes of 64 tokens as in 0.1.7).  "
-                         "Default: $YASAKANI_PREFILL or auto")
+                    help="prompt reading: auto (default; the new, faster reading on a card with 30,000 MiB or more, else as in 0.1.7), "
+                         "new (the new reading on any card; under 30,000 MiB with the prompt sizes of 0.1.7) or old (prompt reading and "
+                         "passes of 64 tokens as in 0.1.7).  Default: $YASAKANI_PREFILL or auto")
     _add_wide_args(sp)
 
 
@@ -222,10 +223,11 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1):
         plan = gpus.plan_context(pack, det)
     elif plan is None:                           # a given context is used as it is; the draft model's output head only where it fits
         plan = gpus.plan_given_context(pack, det, args.max_ctx)
-    gpus.use_prefill(plan, gpus.prefill_mode_of(getattr(args, "prefill", None)))     # a wrong YASAKANI_PREFILL fails here, before the load
+    gpus.use_prefill(plan, gpus.prefill_mode_of(getattr(args, "prefill", None)), det)    # a wrong YASAKANI_PREFILL fails here, before the load
     args.parallel_planned, args.context_plan = n, plan
     for line in plan.notes:
         _say(line)
+    _say(plan.prefill_line)
     max_ctx = plan.max_ctx
     profile = RuntimeProfile.default(pack, plan.env) if plan.env else None
     wide = widecheck.mode_of(getattr(args, "wide", None))         # 0.1.7: a wrong YASAKANI_WIDE fails here, before the long load
@@ -466,6 +468,8 @@ def cmd_info(args) -> int:
         print("         " + gpus.numbering(gpus=found))
     for line in _wide_info_lines(found):
         print(line)
+    for line in _prefill_info_lines(found):
+        print(line)
     d = getattr(args, "model_dir", None) or os.environ.get("YASAKANI_MODEL_DIR")
     if d:
         try:
@@ -505,6 +509,18 @@ def _wide_info_lines(found) -> List[str]:
         out.append("         GPU %d: checked %s (driver %s, package %s): %s%s" % (
             g.index, when, (e.get("fields") or {}).get("driver"), (e.get("fields") or {}).get("package"),
             widecheck.widths_text(int(r.get("mask", 0))), " (%s)" % r.get("status") if r.get("status") != "measured" else ""))
+    return out
+
+
+def _prefill_info_lines(found) -> List[str]:
+    """The setting of the prompt reading and, per GPU, what it chooses there (the line printed at start)."""
+    try:
+        mode = gpus.prefill_mode_of(None)
+    except YasakaniError as ex:
+        return ["prefill  " + str(ex)]
+    out = ["prefill  prompt reading: setting %s (YASAKANI_PREFILL / --prefill)" % mode]
+    for g in found:
+        out.append("         GPU %d: %s" % (g.index, gpus.prefill_choice(mode, g)[2]))
     return out
 
 

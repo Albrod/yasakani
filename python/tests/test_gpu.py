@@ -438,31 +438,123 @@ class ContextRuleTests(unittest.TestCase):
 
 
 class PrefillModeTests(unittest.TestCase):
-    """--prefill / YASAKANI_PREFILL: auto (default) or old (the engine reads YSKN_Q35_PF_V2=0 and the sizes of 0.1.7)."""
+    """--prefill / YASAKANI_PREFILL: auto (default; the new reading only on a card known to have 30,000 MiB or more, else old), new
+    (the new reading on any card, with the sizes of 0.1.7 under 30,000 MiB or when the memory is not known) or old (YSKN_Q35_PF_V2=0
+    and the sizes of 0.1.7)."""
+
+    CARDS = {
+        "32 GB": smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 1107),
+        "24 GB": smi_line(0, "NVIDIA GeForce RTX 4090", "8.9", 24564, 4000),
+        "16 GB": smi_line(0, "NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 900),
+        "unknown": "0, GPU-1, NVIDIA GeForce RTX 4080, 8.9, [N/A], [N/A], 581.57",
+    }
+    # what each mode adds to the plan on each card, and the reading it chooses
+    WANT = {
+        ("auto", "32 GB"): ({}, "new"), ("auto", "24 GB"): (G.OLD_PREFILL_ENV, "old"),
+        ("auto", "16 GB"): (G.OLD_PREFILL_ENV, "old"), ("auto", "unknown"): (G.OLD_PREFILL_ENV, "old"),
+        ("new", "32 GB"): ({}, "new"), ("new", "24 GB"): (G.SMALL_CARD_ENV, "new"),
+        ("new", "16 GB"): (G.SMALL_CARD_ENV, "new"), ("new", "unknown"): (G.SMALL_CARD_ENV, "new"),
+        ("old", "32 GB"): (G.OLD_PREFILL_ENV, "old"), ("old", "24 GB"): (G.OLD_PREFILL_ENV, "old"),
+        ("old", "16 GB"): (G.OLD_PREFILL_ENV, "old"), ("old", "unknown"): (G.OLD_PREFILL_ENV, "old"),
+    }
+
+    def plans(self, det):
+        """The four plans _open_stack can start from, before use_prefill (a new one at each call)."""
+        return [lambda: G.plan_context(FakePack(FASTEST), det), lambda: G.plan_given_context(FakePack(FASTEST), det, 32768),
+                lambda: G.plan_parallel(FakePack(FASTEST), det, 2), lambda: G.plan_given_parallel(FakePack(FASTEST), det, 16384, 2)]
 
     def test_mode_of(self):
+        self.assertEqual(G.PREFILL_MODES, ("auto", "new", "old"))
         self.assertEqual(G.prefill_mode_of(None, {}), "auto")
         self.assertEqual(G.prefill_mode_of("", {}), "auto")
+        self.assertEqual(G.prefill_mode_of(None, {"YASAKANI_PREFILL": ""}), "auto")
         self.assertEqual(G.prefill_mode_of(None, {"YASAKANI_PREFILL": " OLD "}), "old")
+        self.assertEqual(G.prefill_mode_of(None, {"YASAKANI_PREFILL": "new"}), "new")
         self.assertEqual(G.prefill_mode_of("auto", {"YASAKANI_PREFILL": "old"}), "auto")          # the option wins
-        for bad in ("new", "0"):
+        self.assertEqual(G.prefill_mode_of("new", {"YASAKANI_PREFILL": "old"}), "new")
+        for bad in ("fast", "0", "on"):
             with self.assertRaises(YasakaniError) as cm:
                 G.prefill_mode_of(bad, {})
-            self.assertIn("--prefill", str(cm.exception))
+            self.assertIn("--prefill must be one of auto, new, old", str(cm.exception))
         with self.assertRaises(YasakaniError):
             G.prefill_mode_of(None, {"YASAKANI_PREFILL": "off"})
 
-    def test_plan(self):
+    def test_every_mode_on_every_card(self):
         self.assertEqual(G.OLD_PREFILL_ENV, {"YSKN_Q35_PF_V2": "0", "YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"})
-        r5090 = det_of(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 1107))
+        self.assertEqual(G.FULL_CONTEXT_MIN_TOTAL_MIB, 30000)
+        planned = 0
+        for (mode, card), (env, reading) in self.WANT.items():
+            det = det_of(self.CARDS[card])
+            self.assertEqual(G.prefill_choice(mode, det)[:2], (reading, env), (mode, card))
+            self.assertEqual(G.prefill_choice(mode, det.gpu)[:2], (reading, env), (mode, card))       # a GpuInfo gives the same
+            for make in self.plans(det):
+                try:
+                    before = make()
+                except YasakaniError:                    # --parallel 2 does not fit beside the fastest model on every card
+                    continue
+                planned += 1
+                plan = G.use_prefill(make(), mode, det)
+                self.assertEqual(plan.env, dict(before.env, **env), (mode, card))
+                self.assertEqual((plan.max_ctx, plan.free_mib, plan.notes), (before.max_ctx, before.free_mib, before.notes))
+                self.assertEqual(plan.prefill, reading, (mode, card))
+                self.assertEqual(plan.env.get("YSKN_Q35_PF_V2"), "0" if reading == "old" else None, (mode, card))
+                if card != "32 GB":                      # off the tested card every reading keeps the sizes of 0.1.7
+                    self.assertEqual({k: plan.env[k] for k in G.SMALL_CARD_ENV}, G.SMALL_CARD_ENV, (mode, card))
+        self.assertGreaterEqual(planned, 36)
+        for mode in G.PREFILL_MODES:                     # no GPU found at all: as a card of unknown memory
+            want = self.WANT[(mode, "unknown")]
+            self.assertEqual(G.prefill_choice(mode, G.Detected())[:2], (want[1], want[0]))
+            self.assertEqual(G.prefill_choice(mode, None)[:2], (want[1], want[0]))
+
+    def test_the_limit(self):
+        """30,000 MiB itself counts as large, one MiB less does not; several GPUs that cannot be told apart count as the smallest."""
+        self.assertEqual(G.prefill_choice("auto", det_of(smi_line(0, "NVIDIA RTX A", "8.6", 30000)))[0], "new")
+        self.assertEqual(G.prefill_choice("auto", det_of(smi_line(0, "NVIDIA RTX A", "8.6", 29999)))[0], "old")
+        rows = (smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607), smi_line(1, "NVIDIA GeForce RTX 4090", "8.9", 24564))
+        two = det_of(*rows)
+        self.assertEqual(len(two.candidates), 2)         # CUDA's order is not PCI's here: either GPU may be device 0
+        self.assertEqual(G.prefill_choice("auto", two)[0], "old")
+        self.assertEqual(G.prefill_choice("auto", det_of(*rows, environ={"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}))[0], "new")
+
+    def test_auto_on_32_gb_is_as_before(self):
+        """auto on the RTX 5090 adds nothing: the plan is the one the plan functions give alone, as before --prefill new."""
+        det = det_of(self.CARDS["32 GB"])
+        for make in self.plans(det):
+            before, plan = make(), G.use_prefill(make(), "auto", det)
+            self.assertEqual((plan.env, plan.max_ctx, plan.free_mib, plan.notes, plan.parallel),
+                             (before.env, before.max_ctx, before.free_mib, before.notes, before.parallel))
+        self.assertEqual(G.use_prefill(G.plan_context(FakePack(FASTEST), det), "auto", det).env, {})
+        from yasakani.runtime import DEFAULT_ENV, RuntimeProfile
+        with tempfile.TemporaryDirectory() as t:
+            prof = RuntimeProfile.default(support.make_pack(Path(t)), G.use_prefill(G.ContextPlan(), "auto", det).env)
+        for k in G.SMALL_CARD_ENV:
+            self.assertEqual(prof.env[k], DEFAULT_ENV[k])
+        self.assertNotIn("YSKN_Q35_PF_V2", prof.env)
+
+    def test_line(self):
+        """One short line per start: which reading and why."""
+        lines = {k: G.prefill_choice(k[0], det_of(self.CARDS[k[1]]))[2] for k in self.WANT}
+        self.assertEqual(lines[("auto", "32 GB")], "prompt reading: new (setting auto: 32607 MiB card)")
+        self.assertEqual(lines[("auto", "24 GB")],
+                         "prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; --prefill new to try it)")
+        self.assertEqual(lines[("auto", "unknown")], "prompt reading: as in 0.1.7 (setting auto: card memory not known; --prefill new to try it)")
+        self.assertEqual(lines[("new", "32 GB")], "prompt reading: new (setting new)")
+        self.assertEqual(lines[("new", "16 GB")], "prompt reading: new (setting new; 16311 MiB card: prompt sizes of 0.1.7)")
+        self.assertEqual(lines[("new", "unknown")], "prompt reading: new (setting new; card memory not known: prompt sizes of 0.1.7)")
+        self.assertEqual(lines[("old", "24 GB")], "prompt reading: as in 0.1.7 (setting old)")
+        for k, line in lines.items():
+            self.assertTrue(line.startswith("prompt reading: " + ("new" if self.WANT[k][1] == "new" else "as in 0.1.7")), k)
+            self.assertNotIn("\n", line)
+            self.assertLess(len(line), 120, k)
+        plan = G.use_prefill(G.ContextPlan(), "auto", det_of(self.CARDS["16 GB"]))
+        self.assertEqual((plan.prefill, plan.prefill_line), ("old", lines[("auto", "16 GB")]))
+
+    def test_plan(self):
         r3090 = det_of(smi_line(0, "NVIDIA GeForce RTX 3090", "8.6", 24576, 1000))
-        for det in (r5090, r3090):
-            auto = G.plan_context(FakePack(FASTEST), det)
-            old = G.use_prefill(G.plan_context(FakePack(FASTEST), det), "old")
-            self.assertNotIn("YSKN_Q35_PF_V2", G.use_prefill(G.plan_context(FakePack(FASTEST), det), "auto").env)
-            self.assertEqual(old.env, dict(auto.env, **G.OLD_PREFILL_ENV))
-            self.assertEqual((old.max_ctx, old.free_mib), (auto.max_ctx, auto.free_mib))      # the context is chosen as for auto
-        self.assertEqual(G.use_prefill(G.plan_context(FakePack(FASTEST), r5090), "auto").env, {})
+        auto = G.plan_context(FakePack(FASTEST), r3090)
+        old = G.use_prefill(G.plan_context(FakePack(FASTEST), r3090), "old", r3090)
+        self.assertEqual(old.env, dict(auto.env, **G.OLD_PREFILL_ENV))
+        self.assertEqual((old.max_ctx, old.free_mib), (auto.max_ctx, auto.free_mib))      # the context is chosen as for auto
         from yasakani.runtime import RuntimeProfile
         with tempfile.TemporaryDirectory() as t:
             prof = RuntimeProfile.default(support.make_pack(Path(t)), G.use_prefill(G.ContextPlan(), "old").env)
@@ -906,7 +998,8 @@ class OpenStackTests(unittest.TestCase):
             os.environ.update(saved)
         self.addCleanup(restore)
         base = ["chat", "--model-dir", str(folder), "--dll", str(support.stub_path())]
-        for extra, env, want in (([], None, None), (["--prefill", "old"], None, "0"), ([], "old", "0"), (["--prefill", "auto"], "old", None)):
+        for extra, env, want in (([], None, None), (["--prefill", "old"], None, "0"), ([], "old", "0"), (["--prefill", "auto"], "old", None),
+                                 (["--prefill", "new"], "old", None), ([], "new", None)):
             os.environ.pop("YASAKANI_PREFILL", None)
             if env:
                 os.environ["YASAKANI_PREFILL"] = env
