@@ -19,6 +19,9 @@ perplexity tool): the mean KL divergence from the reference, how often the most 
               yskn.dll of the releases always rounds the cache with KV5, has no FP16 cache and refuses this setting; a library built
               with YSKN_KVX_MODE=0 runs it (BUILDING.md, "Measurement builds").
 
+The prompt reading is the one `yasakani chat` uses on GPU 0 (YASAKANI_PREFILL, else auto: the new reading on cards of 30,000 MiB
+or more, the reading of 0.1.7 on smaller cards and cards of unknown memory); the line printed at start says which.
+
 Needs: Windows, an NVIDIA GPU the engine runs on (the published numbers are from an RTX 5090), the yasakani package of this repository (pip install . in python/, or the quickstart), numpy.
 The engine is used through documented exports of yskn.dll (include/yskn_abi.h): yskn_verify_nll, yskn_logits_rows, yskn_commit.
 """
@@ -57,6 +60,7 @@ def main():
     sys.path.insert(0, a.scoring)
     from kld_base import KldReader, metrics, summary
     import yasakani
+    from yasakani import gpu as gpus
     from yasakani.engine import Engine
     from yasakani.runtime import ModelPack, RuntimeProfile
 
@@ -64,7 +68,11 @@ def main():
     n_ctx, first, rows, vocab = rd.n_ctx, rd.first, rd.rows, rd.V
     pack = ModelPack.load(a.model_dir)
     over = {"fp16": {"YSKN_Q35_KV8": "0", "YSKN_Q35_KV_FP16": "1", "YSKN_TB_CAP": "0"}, "int8": {"YSKN_TB_CAP": "0"}, "default": {}}[a.kv]
-    eng = Engine(pack, max_ctx=n_ctx, dll=a.dll, profile=RuntimeProfile.default(pack, over))
+    plan = gpus.ContextPlan()                    # the prompt reading and the edit copy as `yasakani chat` chooses them on GPU 0
+    gpus.use_prefill(plan, gpus.prefill_mode_of(None), gpus.detect(0))
+    gpus.use_edit_copy(plan, gpus.edit_copy_of(None))
+    print(plan.prefill_line, flush=True)
+    eng = Engine(pack, max_ctx=n_ctx, dll=a.dll, profile=RuntimeProfile.default(pack, dict(plan.env, **over)))
     dll, e = eng.lib.dll, eng._e
     P, I = C.c_void_p, C.c_int
     dll.yskn_verify_nll.argtypes, dll.yskn_verify_nll.restype = [P, P, P, I, I, P, P], I

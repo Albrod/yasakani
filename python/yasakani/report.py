@@ -173,6 +173,7 @@ def run_report(args) -> int:
         rep["machine"] = machine(eng, st, res, pack)
         plan = getattr(args, "context_plan", None)
         rep["machine"]["prefill"] = dict(reading=plan.prefill, line=plan.prefill_line) if plan is not None else None
+        rep["machine"]["edit_copy"] = plan.edit_copy if plan is not None else None
         rep["check"] = res.summary() if res is not None else None
         if st is None:
             rep["note"] = "this engine library is older than 0.1.7: it cannot switch the wide copy passes, so there is nothing to compare"
@@ -220,6 +221,8 @@ def render(rep: Dict[str, object]) -> str:
          ""]
     if m.get("prefill"):
         L.insert(-1, "| Prompt reading | %s |" % m["prefill"]["line"])
+    if m.get("edit_copy"):
+        L.insert(-1, "| Edit copy | %s |" % m["edit_copy"])
     if rep.get("note"):
         L += ["**Note**: " + rep["note"], ""]
     c = rep.get("check")

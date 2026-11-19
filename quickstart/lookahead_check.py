@@ -128,6 +128,28 @@ def first_difference(a, b):
     return min(len(a), len(b)) + 1
 
 
+def engine_plan(pack, gpus, say):
+    """(context, engine settings) as `yasakani chat` chooses them on GPU 0: the context that fits (0.1.3), then the prompt reading
+    (YASAKANI_PREFILL, else auto) and the edit copy (YASAKANI_EDIT_COPY, else the package's default).  An older package without
+    these two settings is used as it is.  The lines the package prints at start are printed with ``say``."""
+    det = gpus.detect(0)
+    note = gpus.untested_note(det)
+    if note:
+        say(note)
+    plan = gpus.plan_context(pack, det)
+    if hasattr(gpus, "use_prefill") and hasattr(gpus, "prefill_mode_of"):
+        gpus.use_prefill(plan, gpus.prefill_mode_of(None), det)
+    if hasattr(gpus, "use_edit_copy") and hasattr(gpus, "edit_copy_of"):
+        gpus.use_edit_copy(plan, gpus.edit_copy_of(None))
+    for line in plan.notes:
+        say(line)
+    if getattr(plan, "prefill_line", ""):
+        say(plan.prefill_line)
+    if getattr(plan, "edit_copy", "") == "on":
+        say("edit copy: on")
+    return plan.max_ctx, dict(plan.env)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="compare generation with and without look-ahead")
     ap.add_argument("--model-dir", required=True)
@@ -159,20 +181,13 @@ def main(argv=None):
     except ImportError:
         gpus = None
     if gpus is not None:
-        det = gpus.detect(0)
-        note = gpus.untested_note(det)
-        if note:
-            say(note)
         try:
-            plan = gpus.plan_context(pack, det)
+            max_ctx, env = engine_plan(pack, gpus, say)
         except YasakaniError as ex:
             say("error: %s" % ex)
             return 2
-        for line in plan.notes:
-            say(line)
-        max_ctx = plan.max_ctx
-        if plan.env:
-            profile = RuntimeProfile.default(pack, plan.env)
+        if env:
+            profile = RuntimeProfile.default(pack, env)
     say(t("load", g=human(pack.weights.stat().st_size)))
     t0 = time.time()
     eng = Engine(pack, dll=a.dll, max_ctx=max_ctx, profile=profile)

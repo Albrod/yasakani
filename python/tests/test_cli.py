@@ -47,6 +47,33 @@ class PrefillOptionTests(unittest.TestCase):
         with open(os.devnull, "w") as null, unittest.mock.patch("sys.stderr", null), self.assertRaises(SystemExit):
             p.parse_args(["chat", "--prefill", "fast"])
 
+    def test_edit_copy_option(self):
+        """--edit-copy on | off on the commands that open the engine; not given = None (then YASAKANI_EDIT_COPY, else the default)."""
+        from yasakani import cli
+        p = cli.build_parser()
+        for cmd in ("chat", "serve", "bench", "selfcheck"):
+            self.assertIsNone(p.parse_args([cmd]).edit_copy, cmd)
+            for mode in ("on", "off"):
+                self.assertEqual(p.parse_args([cmd, "--edit-copy", mode]).edit_copy, mode, cmd)
+        with open(os.devnull, "w") as null, unittest.mock.patch("sys.stderr", null), self.assertRaises(SystemExit):
+            p.parse_args(["chat", "--edit-copy", "auto"])
+
+    def test_wrong_value_fails_first(self):
+        """A wrong YASAKANI_PREFILL / YASAKANI_EDIT_COPY / option is reported before anything else can fail (here: no model folder)."""
+        from yasakani import cli
+        from yasakani._native import YasakaniError
+        missing = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no such model folder")
+        p = cli.build_parser()
+        cases = ((["--prefill", "new"], {"YASAKANI_PREFILL": "", "YASAKANI_EDIT_COPY": "yes"}, "--edit-copy must be one of on, off"),
+                 ([], {"YASAKANI_PREFILL": "fast", "YASAKANI_EDIT_COPY": ""}, "--prefill must be one of auto, new, old"),
+                 (["--edit-copy", "on"], {"YASAKANI_PREFILL": "0", "YASAKANI_EDIT_COPY": ""}, "--prefill must be one of auto, new, old"),
+                 ([], {"YASAKANI_PREFILL": "", "YASAKANI_EDIT_COPY": ""}, "model folder not found"))
+        for extra, env, want in cases:
+            args = p.parse_args(["chat", "--model-dir", missing, "--dll", "none"] + extra)
+            with unittest.mock.patch.dict(os.environ, env), self.assertRaises(YasakaniError) as cm:
+                cli._open_stack(args, warm=False)
+            self.assertIn(want, str(cm.exception), (extra, env))
+
     def test_info_lines(self):
         """yasakani info: the setting, and per GPU the line the start would print."""
         from yasakani import cli
@@ -60,11 +87,16 @@ class PrefillOptionTests(unittest.TestCase):
         self.assertTrue(lines[2].startswith("         GPU 1: prompt reading: as in 0.1.7 (setting auto: 24564 MiB card"))
         with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": "new"}):
             self.assertEqual(cli._prefill_info_lines(found)[2],
-                             "         GPU 1: prompt reading: new (setting new; 24564 MiB card: prompt sizes of 0.1.7)")
-        with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": "fast"}):
+                             "         GPU 1: prompt reading: new (setting new; 24564 MiB card, so prompt sizes of 0.1.7)")
+        with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": "fast", "YASAKANI_EDIT_COPY": ""}):
             lines = cli._prefill_info_lines(found)
-        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(lines), 2)
         self.assertIn("--prefill must be one of auto, new, old", lines[0])
+        self.assertEqual(lines[1], "edit     edit copy: setting %s (YASAKANI_EDIT_COPY / --edit-copy)" % G.EDIT_COPY_DEFAULT)
+        with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": "", "YASAKANI_EDIT_COPY": "on"}):
+            self.assertEqual(cli._prefill_info_lines(found)[-1], "edit     edit copy: setting on (YASAKANI_EDIT_COPY / --edit-copy)")
+        with unittest.mock.patch.dict(os.environ, {"YASAKANI_PREFILL": "", "YASAKANI_EDIT_COPY": "yes"}):
+            self.assertIn("--edit-copy must be one of on, off", cli._prefill_info_lines(found)[-1])
 
     def test_report_row(self):
         """yasakani report: the prompt reading row under the wide passes, when the plan is known."""
@@ -82,6 +114,9 @@ class PrefillOptionTests(unittest.TestCase):
         rows = report.render(dict(machine=dict(m, prefill=dict(reading="new", line="prompt reading: new (setting auto: 32607 MiB card)")))).split("\n")
         self.assertIn(row, rows)
         self.assertTrue(rows[rows.index(row) - 1].startswith("| Wide passes"))
+        self.assertNotIn("Edit copy", "\n".join(rows))
+        for mode in ("on", "off"):
+            self.assertIn("| Edit copy | %s |" % mode, report.render(dict(machine=dict(m, edit_copy=mode))))
 
 
 @unittest.skipUnless(HAVE_TOK and IS_POSIX, "needs the Qwen3.8 tokenizer files (YASAKANI_TEST_MODEL_DIR) and a POSIX test machine")

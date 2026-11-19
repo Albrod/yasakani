@@ -43,6 +43,11 @@ SMALL_CARD_ENV = {"YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"}
 PREFILL_MODES = ("auto", "new", "old")
 PREFILL_MODE_ENV = "YASAKANI_PREFILL"
 OLD_PREFILL_ENV = dict(SMALL_CARD_ENV, YSKN_Q35_PF_V2="0")
+# --edit-copy (or YASAKANI_EDIT_COPY): on | off, passed to the engine as YSKN_EDIT_COPY=1 / 0.  EDIT_COPY_DEFAULT is the default when
+# neither is given; changing it is all it takes to change the default.
+EDIT_COPY_MODES = ("on", "off")
+EDIT_COPY_ENV = "YASAKANI_EDIT_COPY"
+EDIT_COPY_DEFAULT = "off"
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the released models fit on (fastest model only)
 QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
 HEAD_SLOWER = "about 3%"              # each pass without the output head, measured on the RTX 5090
@@ -323,6 +328,7 @@ class ContextPlan:
     parallel: int = 1                     # stream slots the context was chosen for (plan_parallel; 1 = one request at a time)
     prefill: str = ""                     # the prompt reading use_prefill chose: "new" or "old" ("" = not chosen yet)
     prefill_line: str = ""                # the one line on that choice, printed at start
+    edit_copy: str = ""                   # use_edit_copy: "on" or "off" ("" = not chosen yet)
 
 
 def _small_card_env(plan: "ContextPlan", g) -> None:
@@ -342,29 +348,39 @@ def prefill_mode_of(value: Optional[str] = None, environ: Optional[Mapping[str, 
     return v
 
 
-def _card_total(g) -> Optional[int]:
-    """The total memory of the card in MiB (a GpuInfo or a Detected: for several candidates, the smallest), None when not known."""
+def _card_total(g) -> Tuple[Optional[int], int]:
+    """(total memory of the card in MiB or None when not known, how many GPUs it was chosen from).  ``g`` is a GpuInfo or a Detected;
+    for several candidates (CUDA's numbering cannot be matched) the smallest total counts, when every total is known."""
     if isinstance(g, Detected):
-        g = g.worst()
-    return g.total_mib if g is not None else None
+        if len(g.candidates) > 1:
+            totals = [c.total_mib for c in g.candidates]
+            return (None if None in totals else min(totals)), len(totals)
+        g = g.gpu
+    return (g.total_mib if g is not None else None), 1
 
 
 def prefill_choice(mode: str, g) -> Tuple[str, Dict[str, str], str]:
     """What ``mode`` (auto | new | old) means on the card ``g`` (a GpuInfo, a Detected or None): (reading, engine settings, line).
     reading is "new" or "old"; the line says which reading and why, printed once at start (as the line of the wide copy passes)."""
-    total = _card_total(g)
+    total, n = _card_total(g)
     big = total is not None and total >= FULL_CONTEXT_MIN_TOTAL_MIB
-    card = "%d MiB card" % total if total is not None else "card memory not known"
+    if total is None:
+        card = "card memory not known"
+    elif n > 1:
+        card = "smallest of %d GPUs: %d MiB" % (n, total)
+    else:
+        card = "%d MiB card" % total
     if mode == "old":
         return "old", dict(OLD_PREFILL_ENV), "prompt reading: as in 0.1.7 (setting old)"
     if mode == "new":
         if big:
             return "new", {}, "prompt reading: new (setting new)"
-        return "new", dict(SMALL_CARD_ENV), "prompt reading: new (setting new; %s: prompt sizes of 0.1.7)" % card
+        return "new", dict(SMALL_CARD_ENV), "prompt reading: new (setting new; %s, so prompt sizes of 0.1.7)" % card
     if big:
         return "new", {}, "prompt reading: new (setting auto: %s)" % card
     why = "%s, new only from %d MiB" % (card, FULL_CONTEXT_MIN_TOTAL_MIB) if total is not None else card
-    return "old", dict(OLD_PREFILL_ENV), "prompt reading: as in 0.1.7 (setting auto: %s; --prefill new to try it)" % why
+    return "old", dict(OLD_PREFILL_ENV), ("prompt reading: as in 0.1.7 (setting auto: %s; --prefill new or %s=new to try it)"
+                                          % (why, PREFILL_MODE_ENV))
 
 
 def use_prefill(plan: "ContextPlan", mode: str, g=None) -> "ContextPlan":
@@ -374,6 +390,25 @@ def use_prefill(plan: "ContextPlan", mode: str, g=None) -> "ContextPlan":
     reading, env, line = prefill_choice(mode, g)
     plan.env.update(env)
     plan.prefill, plan.prefill_line = reading, line
+    return plan
+
+
+def edit_copy_of(value: Optional[str] = None, environ: Optional[Mapping[str, str]] = None) -> str:
+    """on | off: ``value`` (the command line), else ``YASAKANI_EDIT_COPY``, else EDIT_COPY_DEFAULT."""
+    env = os.environ if environ is None else environ
+    v = value if value not in (None, "") else env.get(EDIT_COPY_ENV, "")
+    v = (v or EDIT_COPY_DEFAULT).strip().lower()
+    if v not in EDIT_COPY_MODES:
+        raise YasakaniError("%s / --edit-copy must be one of %s, not %r" % (EDIT_COPY_ENV, ", ".join(EDIT_COPY_MODES), v))
+    return v
+
+
+def use_edit_copy(plan: "ContextPlan", mode: str) -> "ContextPlan":
+    """Pass ``mode`` (on | off) to the engine as YSKN_EDIT_COPY=1 / 0 in ``plan.env``, and keep it in ``plan.edit_copy``."""
+    if mode not in EDIT_COPY_MODES:
+        raise YasakaniError("--edit-copy must be one of %s, not %r" % (", ".join(EDIT_COPY_MODES), mode))
+    plan.env["YSKN_EDIT_COPY"] = "1" if mode == "on" else "0"
+    plan.edit_copy = mode
     return plan
 
 

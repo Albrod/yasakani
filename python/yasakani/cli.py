@@ -131,6 +131,8 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
                     help="prompt reading: auto (default; the new, faster reading on a card with 30,000 MiB or more, else as in 0.1.7), "
                          "new (the new reading on any card; under 30,000 MiB with the prompt sizes of 0.1.7) or old (prompt reading and "
                          "passes of 64 tokens as in 0.1.7).  Default: $YASAKANI_PREFILL or auto")
+    sp.add_argument("--edit-copy", choices=gpus.EDIT_COPY_MODES, default=None,
+                    help="edit copy: on or off.  Default: $YASAKANI_EDIT_COPY or %s" % gpus.EDIT_COPY_DEFAULT)
     _add_wide_args(sp)
 
 
@@ -195,6 +197,8 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1):
     from .chat import ChatRunner
     from .engine import Engine
     from .textio import ChatFormatter
+    prefill = gpus.prefill_mode_of(getattr(args, "prefill", None))       # a wrong YASAKANI_PREFILL or YASAKANI_EDIT_COPY fails first
+    edit_copy = gpus.edit_copy_of(getattr(args, "edit_copy", None))
     pack = ModelPack.load(_model_dir(args))
     fmt = ChatFormatter(pack.root)
     vision = _vision(args)                       # wrong image input options fail here, before the long load
@@ -223,20 +227,25 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1):
         plan = gpus.plan_context(pack, det)
     elif plan is None:                           # a given context is used as it is; the draft model's output head only where it fits
         plan = gpus.plan_given_context(pack, det, args.max_ctx)
-    gpus.use_prefill(plan, gpus.prefill_mode_of(getattr(args, "prefill", None)), det)    # a wrong YASAKANI_PREFILL fails here, before the load
+    gpus.use_prefill(plan, prefill, det)
+    gpus.use_edit_copy(plan, edit_copy)
     args.parallel_planned, args.context_plan = n, plan
     for line in plan.notes:
         _say(line)
     _say(plan.prefill_line)
+    if plan.edit_copy == "on":
+        _say("edit copy: on")
     max_ctx = plan.max_ctx
     profile = RuntimeProfile.default(pack, plan.env) if plan.env else None
+    replaced = [k for k in plan.env if k in os.environ]     # set in the shell, but the plan's value is used: named with the removed ones
     wide = widecheck.mode_of(getattr(args, "wide", None))         # 0.1.7: a wrong YASAKANI_WIDE fails here, before the long load
     _say("loading the model (%s of weights) ..." % _human(pack.weights.stat().st_size))
     t0 = time.time()
     eng = Engine(pack, max_ctx=max_ctx, device=device, dll=args.dll, profile=profile, wide=wide, **({"lib": lib} if lib is not None else {}))
     try:
-        if eng.removed_env:
-            _say("note: ignored %d YSKN_* setting(s) from the environment: %s" % (len(eng.removed_env), ", ".join(sorted(eng.removed_env))))
+        ignored = sorted(set(eng.removed_env) | set(replaced))
+        if ignored:
+            _say("note: ignored %d YSKN_* setting(s) from the environment: %s" % (len(ignored), ", ".join(ignored)))
         kept = sorted(k for k in os.environ if k.startswith("YSKN_TEST_"))
         if kept:
             _say("note: kept %s from the environment (read only by an engine library built with the test exports)" % ", ".join(kept))
@@ -513,14 +522,17 @@ def _wide_info_lines(found) -> List[str]:
 
 
 def _prefill_info_lines(found) -> List[str]:
-    """The setting of the prompt reading and, per GPU, what it chooses there (the line printed at start)."""
+    """The setting of the prompt reading and, per GPU, what it chooses there (the line printed at start); the setting of the edit copy."""
     try:
         mode = gpus.prefill_mode_of(None)
+        out = ["prefill  prompt reading: setting %s (YASAKANI_PREFILL / --prefill)" % mode]
+        out += ["         GPU %d: %s" % (g.index, gpus.prefill_choice(mode, g)[2]) for g in found]
     except YasakaniError as ex:
-        return ["prefill  " + str(ex)]
-    out = ["prefill  prompt reading: setting %s (YASAKANI_PREFILL / --prefill)" % mode]
-    for g in found:
-        out.append("         GPU %d: %s" % (g.index, gpus.prefill_choice(mode, g)[2]))
+        out = ["prefill  " + str(ex)]
+    try:
+        out.append("edit     edit copy: setting %s (YASAKANI_EDIT_COPY / --edit-copy)" % gpus.edit_copy_of(None))
+    except YasakaniError as ex:
+        out.append("edit     " + str(ex))
     return out
 
 

@@ -515,6 +515,19 @@ class PrefillModeTests(unittest.TestCase):
         self.assertEqual(len(two.candidates), 2)         # CUDA's order is not PCI's here: either GPU may be device 0
         self.assertEqual(G.prefill_choice("auto", two)[0], "old")
         self.assertEqual(G.prefill_choice("auto", det_of(*rows, environ={"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}))[0], "new")
+        # the line says that the smallest of the GPUs decided, not that the engine runs on a 24 GB card
+        self.assertEqual(G.prefill_choice("auto", two)[2], "prompt reading: as in 0.1.7 (setting auto: smallest of 2 GPUs: 24564 MiB, "
+                                                           "new only from 30000 MiB; --prefill new or YASAKANI_PREFILL=new to try it)")
+        self.assertEqual(G.prefill_choice("new", two)[2],
+                         "prompt reading: new (setting new; smallest of 2 GPUs: 24564 MiB, so prompt sizes of 0.1.7)")
+        self.assertEqual(G.prefill_choice("auto", det_of(*rows, environ={"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}))[2],
+                         "prompt reading: new (setting auto: 32607 MiB card)")
+        # free memory not readable, totals known: the totals still decide, and the line gives them
+        bigs = det_of("0, GPU-0, NVIDIA GeForce RTX 5090, 12.0, 32607, [N/A], 616.92", "1, GPU-1, NVIDIA RTX A6000, 8.6, 49140, [N/A], 616.92")
+        self.assertEqual(len(bigs.candidates), 2)
+        self.assertEqual(G.prefill_choice("auto", bigs)[0::2], ("new", "prompt reading: new (setting auto: smallest of 2 GPUs: 32607 MiB)"))
+        mixed = det_of("0, GPU-0, NVIDIA GeForce RTX 5090, 12.0, 32607, [N/A], 616.92", "1, GPU-1, NVIDIA GeForce RTX 4080, 8.9, [N/A], [N/A], 616.92")
+        self.assertIn("card memory not known", G.prefill_choice("auto", mixed)[2])
 
     def test_auto_on_32_gb_is_as_before(self):
         """auto on the RTX 5090 adds nothing: the plan is the one the plan functions give alone, as before --prefill new."""
@@ -536,16 +549,18 @@ class PrefillModeTests(unittest.TestCase):
         lines = {k: G.prefill_choice(k[0], det_of(self.CARDS[k[1]]))[2] for k in self.WANT}
         self.assertEqual(lines[("auto", "32 GB")], "prompt reading: new (setting auto: 32607 MiB card)")
         self.assertEqual(lines[("auto", "24 GB")],
-                         "prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; --prefill new to try it)")
-        self.assertEqual(lines[("auto", "unknown")], "prompt reading: as in 0.1.7 (setting auto: card memory not known; --prefill new to try it)")
+                         "prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; "
+                         "--prefill new or YASAKANI_PREFILL=new to try it)")
+        self.assertEqual(lines[("auto", "unknown")], "prompt reading: as in 0.1.7 (setting auto: card memory not known; "
+                         "--prefill new or YASAKANI_PREFILL=new to try it)")
         self.assertEqual(lines[("new", "32 GB")], "prompt reading: new (setting new)")
-        self.assertEqual(lines[("new", "16 GB")], "prompt reading: new (setting new; 16311 MiB card: prompt sizes of 0.1.7)")
-        self.assertEqual(lines[("new", "unknown")], "prompt reading: new (setting new; card memory not known: prompt sizes of 0.1.7)")
+        self.assertEqual(lines[("new", "16 GB")], "prompt reading: new (setting new; 16311 MiB card, so prompt sizes of 0.1.7)")
+        self.assertEqual(lines[("new", "unknown")], "prompt reading: new (setting new; card memory not known, so prompt sizes of 0.1.7)")
         self.assertEqual(lines[("old", "24 GB")], "prompt reading: as in 0.1.7 (setting old)")
         for k, line in lines.items():
             self.assertTrue(line.startswith("prompt reading: " + ("new" if self.WANT[k][1] == "new" else "as in 0.1.7")), k)
             self.assertNotIn("\n", line)
-            self.assertLess(len(line), 120, k)
+            self.assertLess(len(line), 140, k)
         plan = G.use_prefill(G.ContextPlan(), "auto", det_of(self.CARDS["16 GB"]))
         self.assertEqual((plan.prefill, plan.prefill_line), ("old", lines[("auto", "16 GB")]))
 
@@ -559,6 +574,61 @@ class PrefillModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             prof = RuntimeProfile.default(support.make_pack(Path(t)), G.use_prefill(G.ContextPlan(), "old").env)
         self.assertEqual([prof.env[k] for k in ("YSKN_Q35_PF_V2", "YSKN_Q35_PMAX", "YSKN_Q35_LAYER_ROWS")], ["0", "1024", "4096"])
+
+
+class EditCopyTests(unittest.TestCase):
+    """--edit-copy / YASAKANI_EDIT_COPY: on | off, passed through the plan as YSKN_EDIT_COPY=1 / 0; EDIT_COPY_DEFAULT when neither is
+    given.  The same on every card and with every prompt reading."""
+
+    def test_default(self):
+        self.assertEqual(G.EDIT_COPY_DEFAULT, "off")
+        self.assertIn(G.EDIT_COPY_DEFAULT, G.EDIT_COPY_MODES)
+        self.assertEqual(G.EDIT_COPY_MODES, ("on", "off"))
+
+    def test_mode_of_with_either_default(self):
+        """Changing EDIT_COPY_DEFAULT alone changes the default, and nothing else."""
+        for default in ("off", "on"):
+            with mock.patch.object(G, "EDIT_COPY_DEFAULT", default):
+                self.assertEqual(G.edit_copy_of(None, {}), default)
+                self.assertEqual(G.edit_copy_of("", {}), default)
+                self.assertEqual(G.edit_copy_of(None, {"YASAKANI_EDIT_COPY": ""}), default)
+                self.assertEqual(G.edit_copy_of(None, {"YASAKANI_EDIT_COPY": " ON "}), "on")
+                self.assertEqual(G.edit_copy_of(None, {"YASAKANI_EDIT_COPY": "off"}), "off")
+                self.assertEqual(G.edit_copy_of("off", {"YASAKANI_EDIT_COPY": "on"}), "off")      # the option wins
+                self.assertEqual(G.edit_copy_of("on", {"YASAKANI_EDIT_COPY": "off"}), "on")
+                plan = G.use_edit_copy(G.ContextPlan(), G.edit_copy_of(None, {}))
+                self.assertEqual((plan.env, plan.edit_copy), ({"YSKN_EDIT_COPY": "1" if default == "on" else "0"}, default))
+                from yasakani import cli
+                with mock.patch.dict(os.environ, {"YASAKANI_EDIT_COPY": ""}):
+                    sub = next(a for a in cli.build_parser()._actions if type(a).__name__ == "_SubParsersAction")
+                    act = next(a for a in sub.choices["chat"]._actions if a.dest == "edit_copy")
+                    self.assertTrue(act.help.endswith("$YASAKANI_EDIT_COPY or %s" % default), act.help)
+
+    def test_wrong_value(self):
+        for bad in ("yes", "1", "auto"):
+            with self.assertRaises(YasakaniError) as cm:
+                G.edit_copy_of(bad, {})
+            self.assertIn("--edit-copy must be one of on, off", str(cm.exception))
+            with self.assertRaises(YasakaniError):
+                G.edit_copy_of(None, {"YASAKANI_EDIT_COPY": bad})
+            with self.assertRaises(YasakaniError):
+                G.use_edit_copy(G.ContextPlan(), bad)
+
+    def test_plan_on_every_card(self):
+        """Only YSKN_EDIT_COPY is added; the context and the prompt reading stay as they were."""
+        for line in PrefillModeTests.CARDS.values():
+            det = det_of(line)
+            for prefill in G.PREFILL_MODES:
+                before = G.use_prefill(G.plan_given_context(FakePack(FASTEST), det, 32768), prefill, det)
+                for mode, v in (("on", "1"), ("off", "0")):
+                    plan = G.use_edit_copy(G.use_prefill(G.plan_given_context(FakePack(FASTEST), det, 32768), prefill, det), mode)
+                    self.assertEqual(plan.env, dict(before.env, YSKN_EDIT_COPY=v))
+                    self.assertEqual((plan.max_ctx, plan.notes, plan.prefill, plan.prefill_line),
+                                     (before.max_ctx, before.notes, before.prefill, before.prefill_line))
+        from yasakani.runtime import RuntimeProfile
+        with tempfile.TemporaryDirectory() as t:
+            prof = RuntimeProfile.default(support.make_pack(Path(t)), G.use_edit_copy(G.ContextPlan(), "on").env)
+        self.assertEqual(prof.env["YSKN_EDIT_COPY"], "1")
 
 
 class QuickstartTests(unittest.TestCase):
@@ -657,6 +727,73 @@ if bad:
 for g in gpus:
     print(", ".join(str(g[f]) + (" MiB" if units and f.startswith("memory.") else "") for f in fields))
 '''
+
+
+def load_lookahead_check():
+    """quickstart/lookahead_check.py next to the quickstart under test; None when it is not there (the engine zip)."""
+    qs = os.environ.get("YASAKANI_QUICKSTART")
+    for p in ((Path(qs).parent / "lookahead_check.py") if qs else None, ROOT.parent / "quickstart" / "lookahead_check.py"):
+        if p and p.is_file():
+            spec = importlib.util.spec_from_file_location("yasakani_lookahead_check_under_test", str(p))
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            return m
+    return None
+
+
+class CompareScriptTests(unittest.TestCase):
+    """The quickstart's "compare" (lookahead_check.py) opens the engine with the settings `yasakani chat` uses: the context plan, the
+    prompt reading and the edit copy; with an older package, which has no prompt reading or edit copy settings, the plan alone."""
+
+    CARDS = PrefillModeTests.CARDS
+    OLD_ENGINE = {"YSKN_Q35_PF_V2": "0", "YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lc = load_lookahead_check()
+        if cls.lc is None:
+            raise unittest.SkipTest("quickstart/lookahead_check.py not found (set YASAKANI_QUICKSTART)")
+
+    def plan(self, card, gpus=G, environ=None):
+        said = []
+        with mock.patch.object(G, "query", return_value=G.parse(self.CARDS[card] + "\n")), \
+                mock.patch.dict(os.environ, environ or {"YASAKANI_PREFILL": "", "YASAKANI_EDIT_COPY": ""}):
+            max_ctx, env = self.lc.engine_plan(FakePack(FASTEST), gpus, said.append)
+        return max_ctx, env, said
+
+    def test_settings_on_each_card(self):
+        from yasakani.runtime import RuntimeProfile
+        for card, prefill in (("32 GB", {}), ("24 GB", self.OLD_ENGINE), ("16 GB", self.OLD_ENGINE), ("unknown", self.OLD_ENGINE)):
+            max_ctx, env, said = self.plan(card)
+            det = det_of(self.CARDS[card])
+            want = G.use_edit_copy(G.use_prefill(G.plan_context(FakePack(FASTEST), det), "auto", det), G.EDIT_COPY_DEFAULT)
+            self.assertEqual((max_ctx, env), (want.max_ctx, want.env), card)                # the same as `yasakani chat`
+            self.assertEqual({k: env[k] for k in prefill}, prefill, card)
+            self.assertEqual(env.get("YSKN_Q35_PF_V2"), "0" if prefill else None, card)
+            self.assertEqual(env["YSKN_EDIT_COPY"], "1" if G.EDIT_COPY_DEFAULT == "on" else "0", card)
+            self.assertIn(want.prefill_line, said, card)
+            with tempfile.TemporaryDirectory() as t:                                      # the profile the script opens the engine with
+                prof = RuntimeProfile.default(support.make_pack(Path(t)), env)
+            for k, v in prefill.items():
+                self.assertEqual(prof.env[k], v, card)
+
+    def test_environment_and_wrong_value(self):
+        max_ctx, env, said = self.plan("24 GB", environ={"YASAKANI_PREFILL": "new", "YASAKANI_EDIT_COPY": "on"})
+        self.assertNotIn("YSKN_Q35_PF_V2", env)
+        self.assertEqual((env["YSKN_Q35_PMAX"], env["YSKN_EDIT_COPY"]), ("1024", "1"))
+        self.assertIn("edit copy: on", said)
+        with self.assertRaises(YasakaniError):
+            self.plan("24 GB", environ={"YASAKANI_PREFILL": "fast", "YASAKANI_EDIT_COPY": ""})
+
+    def test_older_package(self):
+        """A package without use_prefill / use_edit_copy (before this release): the plan as it is, no error, no extra line."""
+        import types
+        older = types.SimpleNamespace(detect=G.detect, untested_note=G.untested_note, plan_context=G.plan_context)
+        for card in ("32 GB", "24 GB", "unknown"):
+            max_ctx, env, said = self.plan(card, gpus=older, environ={"YASAKANI_PREFILL": "old", "YASAKANI_EDIT_COPY": "on"})
+            plan = G.plan_context(FakePack(FASTEST), det_of(self.CARDS[card]))
+            self.assertEqual((max_ctx, env), (plan.max_ctx, plan.env), card)
+            self.assertFalse([x for x in said if x.startswith(("prompt reading", "edit copy"))], card)
 
 
 @unittest.skipUnless(support.tokenizer_dir() is not None and os.name == "posix",
@@ -849,6 +986,20 @@ class CliGpuTests(unittest.TestCase):
         self.assertTrue(lines, r.stderr)
         self.assertEqual(set(lines), {"device=0 order=PCI_BUS_ID visible=GPU-1"}, r.stderr)
 
+    def test_report_prompt_reading(self):
+        """yasakani report on a 24 GB card: the reading of 0.1.7 in machine.prefill and in the Markdown row."""
+        from yasakani import report
+        r = self.run_cli([self.gpu("NVIDIA GeForce RTX 4090", "8.9", 24564, 1500)], "report", *self.common(), "--no-bench",
+                         "--no-selfcheck", "--json", timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rep = json.loads(r.stdout)
+        line = ("prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; "
+                "--prefill new or YASAKANI_PREFILL=new to try it)")
+        self.assertEqual(rep["machine"]["prefill"], dict(reading="old", line=line))
+        self.assertEqual(rep["machine"]["edit_copy"], G.EDIT_COPY_DEFAULT)
+        self.assertIn(line, r.stderr)
+        self.assertIn("| Prompt reading | %s |" % line, report.render(rep).split("\n"))
+
     def test_selfcheck_exit_codes(self):
         ref = self.folder.parent / "ref_gpu.json"
         args = ["--model-dir", str(self.folder), "--dll", self.dll, "--max-ctx", "4096"]
@@ -1012,6 +1163,92 @@ class OpenStackTests(unittest.TestCase):
                 self.assertEqual(eng.profile.env["YSKN_Q35_PMAX"], "1024" if want else "2048")
             finally:
                 eng.close()
+
+    def test_edit_copy_reaches_the_engine(self):
+        """--edit-copy and YASAKANI_EDIT_COPY set YSKN_EDIT_COPY for the engine; neither = EDIT_COPY_DEFAULT; a YSKN_EDIT_COPY left in
+        the shell does not count."""
+        from yasakani import cli
+        folder = support.make_real_folder("editcopy")
+        self.addCleanup(shutil.rmtree, folder.parent, True)
+        gpus = G.parse(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 1107))
+        saved = {k: v for k, v in os.environ.items() if k.startswith("YSKN_") or k == "YASAKANI_EDIT_COPY"}
+
+        def restore():
+            for k in [k for k in os.environ if k.startswith("YSKN_") or k == "YASAKANI_EDIT_COPY"]:
+                del os.environ[k]
+            os.environ.update(saved)
+        self.addCleanup(restore)
+        base = ["chat", "--model-dir", str(folder), "--dll", str(support.stub_path())]
+        for default in ("off", "on"):
+            d = "1" if default == "on" else "0"
+            for extra, env, want in (([], None, d), (["--edit-copy", "on"], "off", "1"), ([], "on", "1"), ([], "off", "0"),
+                                     (["--edit-copy", "off"], "on", "0")):
+                os.environ.pop("YASAKANI_EDIT_COPY", None)
+                os.environ["YSKN_EDIT_COPY"] = "1" if want == "0" else "0"          # left in the shell: replaced
+                if env:
+                    os.environ["YASAKANI_EDIT_COPY"] = env
+                args = cli.build_parser().parse_args(base + extra)
+                err = io.StringIO()
+                with mock.patch.object(G, "query", return_value=gpus), mock.patch.object(G, "EDIT_COPY_DEFAULT", default),                         contextlib.redirect_stderr(err):
+                    pack, eng, fmt, runner = cli._open_stack(args, warm=False)
+                try:
+                    # the shell's value is not used, and the note says so (as 0.1.7 said for the settings it removed)
+                    notes = [x for x in err.getvalue().splitlines() if x.startswith("note: ignored ")]
+                    self.assertEqual(len(notes), 1, err.getvalue())
+                    self.assertIn("YSKN_EDIT_COPY", notes[0])
+                    self.assertEqual(eng.profile.env["YSKN_EDIT_COPY"], want, (default, extra, env))
+                    self.assertEqual(os.environ["YSKN_EDIT_COPY"], want, (default, extra, env))
+                    self.assertEqual(args.context_plan.edit_copy, "on" if want == "1" else "off")
+                finally:
+                    eng.close()
+
+    def stack(self, card, argv, parallel=1):
+        """_open_stack in this process on the card ``card`` (PrefillModeTests.CARDS): the engine's settings, and the args."""
+        from yasakani import cli
+        folder = support.make_real_folder("card")
+        self.addCleanup(shutil.rmtree, folder.parent, True)
+        keys = ("YASAKANI_PREFILL", "YASAKANI_EDIT_COPY")
+        saved = {k: v for k, v in os.environ.items() if k.startswith("YSKN_") or k in keys}
+
+        def restore():
+            for k in [k for k in os.environ if k.startswith("YSKN_") or k in keys]:
+                del os.environ[k]
+            os.environ.update(saved)
+        self.addCleanup(restore)
+        for k in [k for k in os.environ if k.startswith("YSKN_") or k in keys]:
+            del os.environ[k]
+        args = cli.build_parser().parse_args(argv + ["--model-dir", str(folder), "--dll", str(support.stub_path())])
+        with mock.patch.object(G, "query", return_value=G.parse(PrefillModeTests.CARDS[card] + "\n")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            pack, eng, fmt, runner = cli._open_stack(args, warm=False, parallel=parallel)
+        try:
+            env = {k: eng.profile.env.get(k) for k in ("YSKN_Q35_PF_V2", "YSKN_Q35_PMAX", "YSKN_Q35_LAYER_ROWS", "YSKN_EDIT_COPY")}
+            self.assertEqual(env, {k: os.environ.get(k) for k in env}, card)                  # what the engine reads
+        finally:
+            eng.close()
+        return env, args
+
+    def test_settings_on_each_card(self):
+        """auto and new on a 32 GB card, a 24 GB card and a card of unknown memory: the settings the engine gets."""
+        from yasakani.runtime import DEFAULT_ENV
+        big = (None, DEFAULT_ENV["YSKN_Q35_PMAX"], DEFAULT_ENV["YSKN_Q35_LAYER_ROWS"])
+        old, small_new = ("0", "1024", "4096"), (None, "1024", "4096")
+        off = "1" if G.EDIT_COPY_DEFAULT == "on" else "0"
+        want = {("32 GB", "auto"): big, ("24 GB", "auto"): old, ("unknown", "auto"): old,
+                ("32 GB", "new"): big, ("24 GB", "new"): small_new, ("unknown", "new"): small_new}
+        self.assertEqual(big[1:], ("2048", "8192"))
+        for (card, mode), (pf, pmax, rows) in want.items():
+            env, args = self.stack(card, ["chat"] + (["--prefill", mode] if mode != "auto" else []))
+            self.assertEqual(env, {"YSKN_Q35_PF_V2": pf, "YSKN_Q35_PMAX": pmax, "YSKN_Q35_LAYER_ROWS": rows, "YSKN_EDIT_COPY": off},
+                             (card, mode))
+            self.assertEqual(args.context_plan.prefill, "old" if pf == "0" else "new", (card, mode))
+
+    def test_parallel_on_24_gb(self):
+        """serve --parallel 2 on a 24 GB card: the context for two requests, and the reading of 0.1.7 as for one."""
+        env, args = self.stack("24 GB", ["serve", "--edit-copy", "on"], parallel=2)
+        self.assertEqual(args.parallel_planned, 2)
+        self.assertEqual(args.context_plan.parallel, 2)
+        self.assertEqual(env, {"YSKN_Q35_PF_V2": "0", "YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096", "YSKN_EDIT_COPY": "1"})
 
     def test_given_context_head_reaches_the_engine(self):
         """--max-ctx: the head is left out where it does not fit beside the given context, and loaded where it does."""
