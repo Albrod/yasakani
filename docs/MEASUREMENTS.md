@@ -606,8 +606,9 @@ reading and the edit copy work: [TECHNOLOGY.md](TECHNOLOGY.md), 5.5 and chapter 
   starting `2d64c3b4`) with the 0.1.7 Python package.
 * Python package: the checks on the GPU used the 0.2.0 library with a package that differed from the 0.2.0 package in its version
   strings (0.1.7 instead of 0.2.0). For some checks it also had the edit copy off by default (in those, the runs with the edit copy
-  on turned it on with `--edit-copy on` or `YASAKANI_EDIT_COPY=on`), an earlier wording of the lines it prints for `--prefill new`,
-  and an earlier form of the rule that leaves memory free for `--prefill new` on cards under 30,000 MiB. That rule acts only with
+  on turned it on through the package's `--edit-copy on` setting or with `YASAKANI_EDIT_COPY=on`), an earlier wording of the lines it
+  prints for `--prefill new`, and an earlier form of the rule that leaves memory free for `--prefill new` on cards under 30,000 MiB.
+  That rule acts only with
   `--prefill new` on such cards. The runs in "Cards under 30,000 MiB" below used the released rule.
 * Default settings (`--prefill auto`, which is the new reading on the RTX 5090) unless said. Whether the edit copy was on or off is
   named where it matters.
