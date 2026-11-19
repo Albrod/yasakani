@@ -59,7 +59,7 @@ can be given with `--model-dir` or `YASAKANI_MODEL_DIR`.
 | `yasakani serve` | starts the OpenAI-compatible server (below) |
 | `yasakani bench` | speed measurement: greedy, fixed length, your own prompts with `--prompts-file`; `--json` for a machine-readable result; `--edit` runs the edit tasks of the speed tables ([below](#bench---edit-the-edit-tasks-of-the-speed-tables)); `--concurrency N` sends N requests at once (experimental) |
 | `yasakani update` | looks for a newer release on GitHub; the only command that contacts the network ([below](#yasakani-update)) |
-| `yasakani report` | checks the wide copy passes on this GPU and prints a report to paste on GitHub ([below](#wide-copy-passes-per-gpu-017-test-build)) |
+| `yasakani report` | checks the wide copy passes on this GPU and prints a report to paste on GitHub ([below](#wide-copy-passes-per-gpu)) |
 
 Loading the model takes about a minute; `serve` answers `/health` with `503 loading` until it is ready.
 
@@ -99,25 +99,28 @@ and whether wide copy passes are used, so that a pasted result says what it was 
 fit the context (`--max-ctx`; the long JSONL edit needs 18,640 tokens with thinking off and 39,448 with `--think`) is skipped, and the
 exit code is then 1.
 
-Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used by default on compute capability 12.x (RTX 50
-series) only, and were measured on the RTX 5090 only. On other GPUs the copying uses passes of up to 16 tokens, unless `--wide on` is given
-and the check of this test build passes on that card; the header says which widths are open. With an
-engine library of 0.1.7 the header gives the widths the engine has open ([below](#wide-copy-passes-per-gpu-017-test-build)), and each row
+Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used where the check on the card opened them
+(since 0.2.0 on RTX 30, 40 and 50 cards; up to 0.1.6 on compute capability 12.x only), and were measured by us on the RTX 5090 only. The
+header gives the widths the engine has open ([below](#wide-copy-passes-per-gpu)), and each row
 of `--json` also has the SHA-256 of the generated ids, the back-offs of the copy loop and its final times of copy cycles. The
 thinking-off tables were measured through the server's stream (2 runs per task), so these numbers are close to them, not the same. The
 code-edit file has one e-mail address replaced by `<email>`, as in `bench/`. YASAKANI's thinking-off measurements of November 15 (in the
 README: the speed table and "What 0.1.4 changed") used this same text; every earlier record of the code edit in `bench/` (November 3 to
 8; among them the other engines' rows and YASAKANI's thinking-on rows) had the address itself, 4 prompt tokens more.
 
-## Wide copy passes per GPU (0.1.7 test build)
+<a name="wide-copy-passes-per-gpu-017-test-build"></a>
 
-0.1.7 is a test build (package version 0.1.7.dev1). Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) were measured on the RTX 5090
-only. 0.1.7 lets each GPU decide which widths (32, 48, 64 rows) it uses (`yasakani/widecheck.py`):
+## Wide copy passes per GPU
+
+Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) were measured by us on the RTX 5090 only. Since 0.2.0
+each GPU decides which widths (32, 48, 64 rows) it uses (`yasakani/widecheck.py`; first in the 0.1.7 test build). Only answers that copy
+the input, such as edits, get faster; normal prose does not. With `serve --parallel N` a request that runs alone uses the opened widths;
+passes shared by several requests carry at most 16 rows together and do not use them.
 
 | `--wide` / `YASAKANI_WIDE` | RTX 50 (code sm_120) | RTX 30 / 40 (code sm_86 / sm_89) |
 |---|---|---|
-| `auto` (default) | on; a width the check finds slower is left out | off, as in 0.1.6 |
-| `on` | as `auto` | only the widths the check finds correct and faster; none when it cannot check |
+| `auto` (default) | on; a width the check finds slower is left out | only the widths the check finds correct and faster; none when it cannot check (up to 0.1.6: off) |
+| `on` | as `auto` | as `auto` |
 | `off` | off | off |
 | `force` | every width, no check | every width, no check (to compare) |
 
@@ -147,7 +150,7 @@ The result is kept in `wide_check.json` (in `YASAKANI_CACHE_DIR`, else `%LOCALAP
 `~/.cache/yasakani`) for 30 days; the file holds no path and only a hash of the GPU's UUID. If during generation the engine goes back
 from wide passes in at least 10 of every 100 of them, counted over at least 128 wide passes in one process, the next start checks again
 (a few back-offs, for example where copies end, do not reach that rate; the rule is in docs/TECHNOLOGY.md 5.4). On RTX 30 / 40, when less than 128 MiB of GPU memory is free after the graphs of the
-wide passes are built, the widths are closed again. One line at start says what was decided. `serve --no-warmup` uses a kept result
+wide passes are built, the widths are closed again (a shorter `--max-ctx` leaves more memory free). One line at start says what was decided. `serve --no-warmup` uses a kept result
 only. The check needs a context of at least 4,224 tokens.
 
 **`yasakani report`** checks again, runs the three edit tasks of `bench --edit` with the wide passes off, with the widths of the check and
@@ -160,8 +163,8 @@ takes about 1.5 minutes on the RTX 5090; longer on other cards. The engine itsel
 console when it loads; that line is not in the report, but leave it out when you paste the console output.
 
 From Python: `Engine(pack, wide="on")`, then `engine.warmup(...)` with `wide_ids=yasakani.widecheck.check_ids(fmt)` (as `ChatRunner.warmup`
-does); `engine.wide_result` says what was decided and `engine.wide_state()` what the engine has open. With an engine library before 0.1.7
-nothing changes (and `--wide on` says that it has no effect).
+does); `engine.wide_result` says what was decided and `engine.wide_state()` what the engine has open. With an engine library older than the
+0.1.7 test build (0.1.6 or older) nothing changes (and `--wide on` or `--wide force` says that it has no effect).
 
 ## GPUs other than the RTX 5090
 
@@ -447,11 +450,11 @@ small fault could pass it: on the RTX 5090 it did not find one matrix scaled by 
 every 4,096th byte of 64 matrices.
 
 Since 0.1.4 every GPU, the RTX 5090 included, then also checks itself, with no reference and no tolerance (the *self-consistency* lines).
-It generates the answer of a prompt that copies most of its input (60 short JSON lines with two values changed, thinking off; on compute
-capability 12.x the copied part is checked in passes of up to 64 positions), reads prompt + answer again in passes of 16 positions, and
+It generates the answer of a prompt that copies most of its input (60 short JSON lines with two values changed, thinking off; where the check
+opened the wide copy passes the copied part is checked in passes of up to 64 positions), reads prompt + answer again in passes of 16 positions, and
 every generated token must be the most likely token at its position. Where passes of more than 16 positions are used, it also reads the
-text in passes of 64, and every prediction (the most likely token and the NLL, bit for bit) must be the same as in passes of 16 (0.1.7
-test build: when the check of the wide copy passes found a difference at start, the self-consistency check fails). The engine
+text in passes of 64, and every prediction (the most likely token and the NLL, bit for bit) must be the same as in passes of 16 (since
+0.2.0: when the check of the wide copy passes found a difference at start, the self-consistency check fails). The engine
 computes passes of every width with the same integer sums in the same order, so on a card that computes correctly both comparisons agree
 exactly; any difference fails the self-check (exit code 1). This finds a card whose passes of different widths do not agree; damaged
 weights give the same wrong answer in both readings, which is what `yasakani verify` and the comparison with the reference are for. On the
@@ -488,14 +491,14 @@ with Engine(pack, max_ctx=32768, dll=r"D:\yasakani\yskn.dll") as eng:
 ## Settings and environment
 
 The package sets the engine's environment variables itself (`yasakani.runtime.DEFAULT_ENV`) and removes any other `YSKN_*` variable left in your shell
-before it opens the model, because a stray setting silently changes the engine. Since 0.1.7 `YSKN_TEST_*` variables are kept (with a note at
+before it opens the model, because a stray setting silently changes the engine. Since 0.2.0 (first in the 0.1.7 test build) `YSKN_TEST_*` variables are kept (with a note at
 start): only an engine library built with the test exports reads them, such as `YSKN_TEST_CODE_ARCH=86`, which makes such a library take
 the decisions of sm_86 code; the released library ignores them. The published results were measured with the defaults; changing them
 means running an engine configuration that the self-check and the published numbers do not cover.
 
 0.1.4 adds the settings of the saved prompt states to `DEFAULT_ENV` (`YSKN_SNAP_SLOTS` 8, `YSKN_SNAP_STEP` 1024, `YSKN_SNAP_TAIL` 4096,
 `YSKN_SNAP_SPARSE` 65536, `YSKN_SNAP_MIN` 8192) and two look-ahead settings to `DEFAULT_SPEC`: `copy_rows` (64: copy passes of up to 64 rows,
-used on compute capability 12.x) and `copy_index` (1: the copy index with the cursor). `copy_rows=16, copy_index=0` is the look-ahead of 0.1.3. These values are the current defaults; they
+used where the check on the card opened them; up to 0.1.6 on compute capability 12.x only) and `copy_index` (1: the copy index with the cursor). `copy_rows=16, copy_index=0` is the look-ahead of 0.1.3. These values are the current defaults; they
 have not been tuned. An older package that does not set `YSKN_SNAP_SLOTS` gets one saved state, as with 0.1.3.
 
 ## Troubleshooting

@@ -493,7 +493,7 @@ Build A, fastest model, `--parallel 16 --max-ctx 16384`, thinking off, temperatu
 | story_zh_dialogue | 1.42 | 2.69 | 4.61 | 6.56 (1,156) |
 
 * With N = 4 or more, all 12 published prompts were faster than one by one. The two edits, the long JSONL and the mixed load were not.
-* A shared pass carries at most 16 rows for all requests together, while one request alone checks up to 64 copied tokens per pass (on compute capability 12.x). We think this is why the edits are slower at once.
+* A shared pass carries at most 16 rows for all requests together, while one request alone checks up to 64 copied tokens per pass (where the check on the card opened the wide copy passes). We think this is why the edits are slower at once.
 * We do not give N = 1: for the edits it changed between runs (1.54 and 1.55 in the first run, 0.67 and 0.65 in the second), most likely because the second read of the same prompt used a saved state.
 * Not measured: the quality model, thinking on.
 

@@ -5,7 +5,7 @@ Technical notes by the author, written as a map for people who read the source c
 
 * Scope: versions 0.1.0 to 0.1.6. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
   one missing synchronization (chapter 7); 0.1.4 adds kernels for passes of 17 to 64 rows on compute capability 12.x and changes host
-  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
+  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4); 5.4 also describes the check of the wide copy passes on each card, new in 0.2.0. Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).
@@ -241,11 +241,12 @@ to 0.1.3 one pass confirmed at most 16 tokens. 0.1.4 lets a copy go further:
   many fully accepted 16-row passes before it widens again (from 2 up to 16; current defaults, not tuned).
 * **Confirming.** For passes of up to 16 rows the provisional results of the state-carrying layers are kept (5.3). A wider pass does not
   keep them; at confirmation the state is computed again from the inputs of the pass (`src/engine35.cpp`).
-* **Where.** Wide passes are used on compute capability 12.x (RTX 50 series) only; other GPUs copy with passes of up to 16 rows. Only the
-  RTX 5090 has been measured.
-* **Per GPU (0.1.7, a test build).** What decides is the code the GPU runs (the PTX version of a probe kernel: sm_86, sm_89 or sm_120),
-  not its compute capability alone. On sm_86 / sm_89 the wide passes are off unless asked for (`--wide on`, engine setting `YSKN_WIDE=1`);
-  then no width is open until a check opens it. The check (`python/yasakani/widecheck.py`, once per GPU, driver, engine library, package
+* **Where.** Up to 0.1.6 wide passes were used on compute capability 12.x (RTX 50 series) only; other GPUs copied with passes of up to 16
+  rows. Since 0.2.0 they are used on RTX 30, 40 and 50 cards after a check on the card (next point). Only the RTX 5090 has been measured by us.
+* **Per GPU (since 0.2.0; first in the 0.1.7 test build).** What decides is the code the GPU runs (the PTX version of a probe kernel:
+  sm_86, sm_89 or sm_120), not its compute capability alone. The package allows wide passes on every GPU (engine setting `YSKN_WIDE=1`;
+  `--wide off` sets 0). On sm_86 / sm_89 no width is open until a check opens it; the engine used without the package leaves them without
+  wide passes, as up to 0.1.6. The check (`python/yasakani/widecheck.py`, once per GPU, driver, engine library, package
   and model) reads about 2,400 tokens in passes of 17, 31, 32, 33, 47, 48, 63 and 64 rows and again in passes of 16, and requires the
   same most likely ids and NLL bit for bit; then it times copy cycles (the pass, the commit of all rows, the drafter reading them) of 16
   and of W rows in turn at a 4K context, and opens a width W when a cycle takes at most 0.8 × W / 16 times a 16-row one. On 12.x every
@@ -253,7 +254,9 @@ to 0.1.3 one pass confirmed at most 16 tokens. 0.1.4 lets a copy go further:
   starts (they were the RTX 5090's on every GPU before). When the correctness check finds a difference, no width is used, passes of 17
   to 64 rows (such as the ends of prompt reads) go back to the 16-row sums also on 12.x, and `yasakani selfcheck` fails. The check reads
   its text in pieces of at most 1,023 tokens, so that the engine does not set up the work area of long prompt reads (about 580 MiB).
-* **Time-based back-off (0.1.7).** During generation the copy loop (`src/specx.cpp`) adds up the measured time of each wide pass (at most
+  On sm_86 / sm_89, when less than 128 MiB of GPU memory is free after the graphs of the opened widths are built, the widths are closed
+  again.
+* **Time-based back-off (since 0.2.0; first in the 0.1.7 test build).** During generation the copy loop (`src/specx.cpp`) adds up the measured time of each wide pass (at most
   twice its running mean, so that a stall of the OS counts little; before: the running mean) and checks every 4 wide passes, also inside
   a run of fully accepted ones (before: only when a run ended), whether the tokens of these passes per millisecond reach those of a fully
   accepted 16-row pass. A run that ends with fewer than 4 wide passes since the last check is judged together with the 4 before it, so a
@@ -411,9 +414,10 @@ settings are the `YSKN_SNAP_*` entries of `DEFAULT_ENV` in `python/yasakani/runt
 * AMD GPUs and Macs are not supported: the kernels are CUDA.
 * The converter ([`tools/convert/`](../tools/convert/)) knows the layers of Qwen3.8-27B only; another model needs changes to it and to
   the engine.
-* Wide copy passes (5.4) are used by default on compute capability 12.x only, and were measured on the RTX 5090 only. The 0.1.7 test build
-  lets RTX 30 / 40 cards use them after a check on the card (`--wide on`, 5.4); their machine code for 8.6 / 8.9 has not run on such a card.
-  Their kernels have not run on another RTX 50 card; there, `yasakani selfcheck` compares passes of 64 rows with passes of 16 where wide passes are open, and fails when the check at start found that they compute differently ([python/README.md](../python/README.md#the-self-check)). Their answers were checked
+* Wide copy passes (5.4) are used on RTX 30, 40 and 50 cards since 0.2.0, after a check on the card, and were measured by us on the RTX 5090
+  only. We have not run their machine code for 8.6 / 8.9 on an RTX 30 / 40 card. Users of the 0.1.7 test build reported an RTX 4090 and an
+  RTX 5060 Ti ([#24](https://github.com/yasakani-dev/yasakani/issues/24)); no RTX 30 card has been reported yet.
+  On cards other than the RTX 5090, `yasakani selfcheck` compares passes of 64 rows with passes of 16 where wide passes are open, and fails when the check at start found that they compute differently ([python/README.md](../python/README.md#the-self-check)). Their answers were checked
   against single passes up to a context of 40,000 tokens, and in generations after a prompt of about 177,000 tokens. Their speed after a long
   prompt (more than about 40,000 tokens) has not been measured. A stop string is acted on after a pass, so up to 64 tokens (16 up to 0.1.3)
   can be generated past it; the text is cut at the stop string, but those tokens count in `usage.completion_tokens`.

@@ -52,8 +52,8 @@ model, the number of wide copy passes, and whether the answer is the expected on
 `yskn.dll`, the GPU (name, compute capability, driver), the model file and whether wide copy passes are used, so a pasted result says what
 it was measured with.
 
-The wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used on compute capability 12.x (RTX 50 series)
-only, and were measured on the RTX 5090 only; other GPUs copy with passes of up to 16 tokens. Speed here is (tokens - 1) / the engine's
+The wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used where the check on the card opened them
+(since 0.2.0 on RTX 30, 40 and 50 cards; see [below](#wide-copy-passes-per-gpu)); we measured them on the RTX 5090 only. Speed here is (tokens - 1) / the engine's
 time from the first to the last generated token, inside the process; the thinking-off tables were measured through the server's stream, so
 the numbers are close to them, not the same. The file of the code edit is CPython's `textwrap.py` with one e-mail address replaced by
 `<email>`, as in `bench/`. YASAKANI's thinking-off measurements of November 15 (the speed table and "What 0.1.4 changed") used this same
@@ -109,36 +109,51 @@ RTX 5060 Ti); we have not tried two GPUs ourselves. A `CUDA_VISIBLE_DEVICES` you
 [What you need](../README.md#what-you-need).
 
 <a name="test-build-017"></a>
+<a name="wide-copy-passes-per-gpu"></a>
 
-## Can I try the wide copy passes on my RTX 30 / 40 card? (0.1.7 test build)
+## Are the wide copy passes used on my card?
 
-Yes, with the test build [v0.1.7-test1](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.7-test1). It is a pre-release, not
-the latest release: the latest release stays 0.1.6, and the quickstart installs 0.1.6. The test build is for owners of RTX 30 and 40
-series cards and of RTX 50 cards other than the RTX 5090. It lets them try the wide copy passes of 0.1.4 (a pass that copies the input
-checks up to 64 tokens instead of 16; see [technical notes 5.4](TECHNOLOGY.md#54-wide-copy-passes-014)) and tell us how they do. The
-release page says how to install it next to 0.1.6 and how to go back.
+Since 0.2.0, on RTX 30, 40 and 50 series cards, after a check on the card. The wide copy passes (since 0.1.4: a pass that copies the
+input checks up to 64 tokens instead of 16; see [technical notes 5.4](TECHNOLOGY.md#54-wide-copy-passes-014)) make edits faster. Normal
+prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 they were used on RTX 50 cards only; the 0.1.7 test build
+([v0.1.7-test1](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.7-test1)) let owners of other cards try them.
 
-* **What is opt-in.** On RTX 30 and 40 series cards (compute capability 8.6 and 8.9) nothing changes unless you ask for it: the engine
-  copies with passes of up to 16 tokens, as in 0.1.6. `--wide on` (or `YASAKANI_WIDE=on`) with `chat`, `serve`, `bench` or `selfcheck`
-  lets the card check the wide passes once. Passes of 17 to 64 tokens must give the same predictions as passes of 16, bit for bit. If
-  not, no wide pass is used and `yasakani selfcheck` fails: please report it. A width (32, 48 or 64 tokens) is then used only if one of
-  its copy steps takes at most 0.8 × width / 16 times a 16-token step on this card (32: 1.60, 48: 2.40, 64: 3.20), measured while the
-  GPU is idle. On RTX 50 cards the wide passes stay on as in 0.1.6, but the same check leaves out a width that is slower on that card.
+* **The check.** At the first start of `chat`, `serve`, `bench` or `selfcheck`, after the model is loaded, the package checks the card
+  once. Passes of 17 to 64 tokens must give the same predictions as passes of 16, bit for bit. If not, no wide pass is used and
+  `yasakani selfcheck` fails: please report it in GitHub Issues. On RTX 30 / 40 cards a width (32, 48 or 64 tokens) is then used only if
+  its copy steps take at most 0.8 × width / 16 times a 16-token step on this card (32: 1.60, 48: 2.40, 64: 3.20), measured while the GPU
+  is idle. RTX 50 cards start with every width, as in 0.1.6, and the check leaves out a width only when every round is over that limit.
+  On the RTX 5090 the check kept every width and took 21.8 to 22.9 seconds (0.1.7 test build, November 17, 2026); it takes longer on
+  other cards.
+* **When it cannot check.** When another program uses the GPU, when nvidia-smi does not answer, or when the context is shorter than 4,224
+  tokens, nothing is measured. `serve --no-warmup` uses a kept result only. Without a measured or kept result, RTX 50 cards use every
+  width and RTX 30 / 40 cards none.
+* **Memory.** On RTX 30 / 40 cards, when less than 128 MiB of GPU memory is free after the graphs of the check are built, no width is
+  used. A shorter `--max-ctx` frees memory.
 * **How often it checks.** The result is kept per GPU, driver, engine library, package and model (`wide_check.json` in
-  `%LOCALAPPDATA%\yasakani`), so the check runs once. It took 21.8 to 22.9 seconds on the RTX 5090. It runs again after 30 days, with
-  `--wide-recheck`, or when during generation the engine went back from wide passes in at least 10 of every 100 (counted over at least
-  128 in one run of the program). `--wide off` turns the wide passes off; `--wide force` uses every width without the check, to compare.
-* **What was checked.** On the RTX 5090 only. The kernels of the wide passes have been built for 8.6 and 8.9 since 0.1.4, but they have
-  never run on such a card. On the RTX 5090 these checks passed: the same answers as 0.1.6; the check keeping every width there; and the
-  engine's code for 8.6 and 8.9, compiled for the RTX 5090 when it loads, giving the same predictions in wide passes as in passes of 16.
-  That does not show that the machine code of an RTX 30 or 40 card is right, or that the wide passes are faster there: that is what the
-  test is for. During generation the engine goes back to 16-token passes when the wide ones turn out slower (it checks this every 4
-  wide passes).
+  `%LOCALAPPDATA%\yasakani`). After an update the check runs once more, because the engine library and the package change. It also runs
+  again after 30 days, with `--wide-recheck`, or when during generation the engine went back from wide passes in at least 10 of every 100
+  (counted over at least 128 in one run of the program). During generation the engine goes back to 16-token passes when the wide ones
+  turn out slower (it checks this every 4 wide passes).
+* **Settings.** `--wide off` (or `YASAKANI_WIDE=off`) turns the wide passes off; `--wide force` uses every width without the check, to
+  compare. Since 0.2.0 `--wide on` is the same as the default.
+* **Several requests.** With `serve --parallel N`, a request that runs alone uses the widths the check opened. Passes shared by several
+  requests carry at most 16 tokens together and do not use them.
+* **What we checked.** We ran the code for RTX 30 / 40 (compute capability 8.6 and 8.9) only on the RTX 5090: compiled for the RTX 5090
+  when it loads, it gave the same predictions in wide passes as in passes of 16. That does not show that the machine code of an RTX 30
+  or 40 card is right, or that the wide passes are faster there.
+* **What users reported.** Users reported the 0.1.7 test build in [#24](https://github.com/yasakani-dev/yasakani/issues/24). These are
+  the reporters' numbers:
+  * RTX 4090 (Windows 10): the check opened widths 32, 48 and 64. Wide passes were equal to 16-token passes bit for bit at 335 positions.
+    The three edit tasks ran at 770.0 → 1,420.9, 822.5 → 1,634.9 and 793.2 → 1,545.6 tok/s (wide passes off → on), with the same output.
+  * RTX 5060 Ti: only the 64-token width opened. The three edit tasks ran at 215.1 → 279.4, 226.9 → 300.4 and 218.8 → 280.6 tok/s, with
+    the same output.
+  * No RTX 30 card has been reported yet.
 * **How to report.** `yasakani report` checks the card again, runs the three edit tasks of `bench --edit` with the wide passes off, with
   the widths the check chose and with every width, then the self-check, and prints a Markdown report: GPU, driver, versions, the check,
-  the speeds, and whether the outputs are the same. It took 85 to 89 seconds on the RTX 5090; it takes longer on other cards. Please
-  paste it into the issue for the test build on GitHub. It contains no UUID, path, user or computer name. Details:
-  [python/README.md](../python/README.md#wide-copy-passes-per-gpu-017-test-build).
+  the speeds, and whether the outputs are the same. It took 85 to 89 seconds on the RTX 5090 (0.1.7 test build); it takes longer on other
+  cards. Please paste it into a GitHub issue (the reports so far are in [#24](https://github.com/yasakani-dev/yasakani/issues/24)). It
+  contains no UUID, path, user or computer name. Details: [python/README.md](../python/README.md#wide-copy-passes-per-gpu).
 
 ## How much memory and disk does it need?
 
@@ -215,7 +230,7 @@ The default is 1: one request at a time, the same path as before. The first time
 
 ### When does it help, and when not?
 
-It helps when several different requests write new text. It does not help with edits, where most of the answer is a copy of the input. One request alone checks up to 64 copied tokens per pass on RTX 50 cards, but a shared pass carries at most 16 rows for all requests together. We think this is why.
+It helps when several different requests write new text. It does not help with edits, where most of the answer is a copy of the input. One request alone checks up to 64 copied tokens per pass where the check on the card opened the wide copy passes, but a shared pass carries at most 16 rows for all requests together. We think this is why.
 
 Fastest model, thinking off, temperature 1.0, top-p 0.95, top-k 20, seeds 1 to 16, `--parallel 16 --max-ctx 16384`. Each task was sent 16 times one by one, then N of those at once. The number is (all output tokens / time from the first send to the last end) at once, divided by the same for one by one. Mean of 2 runs, one uncounted request first.
 
