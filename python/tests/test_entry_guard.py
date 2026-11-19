@@ -14,7 +14,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-NO_CUDA = {"yskn_position", "yskn_cancel", "yskn_kv_format"}      # read host fields or an atomic only; cancel is called mid-generation
+NO_CUDA = {"yskn_position", "yskn_cancel", "yskn_kv_format",
+           "yskn_edit_stats"}      # read host fields or an atomic only; cancel is called mid-generation
 
 
 def c_api_path():
