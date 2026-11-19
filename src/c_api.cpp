@@ -15,7 +15,10 @@
 #include <vector>
 namespace yskn { extern std::atomic<int> g_specx_cancel; }   
 static thread_local std::string g_err;
-struct yskn_engine { yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; int dev = -1; };   
+struct yskn_engine {
+  yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; int dev = -1;
+  std::atomic<int64_t> edit_stats[3]{};
+};
 // The CUDA current device belongs to the host thread, and callers use other threads than the one that opened the engine (the
 // Python package generates on a new thread for every request; the server answers on request threads). A thread that never chose
 // a device runs on CUDA device 0. So every call that reaches CUDA first makes the engine's GPU current on the calling thread
@@ -78,6 +81,11 @@ extern "C" YSKN_TEST_API int yskn_test_sparse_prompt_rows(yskn_engine* e, const 
 extern "C" YSKN_TEST_API int yskn_test_xsum(yskn_engine* e, const char* name, int M, unsigned seed, int variant, long long* out4) {
   YSKN_TRY(if (!e->q) throw std::runtime_error("test_xsum: qwen3_5 engine only"); e->q->test_xsum(name, M, seed, variant, out4)) }
 extern "C" YSKN_TEST_API int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(ms_gate(e); *ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }
+extern "C" YSKN_TEST_API int yskn_edit_stats(yskn_engine* e, int64_t* out) {
+  if (!e || !out) return -1;
+  for (int i = 0; i < 3; ++i) out[i] = e->edit_stats[i].load(std::memory_order_relaxed);
+  return 0;
+}
 extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_prompt, int n_gen, const int32_t* cfg, int n_cfg, int32_t* out_ids, double* stats, double* times_ms) {
   try {
     on_gpu(e);
@@ -106,6 +114,9 @@ extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_p
       // generation gives n_gen + 1 ids as the usual form does (statistic 30 + 1 = the ids written, also here)
       const auto t0 = clk::now(); if (c.frontier) y.prefill(prompt, n_prompt); else out_ids[0] = y.prefill(prompt, n_prompt); const auto t1 = clk::now();
       if (c.frontier) y.generate(n_gen + 1, out_ids); else y.generate(n_gen, out_ids + 1); const auto t2 = clk::now();
+      e->edit_stats[0].store(y.stats.edit_passes, std::memory_order_relaxed);
+      e->edit_stats[1].store(y.stats.edit_hits, std::memory_order_relaxed);
+      e->edit_stats[2].store(y.stats.edit_accepted, std::memory_order_relaxed);
       if (times_ms) { times_ms[0] = ms(t1 - t0).count(); times_ms[1] = ms(t2 - t1).count(); }
       if (stats) { const yskn::SpecxStats& s = y.stats; double* o = stats; o[0] = (double)s.passes; o[1] = (double)s.tokens; o[2] = (double)s.chain_none;
         o[3] = (double)s.drafted[0]; o[4] = (double)s.accepted[0]; o[5] = (double)s.drafted[1]; o[6] = (double)s.accepted[1];

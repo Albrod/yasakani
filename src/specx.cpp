@@ -2,6 +2,7 @@
 // Copyright (c) 2026 the YASAKANI authors
 #include <cstdlib>
 #include "specx.hpp"
+#include "edit_copy.hpp"
 #include <chrono>
 #include <algorithm>
 #include <cstdio>
@@ -331,6 +332,14 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
   for (double& x : wq_n_) x = 0; for (double& x : wq_h_) x = 0;
   const double wq0 = c_.wk_q_pm / 1000.0;
   int nleaf = 0, kch = 0, leaf_row[16] = {}, leaf_depth[16] = {};
+  bool edit_enabled = false;
+  if constexpr (std::is_same_v<Eng, Engine35>)
+    edit_enabled = bdr && c_.use_d0 && c_.copy_index && e_.edit_copy_enabled();
+  EditCopy edits(static_cast<int>(S_.size()) - 1);
+  std::vector<int32_t> edited;
+  int edit_pause = 0;
+  double edit_p = 0;      // share of edit passes whose first edit was taken (running mean over about 8)
+  bool edit_last = false; // the last edit pass took its first edit
   const auto t_loop = clk::now();
   while (produced < n_tokens && !stop && !(c_.cancel && c_.cancel->load(std::memory_order_relaxed))) {
     dk_ = e_.position() / 1024.0;
@@ -348,6 +357,28 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
     std::vector<int32_t> c0; int n0 = 0; lk_src_ = -1;
     if (g_all > 0) { const auto t_ix = clk::now(); n0 = (c_.copy_index && bdr) ? copy_lookup(F, c0, g_all) : d0_lookup(F, c0, g_all); stats.ms_index += ms_since(t_ix); }
     const int exp_src = lk_src_;                                    // the copy source the frontier follows (checked after the pass)
+    int edit_first = -1, edit_rows = 0;
+    if (edit_enabled && g_all > 0) {
+      edits.advance(S_, F + 1, n0 >= 6 ? exp_src : -1);
+      if (edit_pause > 0) --edit_pause;
+      else {
+        const int cap = std::min(room, wide_on ? c_.copy_rows - 1 : std::min(15, c_.bdr_d0_len));
+        edit_first = edits.propose(S_, F + 1, cap, edited);
+        if (edit_first >= 0) {
+          const int n = static_cast<int>(edited.size());
+          // a wide edit pass only when it is expected to give more tokens per ms than 16 rows, with the measured pass times of this GPU
+          // and the share of edit passes that took their edit (a miss gives the tokens before the edit either way); never right after a miss
+          auto wide_ok = [&](int W, double tw) {
+            const double e1 = edit_first + 1;
+            return edit_last && (edit_p * W + (1.0 - edit_p) * e1) * t16_ >= (edit_p * 16.0 + (1.0 - edit_p) * std::min(16.0, e1)) * tw; };
+          if (wide_on && (wmask & 4) && n >= 63 && wide_ok(64, t64_)) edit_rows = 64;    // only the widths opened on this GPU (their graphs exist)
+          else if (wide_on && (wmask & 2) && n >= 47 && wide_ok(48, t48_)) edit_rows = 48;
+          else if (wide_on && xw32 && (wmask & 1) && n >= 31 && wide_ok(32, t32_)) edit_rows = 32;
+          else edit_rows = std::min({n, 15, c_.bdr_d0_len}) + 1;
+          if (edit_first >= edit_rows - 1) edit_rows = 0;
+        }
+      }
+    }
     int wideW = 0;                                                  // rows of this pass when it is a wide copy pass
     bool hb_pass = false;
     
@@ -380,7 +411,7 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
     if constexpr (std::is_same_v<Eng, Engine35>) {
       if (bdr && g_eff > 0) {
         bdr_longm = n0 >= c_.bdr_long_n && !c0.empty();
-        bdr_d0 = bdr_longm && (c_.bdr_adapt == 2 || (c_.bdr_adapt == 1 && dema_[1] > dema_[0]));
+        bdr_d0 = edit_rows > 0 || (bdr_longm && (c_.bdr_adapt == 2 || (c_.bdr_adapt == 1 && dema_[1] > dema_[0])));
         const bool probe = bdr_d0 && c_.bdr_adapt == 1 && c_.bdr_probe > 0 && ++dprobe_ % c_.bdr_probe == 0;
         const bool run = !bdr_d0 || probe;                         
         if (probe && blk_mode && room16 > 7) { kdfl = room16; b16_pass = true; }   
@@ -399,7 +430,12 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
             wideW = (lim >= 63 && c_.copy_rows >= 64 && (wmask & 4)) ? 64
                   : ((lim >= 47 && c_.copy_rows >= 48 && (wmask & 2)) ? 48 : ((lim >= 31 && c_.copy_rows >= 32 && xw32 && (wmask & 1)) ? 32 : 0));
           }
-          if (wideW) { chain.assign(S_.begin() + exp_src, S_.begin() + exp_src + (wideW - 1)); src.assign(chain.size(), 0); }
+          if (edit_rows > 0) {
+            wideW = edit_rows > 16 ? edit_rows : 0;
+            chain.assign(edited.begin(), edited.begin() + (edit_rows - 1));
+            src.assign(chain.size(), 0);
+          }
+          else if (wideW) { chain.assign(S_.begin() + exp_src, S_.begin() + exp_src + (wideW - 1)); src.assign(chain.size(), 0); }
           else { if ((int)c0.size() > c_.bdr_d0_len) c0.resize(c_.bdr_d0_len); take_d0(); }
           stats.bdr_d0++;
           if (probe) { int32_t dr[BDR_J]; e_.bdraft_out(dr); dpend_.push_back(BdrPend{F, 0, std::vector<int32_t>(dr, dr + kdfl)}); stats.bdr_probes++; }
@@ -554,6 +590,16 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
     }
     for (int j = 0; j < a_all; ++j) if (is_eos(chain[j])) { a = j; stop = true; break; }
     if (!stop && is_eos(am[a])) stop = true;
+    if (edit_rows > 0 && bdr_d0) {
+      ++stats.edit_passes;
+      stats.edit_accepted += a;
+      edit_p += ((a > edit_first ? 1.0 : 0.0) - edit_p) / 8.0; edit_last = a > edit_first;
+      if (a > edit_first) { ++stats.edit_hits; edits.hit(); }
+      else {
+        edit_pause = 3;
+        if (a == edit_first) edits.missed();                      // the target rejected the edit itself: count it against the rule
+      }
+    }
     int hit_row = -1;                                             
     if (nleaf && !stop && a == a_all && a < kch) {
       bool any = false;
@@ -597,8 +643,9 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
           const double tp = std::min(t_pass, 2.0 * tw);              // a stall (e.g. of the OS) counts as at most twice the usual time
           tw += (tp - tw) / 8.0;
           stats.wide_passes++; stats.wide_tok += a + 1; if (full) stats.wide_full++;
-          wst_tok_ += a + 1; wst_ms_ += tp; ++wide_k_;               // 0.1.7: the measured time of each pass (was the running mean)
-          if (!full || wide_k_ >= 4) {                              // the run ended, or 4 more wide passes: were they faster than 16 rows?
+          // an edit pass (edit copy) is not part of a copy run: only its time counts (above), not the wide statistics or the run
+          if (edit_rows == 0) { wst_tok_ += a + 1; wst_ms_ += tp; ++wide_k_; }   // 0.1.7: the measured time of each pass (was the running mean)
+          if (edit_rows == 0 && (!full || wide_k_ >= 4)) {      // the run ended, or 4 more wide passes: were they faster than 16 rows?
             // 0.1.7: checked inside a run too, not only at its end.  A run that ends with fewer than 4 wide passes since the last check
             // is judged together with the window checked before it (so a partly accepted pass at the end of a copy is not judged alone)
             const bool merge = !full && wide_k_ < 4 && wpv_k_ > 0;
@@ -611,7 +658,7 @@ template <class Eng> void SpecxT<Eng>::generate(int n_tokens, int32_t* out) {
           }
         } else {
           if (M == 16) t16_ += (std::min(t_pass, 2.0 * t16_) - t16_) / 8.0;
-          if (full && (int)chain.size() >= BDR_J) ++wide_run_; else wide_run_ = 0;
+          if (edit_rows > 0) {} else if (full && (int)chain.size() >= BDR_J) ++wide_run_; else wide_run_ = 0;   // edit passes leave the run
         }
       } else wide_run_ = 0;
       stats.max_rows = std::max<int64_t>(stats.max_rows, M);

@@ -266,6 +266,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
     { const char* w = std::getenv("YSKN_WIDE"); if (w && w[0]) wide_pref_ = std::max(0, std::min(2, std::atoi(w))); }
     // wide copy passes (17..64 rows): measured on compute capability 12.x (RTX 5090); 8.6 / 8.9 only when asked (YSKN_WIDE=1 or 2)
     wide_ok_ = wide_pref_ > 0 || (wide_pref_ < 0 && (wide_native() || ienv("YSKN_COPY_WIDE_ANYARCH", 0) != 0));
+    edit_copy_ = ienv("YSKN_EDIT_COPY", 0) != 0;
     if (ienv("YSKN_COPY_WIDE_OFF", 0)) wide_ok_ = false;
     // widths allowed at open: all on 12.x and with YSKN_WIDE=2; with YSKN_WIDE=1 on 8.x none until the caller opens them (set_opt 38)
     wide_mask_ = !wide_ok_ ? 0 : ((wide_native() || wide_pref_ != 1) ? 7 : 0);

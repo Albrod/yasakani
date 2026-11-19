@@ -156,6 +156,7 @@ public:
   // Copy passes wider than 16 rows (verify of host tokens only).
   static constexpr int kVerifyMax = 64;
   bool wide_ok() const { return wide_ok_; }
+  bool edit_copy_enabled() const { return edit_copy_; }   // research 11/18: also when sampling (the drafts are checked as copy drafts are)
   int xw_rows() const { return xw_rows_; }           // passes up to this many rows use the exact-sum GEMV (16 = none wider)
   void prepare_wide(int max_rows);                   // build the graphs of the wide passes and their commits (nothing runs)
   // 0.1.7: which widths of copy passes may be used (bit 0 = 32 rows, 1 = 48, 2 = 64; set_opt 38) and the times of one copy cycle
@@ -543,6 +544,7 @@ private:
   int pci_[3] = {}; unsigned char uuid_[16] = {};
   bool wide_native() const { return code_arch_ >= 120; }
   void set_wide_mask(int mask);
+  bool edit_copy_ = false;
   
   
   

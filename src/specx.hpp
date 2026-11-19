@@ -88,6 +88,7 @@ struct SpecxStats {
   int64_t sh_lcp = 0, sh_slots = 0, sh_saved = 0; double ms_snap = 0;   // prompt snapshots
   int64_t copy_passes = 0, wide_passes = 0, copy_tok = 0, wide_tok = 0, max_rows = 0, cursor_hits = 0, wide_full = 0; double ms_index = 0;
   int64_t wide_backoffs = 0; double t_copy[4] = {}; int wide_mask = 0;   // 0.1.7: back-offs, final times of copy cycles (ms), widths
+  int64_t edit_passes = 0, edit_hits = 0, edit_accepted = 0;
   int sh_mode = 0; int64_t sh_start = 0;                 
 };
 
