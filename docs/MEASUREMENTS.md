@@ -443,8 +443,8 @@ These measurements are of `yasakani serve --parallel N` (new in 0.1.7, experimen
 ### Builds and common conditions
 
 * GPU: one RTX 5090 (32 GB), Windows 11. Other programs (the desktop and so on) used about 1.8 to 2.7 GB of GPU memory.
-* Engine library: the same `yskn.dll` for all runs below, SHA-256 starting `25610427`. The comparison for one request at a time is the 0.1.5 library, SHA-256 starting `918560d6`.
-* Python package: development builds of 0.1.7 on top of 0.1.5. Three versions were measured. They differ only in how the scheduler waits and keeps places, not in the engine:
+* Engine library: the same `yskn.dll` for all runs of builds A to C below, SHA-256 starting `25610427`. The comparison for one request at a time is the 0.1.5 library, SHA-256 starting `918560d6`.
+* Python package (builds A to C): development builds of 0.1.7 on top of 0.1.5. Three versions were measured. They differ only in how the scheduler waits and keeps places, not in the engine:
   * build A, November 17, 21:41 to November 18, 03:11;
   * build B, November 18, 05:26 to 08:56;
   * build C, November 18, 10:10 to 11:47. Its scheduler and server are those of 0.1.7.
@@ -467,7 +467,7 @@ Build A: 717 to 719 tok/s (fastest) and 623 to 625 tok/s (quality) across all ru
 
 Also on 35 prompts per model, `--parallel 1` gave the same token ids as 0.1.5 and read each prompt the same way (builds A and B).
 
-The files of 0.1.7 (`yskn.dll` with the SHA-256 starting `2d64c3b4`), November 19, against the released 0.1.6, with the same tasks and settings and one uncounted pass of all tasks first: `--parallel 1` differed by -0.03% for the fastest model (697.5 and 697.3 tok/s) and by -0.08% for the quality model (606.0 and 605.5 tok/s). `--parallel 4` with one request at a time differed by +0.14% and -0.13%. The token ids were the same, 15 of 15 in every run. On 35 prompts per model, `--parallel 1` gave the same token ids as 0.1.6, before and after the check of the wide copy passes on the card. Several at once, fastest model: every compared request was the same as the same conversation sent alone, in requests that join and leave (`--parallel 4` and `8`, 123 requests), cancellation (21), engine failures (10) and a 30-minute mixed run with tools and images (`--parallel 8`, 4,948 requests, none stuck; the server's GPU memory grew by 6.0 MiB).
+The `yskn.dll` of 0.1.7 (SHA-256 starting `2d64c3b4`) with the 0.1.7 Python package, November 19, against the released 0.1.6, with the same tasks and settings and one uncounted pass of all tasks first. The speed, join-and-leave, cancellation and failure runs used a copy of the package that differed only in its version strings. `--parallel 1` differed by -0.03% for the fastest model (0.1.6 697.5, 0.1.7 697.3 tok/s) and by -0.08% for the quality model (0.1.6 606.0, 0.1.7 605.5 tok/s). `--parallel 4` with one request at a time differed by +0.14% and -0.13%. The token ids were the same, 15 of 15 in every run. On 35 prompts per model, `--parallel 1` gave the same token ids as 0.1.6, before and after the check of the wide copy passes on the card. Several at once, fastest model: no compared request differed from the same conversation sent alone, in requests that join and leave (`--parallel 4` and `8`, 123 requests), cancellation (21), engine failures (10) and a 30-minute mixed run with tools and images (`--parallel 8`, 4,948 requests: 3,880 same, 1,047 read another way with the same output, 21 not sent, 0 different; none stuck; the server's GPU memory grew by 6.0 MiB).
 
 ### Speed with several requests at once
 
