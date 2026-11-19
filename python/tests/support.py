@@ -21,16 +21,18 @@ from yasakani.runtime import ModelPack           # noqa: E402
 _BUILD = {}
 
 
-def stub_path(no_ms: bool = False) -> Path:
-    """Compile tests/stub/yskn_stub.c once per run (``no_ms=True``: a build without the multi-stream entries, as an older library)."""
-    key = "no_ms" if no_ms else "path"
+def stub_path(variant: str = "", no_ms: bool = False) -> Path:
+    """Compile tests/stub/yskn_stub.c once per run.  ``variant="wide"``: with the 0.1.7 exports of the wide copy passes (-DSTUB_WIDE),
+    in a library of its own, so that the tests of older behaviour still see a library without them.  ``no_ms=True``: a build
+    without the multi-stream entries, as an older library."""
+    key = "path" + variant + ("_no_ms" if no_ms else "")
     if key not in _BUILD:
         cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
         if not cc or sys.platform == "win32":
             raise unittest.SkipTest("no C compiler for the stub library")
         d = Path(tempfile.mkdtemp(prefix="yskn_stub_"))
         out = d / "libyskn.so"
-        flags = ["-DSTUB_NO_MS"] if no_ms else []
+        flags = (["-DSTUB_WIDE"] if variant == "wide" else []) + (["-DSTUB_NO_MS"] if no_ms else [])
         subprocess.run([cc, "-shared", "-fPIC", "-O1", "-pthread"] + flags + [str(HERE / "stub" / "yskn_stub.c"), "-o", str(out)],
                        check=True)
         _BUILD[key] = out
@@ -55,8 +57,8 @@ def make_pack(tmp: Path, name: str = "ok") -> ModelPack:
 class Stub:
     """The stub library plus its test-only exports."""
 
-    def __init__(self, no_ms: bool = False):
-        self.lib = NativeLib(str(stub_path(no_ms)))
+    def __init__(self, variant: str = "", no_ms: bool = False):
+        self.lib = NativeLib(str(stub_path(variant, no_ms)))
         d = self.lib.dll
         d.stub_push_script.argtypes = [C.c_void_p, C.c_int, C.c_int]
         d.stub_set_delay_us.argtypes = [C.c_int]
