@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The multi-stream entries of Engine (0.2.0) against the stub library: the stub's stand-in model gives every stream the ids it gives
+"""The multi-stream entries of Engine (0.1.7) against the stub library: the stub's stand-in model gives every stream the ids it gives
 alone, and refuses what the engine library refuses (see the notes at the top of tests/stub/yskn_stub.c)."""
 import os
 import random

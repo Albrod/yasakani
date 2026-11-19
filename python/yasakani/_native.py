@@ -39,7 +39,7 @@ SIGNATURES: Dict[str, Tuple[list, object]] = {
     "yskn_state_hash": ([P, P, I, P], I),
 }
 
-# The multi-stream pass (several requests in one pass; 0.2.0): experimental entries that are not in include/yskn_abi.h.  They are
+# The multi-stream pass (several requests in one pass; 0.1.7): experimental entries that are not in include/yskn_abi.h.  They are
 # looked up at run time; a library without all of them serves one request at a time (``NativeLib.supports_parallel`` is False).
 MS_SIGNATURES: Dict[str, Tuple[list, object]] = {
     "yskn_ms_info": ([P, P, I, P], I),

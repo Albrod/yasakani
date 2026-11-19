@@ -16,7 +16,7 @@ thinking columns of the README tables were measured otherwise and are not what `
 * The answer is compared with the expected one as the measurement client did: white space around it and a Markdown code fence are
   ignored; otherwise it must be the same text.
 * Wide copy passes (0.1.4: a pass that copies the input checks up to 64 tokens) were used on compute capability 12.x (RTX 50
-  series) only up to 0.1.6; since 0.2.0 on RTX 30 / 40 too where the check of yasakani/widecheck.py finds them correct and faster.
+  series) only up to 0.1.6; since 0.1.7 on RTX 30 / 40 too where the check of yasakani/widecheck.py finds them correct and faster.
   The header gives the widths the engine has open on this GPU (``--wide``); the ``wide`` column counts them.
 """
 from __future__ import annotations

@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 the YASAKANI authors
-"""Wide copy passes per GPU (0.1.7 test build; on by default on RTX 30 / 40 too since 0.2.0).
+"""Wide copy passes per GPU (first in the 0.1.7 test build; on by default on RTX 30 / 40 too since 0.1.7).
 
 Since 0.1.4 a pass that copies the input can check up to 64 tokens at once instead of 16 ("wide copy passes", docs/TECHNOLOGY.md
 5.4).  They were measured on the RTX 5090 only, so up to 0.1.6 the engine used them on compute capability 12.x (RTX 50 series) only.
-The 0.1.7 test build let the owners of other cards try them; since 0.2.0 every card uses them where a check on the card finds them
+The 0.1.7 test build let the owners of other cards try them; since 0.1.7 every card uses them where a check on the card finds them
 correct and faster.  The check lowers the chance of a slower or different result, but it cannot rule it out:
 
 ``--wide`` (or ``YASAKANI_WIDE``)
   * ``auto`` (default): RTX 30 / 40 (compute capability 8.6 / 8.9): only the widths that the check finds correct and faster; none
     when the check cannot be made (up to 0.1.6 and in the 0.1.7 test build: none).  RTX 50: wide passes as in 0.1.6, except a width that the check
     below finds slower on this GPU.
-  * ``on``: the same as ``auto`` since 0.2.0 (in the 0.1.7 test build it turned them on for RTX 30 / 40).
+  * ``on``: the same as ``auto`` since 0.1.7 (in the 0.1.7 test build it turned them on for RTX 30 / 40).
   * ``off``: no wide copy passes.  ``force``: every width without the check (to compare).
 
 The check (once per GPU, driver, engine library, package and model; kept in ``wide_check.json``, see :func:`cache_dir`):
@@ -98,9 +98,9 @@ def mode_of(value: Optional[str] = None, environ: Optional[Mapping[str, str]] = 
 
 
 def engine_env(mode: str) -> Dict[str, str]:
-    """The engine setting for a mode.  0.2.0: auto = on = YSKN_WIDE=1: wide passes allowed on every GPU; on RTX 30 / 40 no width is
+    """The engine setting for a mode.  0.1.7: auto = on = YSKN_WIDE=1: wide passes allowed on every GPU; on RTX 30 / 40 no width is
     open until the check opens one (set_opt 38), on RTX 50 every width is open as without the setting (the check may close one).
-    Before 0.2.0 auto set nothing, and the engine left RTX 30 / 40 without wide passes; it still does when used without this package."""
+    Up to 0.1.6 and in the 0.1.7 test build auto set nothing, and the engine left RTX 30 / 40 without wide passes; it still does when used without this package."""
     return {"auto": {"YSKN_WIDE": "1"}, "on": {"YSKN_WIDE": "1"}, "off": {"YSKN_WIDE": "0"}, "force": {"YSKN_WIDE": "2"}}[mode]
 
 

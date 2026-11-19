@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 the YASAKANI authors
-"""``yasakani report`` (0.1.7 test build, kept since 0.2.0): how the wide copy passes do on this GPU, as Markdown to paste on GitHub.
+"""``yasakani report`` (first in the 0.1.7 test build): how the wide copy passes do on this GPU, as Markdown to paste on GitHub.
 
 1. Machine and versions: GPU, compute capability, memory, SMs, driver and its mode, power limit, clocks, whether a display is
    attached, OS, package, engine library (SHA-256 prefix and build info), the code the GPU runs, the model.

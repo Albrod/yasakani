@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 the YASAKANI authors
-"""Several requests at once on one engine (``serve --parallel N``; experimental, 0.2.0).
+"""Several requests at once on one engine (``serve --parallel N``; experimental, 0.1.7).
 
 The engine (the carrier) holds N stream slots (see the multi-stream notes in engine.py).  One thread, the scheduler, makes the calls
 of the engine library (a generation of the carrier runs on the worker thread of :meth:`Engine.generate`, as on the single path, while

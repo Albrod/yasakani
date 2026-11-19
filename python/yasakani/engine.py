@@ -26,7 +26,7 @@ READ_CHUNK = 1023                          # 0.1.7: Engine.read_prompt reads in 
                                            # large work area for one prompt read of 1,024 ids or more and keeps it)
 OPT_EXACT_WIDE = 31                        # passes of 17..64 rows with the exact-sum GEMV (0 = off; the engine's default is on where it can)
 
-# ---- the multi-stream pass (experimental entries of the engine library, 0.2.0) --------------------------------------------------
+# ---- the multi-stream pass (experimental entries of the engine library, 0.1.7) --------------------------------------------------
 # One engine (the carrier) holds stream slots: each holds the state of one request.  A request is read by the carrier (generate with
 # max_new=1), then ms_load copies that state into a slot; a pass carries up to 16 rows of several slots.  The rows of a slot are next to
 # each other: its frontier (the token it emitted last, not in its KV yet) first, then its drafts.  After every pass, ms_commit says how

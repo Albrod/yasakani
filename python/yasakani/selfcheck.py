@@ -27,7 +27,7 @@ reference files (made before this check existed), the package carries them (``_s
 
 Since 0.1.4 every GPU, the RTX 5090 included, also checks itself, without a reference (``consistency``): it generates the answer of a
 prompt that copies most of its input (greedy; on GPUs of compute capability 12.x such answers are checked in passes of up to 64
-positions; since 0.2.0 on RTX 30 / 40 too where the check of yasakani/widecheck.py opened them), then reads prompt + answer again in passes of 16 positions, and every generated id must be the most likely id at its
+positions; since 0.1.7 on RTX 30 / 40 too where the check of yasakani/widecheck.py opened them), then reads prompt + answer again in passes of 16 positions, and every generated id must be the most likely id at its
 position.  Where passes wider than 16 positions can be used, it also reads the text in passes of 64, and every prediction (most likely
 id and NLL, bit for bit) must be the same as with passes of 16.  The engine computes these passes with the same sums in the same
 order, so on a card that computes correctly both comparisons are exact; no tolerance is involved.

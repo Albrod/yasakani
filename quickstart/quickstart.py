@@ -43,9 +43,9 @@ import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-QS_VERSION = "0.2.0"
-ENGINE_ZIP = "yasakani-0.2.0-win-x64.zip"
-ENGINE_URL = "https://github.com/yasakani-dev/yasakani/releases/download/v0.2.0/" + ENGINE_ZIP
+QS_VERSION = "0.1.7"
+ENGINE_ZIP = "yasakani-0.1.7-win-x64.zip"
+ENGINE_URL = "https://github.com/yasakani-dev/yasakani/releases/download/v0.1.7/" + ENGINE_ZIP
 ENGINE_SHA256 = "b2300067d0926e6d7a017e933579e6c3852370939d9e40ada237311c7323690f"
 REPO_URL = "https://github.com/yasakani-dev/yasakani"
 SUPPORT_URL = "https://camp-fire.jp/projects/992233/view"
