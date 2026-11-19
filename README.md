@@ -6,7 +6,7 @@ English · [日本語](README.ja.md)
 
 YASAKANI is an engine that runs the Qwen3.8-27B language model on a Windows PC with one NVIDIA RTX GPU. The developer has tested it on the RTX 5090 only. After setup you can chat and edit code offline. You can also connect your own development tools through its OpenAI-compatible API.
 
-**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.0/yasakani-quickstart-0.2.0.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.0/fast_live_uncut.mp4)
+**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.7/yasakani-quickstart-0.1.7.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.7/fast_live_uncut.mp4)
 
 <a name="two-models"></a>
 <a name="what-you-need"></a>
@@ -26,7 +26,7 @@ For everyday use, choose the **quality model**. Its predictions are the closest 
 | RTX 3090, 3090 Ti, or 4090 (24 GB) | Quality or fastest | Built for these cards; not tested or tuned by the developer |
 | Listed RTX 40 and 50 series cards (16 GB) | Fastest, with context sized to free memory | Built for these cards; not tested or tuned by the developer |
 
-All speed numbers in this repository were measured on the RTX 5090. Other cards are slower. We do not guarantee their speed or that they work. The edit numbers are high because one pass of the model checks many tokens copied from the input (wide copy passes, up to 64 tokens per pass). Since 0.2.0 the engine uses them on RTX 30, 40 and 50 cards after a check on the card at the first start: a width is used only if it gives the same predictions as 16-token passes, bit for bit, and is faster on that card. Normal prose is not faster; the gain is on answers that copy the input, such as edits.
+All speed numbers in this repository were measured on the RTX 5090. Other cards are slower. We do not guarantee their speed or that they work. The edit numbers are high because one pass of the model checks many tokens copied from the input (wide copy passes, up to 64 tokens per pass). Since 0.1.7 the engine uses them on RTX 30, 40 and 50 cards after a check on the card at the first start: a width is used only if it gives the same predictions as 16-token passes, bit for bit, and is faster on that card. Normal prose is not faster; the gain is on answers that copy the input, such as edits.
 
 **Wide copy passes on other cards:** users reported the 0.1.7 test build in [#24](https://github.com/yasakani-dev/yasakani/issues/24). On an RTX 4090 (Windows 10) the check opened all three widths, and the three edit tasks ran 1.85 to 1.99 times as fast as with wide passes off (770.0 → 1,420.9, 822.5 → 1,634.9 and 793.2 → 1,545.6 tok/s), with the same output. On an RTX 5060 Ti only the 64-token width opened (215.1 → 279.4, 226.9 → 300.4 and 218.8 → 280.6 tok/s), with the same output. These are the reporters' numbers. No RTX 30 card has been reported yet, and we have run the code for RTX 30 / 40 only on the RTX 5090. [How the check works](docs/FAQ.md#wide-copy-passes-per-gpu)
 
@@ -38,13 +38,13 @@ Contributors have tested a Linux build from source. AMD and Mac are future targe
 
 You need 64-bit Windows 11, Python 3.10 or later, NVIDIA driver 580 or later, the Visual C++ 2015–2022 x64 runtime, and 20 GB of free disk space.
 
-1. Extract the v0.2.0 Windows quickstart ZIP to a path with only English letters and digits, such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.2.0)
+1. Extract the v0.1.7 Windows quickstart ZIP to a path with only English letters and digits, such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.7)
 2. Open **`START.cmd`** and choose a model. On the first run it downloads the engine and model files, checks them, and runs a GPU self-check.
 3. In the menu, choose browser chat or terminal chat, then type your first prompt. To use YASAKANI from another app, start the server and set the app's API address to `http://127.0.0.1:8765/v1`.
 
 In terminal chat, type `/effort medium` to make the model think for a shorter time, or `/think off` to turn thinking off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
 
-**Updates.** Since 0.2.0, the quickstart can update itself (from v0.1.6 or older, download the 0.2.0 quickstart ZIP by hand once). Once a day, when the menu opens, it asks GitHub whether there is a newer release and says so first. If there is one, it shows the old and new version and asks before it changes anything; the browser chat shows the same offer with an **Update** button. You can also choose “check for a new version” in the menu, run `START.cmd --action update`, or type `yasakani update`. The models stay; the engine and the Python package are installed again. `START.cmd --action rollback` goes back to the version before. To turn the daily check off: `START.cmd --no-update-check`. [What the check sends, and how the files are checked](docs/FAQ.md#how-does-the-update-work)
+**Updates.** Since 0.1.7, the quickstart can update itself (from v0.1.6 or older, download the 0.1.7 quickstart ZIP by hand once). Once a day, when the menu opens, it asks GitHub whether there is a newer release and says so first. If there is one, it shows the old and new version and asks before it changes anything; the browser chat shows the same offer with an **Update** button. You can also choose “check for a new version” in the menu, run `START.cmd --action update`, or type `yasakani update`. The models stay; the engine and the Python package are installed again. `START.cmd --action rollback` goes back to the version before. To turn the daily check off: `START.cmd --no-update-check`. [What the check sends, and how the files are checked](docs/FAQ.md#how-does-the-update-work)
 
 <a name="speed"></a>
 
@@ -61,7 +61,7 @@ The fastest model was faster than each of the eight other engines in all seven c
 | fastest model | 1,210 → 2,025 (1.67×) | 1,125 → 2,298 (2.04×) | 1,141 → 2,099 (1.84×) | 0.96 to 1.00× |
 | quality model | 1,128 → 2,008 (1.78×) | 1,146 → 2,243 (1.96×) | 1,096 → 2,056 (1.88×) | 0.97 to 1.01× |
 
-Both versions gave the same answer text, with one exception: in one 0.1.2 run the text changed part-way through. That was the rare problem fixed in 0.1.3. 0.1.5 and 0.1.6 have the same GPU code as 0.1.4. 0.2.0 adds GPU code for [several requests at once](#several-requests-at-once). [Details](docs/MEASUREMENTS.md#speed-thinking-off)
+Both versions gave the same answer text, with one exception: in one 0.1.2 run the text changed part-way through. That was the rare problem fixed in 0.1.3. 0.1.5 and 0.1.6 have the same GPU code as 0.1.4. 0.1.7 adds GPU code for [several requests at once](#several-requests-at-once). [Details](docs/MEASUREMENTS.md#speed-thinking-off)
 
 To measure the speed on your own PC, run `yasakani bench`. To run the three edit tasks above (the code edit, the JSONL edit and the long JSONL edit), run `yasakani bench --edit`. It prints the speed, the tokens per pass (how many tokens one pass of the model produced) and whether each answer is the expected one. [How to measure the edit speed](docs/FAQ.md#how-do-i-measure-the-edit-speed-on-my-pc)
 
@@ -118,13 +118,13 @@ With room reserved for the maximum context of 262,144 tokens, GPU memory use was
 
 ## Several requests at once (experimental)
 
-New in 0.2.0. The server can generate several requests at the same time on one GPU. Each request gets its own context, and one pass of the model works on all running requests together.
+New in 0.1.7. The server can generate several requests at the same time on one GPU. Each request gets its own context, and one pass of the model works on all running requests together.
 
 ```bat
 yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
 ```
 
-The default is `--parallel 1`: one request at a time, as before. We checked this with a development build that has the same GPU code as this release (RTX 5090, both models, thinking off): `--parallel 1` gave the same tokens as 0.1.5 on 35 prompts per model, and its speed on 15 tasks was within 1% of 0.1.5. With the 0.2.0 build itself (November 18, 2026), `--parallel 1` gave the same tokens as 0.1.6 on 35 prompts per model, and its speed on the same 15 tasks differed from 0.1.6 by -0.02% (fastest model) and -0.07% (quality model).
+The default is `--parallel 1`: one request at a time, as before. We checked this with a development build that has the same GPU code as this release (RTX 5090, both models, thinking off): `--parallel 1` gave the same tokens as 0.1.5 on 35 prompts per model, and its speed on 15 tasks was within 1% of 0.1.5.
 
 With `--parallel N`, each answer has the same tokens as when that conversation is sent alone to a new server with the same settings. This holds when the request has its own `seed` and its prompt is read the same way (`timings.snap_mode`).
 

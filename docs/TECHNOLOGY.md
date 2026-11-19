@@ -5,7 +5,7 @@ Technical notes by the author, written as a map for people who read the source c
 
 * Scope: versions 0.1.0 to 0.1.6. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
   one missing synchronization (chapter 7); 0.1.4 adds kernels for passes of 17 to 64 rows on compute capability 12.x and changes host
-  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4); 5.4 also describes the check of the wide copy passes on each card, new in 0.2.0. Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
+  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4); 5.4 also describes the check of the wide copy passes on each card, new in 0.1.7. Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).
@@ -242,8 +242,8 @@ to 0.1.3 one pass confirmed at most 16 tokens. 0.1.4 lets a copy go further:
 * **Confirming.** For passes of up to 16 rows the provisional results of the state-carrying layers are kept (5.3). A wider pass does not
   keep them; at confirmation the state is computed again from the inputs of the pass (`src/engine35.cpp`).
 * **Where.** Up to 0.1.6 wide passes were used on compute capability 12.x (RTX 50 series) only; other GPUs copied with passes of up to 16
-  rows. Since 0.2.0 they are used on RTX 30, 40 and 50 cards after a check on the card (next point). Only the RTX 5090 has been measured by us.
-* **Per GPU (since 0.2.0; first in the 0.1.7 test build).** What decides is the code the GPU runs (the PTX version of a probe kernel:
+  rows. Since 0.1.7 they are used on RTX 30, 40 and 50 cards after a check on the card (next point). Only the RTX 5090 has been measured by us.
+* **Per GPU (since 0.1.7; first in the 0.1.7 test build).** What decides is the code the GPU runs (the PTX version of a probe kernel:
   sm_86, sm_89 or sm_120), not its compute capability alone. The package allows wide passes on every GPU (engine setting `YSKN_WIDE=1`;
   `--wide off` sets 0). On sm_86 / sm_89 no width is open until a check opens it; the engine used without the package leaves them without
   wide passes, as up to 0.1.6. The check (`python/yasakani/widecheck.py`, once per GPU, driver, engine library, package
@@ -256,7 +256,7 @@ to 0.1.3 one pass confirmed at most 16 tokens. 0.1.4 lets a copy go further:
   its text in pieces of at most 1,023 tokens, so that the engine does not set up the work area of long prompt reads (about 580 MiB).
   On sm_86 / sm_89, when less than 128 MiB of GPU memory is free after the graphs of the opened widths are built, the widths are closed
   again.
-* **Time-based back-off (since 0.2.0; first in the 0.1.7 test build).** During generation the copy loop (`src/specx.cpp`) adds up the measured time of each wide pass (at most
+* **Time-based back-off (since 0.1.7; first in the 0.1.7 test build).** During generation the copy loop (`src/specx.cpp`) adds up the measured time of each wide pass (at most
   twice its running mean, so that a stall of the OS counts little; before: the running mean) and checks every 4 wide passes, also inside
   a run of fully accepted ones (before: only when a run ended), whether the tokens of these passes per millisecond reach those of a fully
   accepted 16-row pass. A run that ends with fewer than 4 wide passes since the last check is judged together with the 4 before it, so a
@@ -414,7 +414,7 @@ settings are the `YSKN_SNAP_*` entries of `DEFAULT_ENV` in `python/yasakani/runt
 * AMD GPUs and Macs are not supported: the kernels are CUDA.
 * The converter ([`tools/convert/`](../tools/convert/)) knows the layers of Qwen3.8-27B only; another model needs changes to it and to
   the engine.
-* Wide copy passes (5.4) are used on RTX 30, 40 and 50 cards since 0.2.0, after a check on the card, and were measured by us on the RTX 5090
+* Wide copy passes (5.4) are used on RTX 30, 40 and 50 cards since 0.1.7, after a check on the card, and were measured by us on the RTX 5090
   only. We have not run their machine code for 8.6 / 8.9 on an RTX 30 / 40 card. Users of the 0.1.7 test build reported an RTX 4090 and an
   RTX 5060 Ti ([#24](https://github.com/yasakani-dev/yasakani/issues/24)); no RTX 30 card has been reported yet.
   On cards other than the RTX 5090, `yasakani selfcheck` compares passes of 64 rows with passes of 16 where wide passes are open, and fails when the check at start found that they compute differently ([python/README.md](../python/README.md#the-self-check)). Their answers were checked

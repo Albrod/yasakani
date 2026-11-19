@@ -438,17 +438,17 @@ request comes in between.
 
 ## Several requests at once (experimental)
 
-These measurements are of `yasakani serve --parallel N` (new in 0.2.0, experimental). They are not compared with other engines. The tables of one request at a time above are not changed by them.
+These measurements are of `yasakani serve --parallel N` (new in 0.1.7, experimental). They are not compared with other engines. The tables of one request at a time above are not changed by them.
 
 ### Builds and common conditions
 
 * GPU: one RTX 5090 (32 GB), Windows 11. Other programs (the desktop and so on) used about 1.8 to 2.7 GB of GPU memory.
 * Engine library: the same `yskn.dll` for all runs below, SHA-256 starting `25610427`. The comparison for one request at a time is the 0.1.5 library, SHA-256 starting `918560d6`.
-* Python package: development builds of 0.2.0 on top of 0.1.5. Three versions were measured. They differ only in how the scheduler waits and keeps places, not in the engine:
+* Python package: development builds of 0.1.7 on top of 0.1.5. Three versions were measured. They differ only in how the scheduler waits and keeps places, not in the engine:
   * build A, November 17, 21:41 to November 18, 03:11;
   * build B, November 18, 05:26 to 08:56;
-  * build C, November 18, 10:10 to 11:47. Its scheduler and server are those of 0.2.0.
-* The `yskn.dll` of 0.2.0 was built from the same GPU source files into the same compiled GPU files as the library above. It differs in one C++ file, which has the GPU selection of 0.1.6 ([#20](https://github.com/yasakani-dev/yasakani/issues/20)), also for the new entry points.
+  * build C, November 18, 10:10 to 11:47. Its scheduler and server are those of 0.1.7.
+* The `yskn.dll` of 0.1.7 has the GPU code of the library above, function by function (compared with `cuobjdump`). Its host code adds the GPU selection of 0.1.6 ([#20](https://github.com/yasakani-dev/yasakani/issues/20)), also for the new entry points, the weight upload of [#25](https://github.com/yasakani-dev/yasakani/pull/25) and the wide copy passes per GPU ([BUILDING.md](../BUILDING.md)).
 * Speed runs: no other GPU job, one uncounted warm-up request first.
 * "Same" means the same token ids, finish reason, tool calls (names and argument strings), text, thinking and token counts as the same conversation sent alone to a new server with the same settings and seed. Timings and tok/s are not compared.
 
@@ -466,8 +466,6 @@ These measurements are of `yasakani serve --parallel N` (new in 0.2.0, experimen
 Build A: 717 to 719 tok/s (fastest) and 623 to 625 tok/s (quality) across all runs. Build B, fastest: the first 0.1.5 run directly after the warm-up was slow (672 tok/s); the row leaves it out (with it: +1.68% and +1.28%). Build C was not timed this way; it changes only the scheduler, which `--parallel 1` does not use.
 
 Also on 35 prompts per model, `--parallel 1` gave the same token ids as 0.1.5 and read each prompt the same way (builds A and B).
-
-Release build of 0.2.0 (the `yskn.dll` above), November 18, 2026: against 0.1.6, `--parallel 1` gave the same token ids on 35 prompts per model. Speed on the 15 tasks (thinking off, temperature 1.0, top-p 0.95, top-k 20, seed 1, context 32,768, one warm-up run, three runs, the sum of the tasks): -0.02% (fastest model, 717.2 vs 717.1 tok/s) and -0.07% (quality model, 622.6 vs 622.2 tok/s). Several at once: 5,173 requests compared, 0 different, in the checks for joining and leaving requests, cancellation, engine failures and a 30-minute mixed run with tools and images (fastest model, `--parallel 8`). In the 30-minute run no request was left stuck and the GPU memory of the server grew by 6.0 MiB. Updating from 0.1.6 to 0.2.0 with the quickstart kept the models and passed the self-check.
 
 ### Speed with several requests at once
 

@@ -53,7 +53,7 @@ model, the number of wide copy passes, and whether the answer is the expected on
 it was measured with.
 
 The wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used where the check on the card opened them
-(since 0.2.0 on RTX 30, 40 and 50 cards; see [below](#wide-copy-passes-per-gpu)); we measured them on the RTX 5090 only. Speed here is (tokens - 1) / the engine's
+(since 0.1.7 on RTX 30, 40 and 50 cards; see [below](#wide-copy-passes-per-gpu)); we measured them on the RTX 5090 only. Speed here is (tokens - 1) / the engine's
 time from the first to the last generated token, inside the process; the thinking-off tables were measured through the server's stream, so
 the numbers are close to them, not the same. The file of the code edit is CPython's `textwrap.py` with one e-mail address replaced by
 `<email>`, as in `bench/`. YASAKANI's thinking-off measurements of November 15 (the speed table and "What 0.1.4 changed") used this same
@@ -113,7 +113,7 @@ RTX 5060 Ti); we have not tried two GPUs ourselves. A `CUDA_VISIBLE_DEVICES` you
 
 ## Are the wide copy passes used on my card?
 
-Since 0.2.0, on RTX 30, 40 and 50 series cards, after a check on the card. The wide copy passes (since 0.1.4: a pass that copies the
+Since 0.1.7, on RTX 30, 40 and 50 series cards, after a check on the card. The wide copy passes (since 0.1.4: a pass that copies the
 input checks up to 64 tokens instead of 16; see [technical notes 5.4](TECHNOLOGY.md#54-wide-copy-passes-014)) make edits faster. Normal
 prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 they were used on RTX 50 cards only; the 0.1.7 test build
 ([v0.1.7-test1](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.7-test1)) let owners of other cards try them.
@@ -136,7 +136,7 @@ prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 the
   (counted over at least 128 in one run of the program). During generation the engine goes back to 16-token passes when the wide ones
   turn out slower (it checks this every 4 wide passes).
 * **Settings.** `--wide off` (or `YASAKANI_WIDE=off`) turns the wide passes off; `--wide force` uses every width without the check, to
-  compare. Since 0.2.0 `--wide on` is the same as the default.
+  compare. Since 0.1.7 `--wide on` is the same as the default.
 * **Several requests.** With `serve --parallel N`, a request that runs alone uses the widths the check opened. Passes shared by several
   requests carry at most 16 tokens together and do not use them.
 * **What we checked.** We ran the code for RTX 30 / 40 (compute capability 8.6 and 8.9) only on the RTX 5090: compiled for the RTX 5090
@@ -216,7 +216,7 @@ API key will do). If it does not connect:
 
 ## Several requests at once (experimental)
 
-All numbers in this section were measured on one RTX 5090 (32 GB) with a development build of 0.2.0, November 17 and 18, 2026. Full conditions: [MEASUREMENTS.md](MEASUREMENTS.md#several-requests-at-once-experimental).
+All numbers in this section were measured on one RTX 5090 (32 GB) with a development build of 0.1.7, November 17 and 18, 2026. Full conditions: [MEASUREMENTS.md](MEASUREMENTS.md#several-requests-at-once-experimental).
 
 ### How do I turn it on?
 
@@ -314,8 +314,7 @@ Yes. A request with a `seed` gets the same tokens as alone. A request without a 
 
 Tested on the RTX 5090 only, with both models:
 
-* One at a time (`--parallel 1`), with a development build that has the same GPU code as 0.2.0: the same tokens as 0.1.5 on 35 prompts per model, and within 1% of its speed on 15 tasks (thinking off).
-* With the 0.2.0 build: the same tokens as 0.1.6 on 35 prompts per model, and a speed difference of -0.02% (fastest) and -0.07% (quality) on the same 15 tasks.
+* One at a time (`--parallel 1`), with a development build that has the same GPU code as 0.1.7: the same tokens as 0.1.5 on 35 prompts per model, and within 1% of its speed on 15 tasks (thinking off).
 * Several at once: about 35,000 requests compared with the same conversation sent alone. None differed. This includes requests that join and leave mid-run, contexts up to 229,376 tokens, tool calls, images, cancellation and engine failures.
 * A 60-minute run with 10,178 mixed requests (text, tools and images, fastest model, N = 8): no difference, nothing stuck, and memory did not keep growing.
 
@@ -332,7 +331,7 @@ Known limits:
 * Reading a prompt pauses all others. Reading 66,416 tokens takes about 20 seconds.
 * The next turn after tool calls must come within the kept time (1 second for a short conversation). Later, it reads the conversation again. The answer is the same.
 * The wait limit counts only waiting caused by kept places and next turns. A next turn that runs alone (because no place is free) is not stopped for a new request, so a new request can wait longer than the limit.
-* Over long runs the GPU memory of the whole card rose by up to 71 MiB. In a 30-minute run with a development build the server's own GPU memory did not change; in the 30-minute run with the release build of 0.2.0 it grew by 6.0 MiB.
+* Over long runs the GPU memory of the whole card rose by up to 71 MiB. In a 30-minute run with a development build the server's own GPU memory did not change.
 
 ## Can I use other models, for example Qwen4?
 
@@ -349,7 +348,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.2.0, the quickstart (`START.cmd`) can update itself. From v0.1.6 or older, download the 0.2.0 quickstart ZIP by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself. From v0.1.6 or older, download the 0.1.7 quickstart ZIP by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, when the menu opens, the quickstart first prints that it asks github.com, then sends one HTTPS request:
   `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest`, with the User-Agent `yasakani-quickstart` and nothing else about

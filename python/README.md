@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.2.0`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
+Status: version `0.1.7`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
 
 ## What you need
 
@@ -100,7 +100,7 @@ fit the context (`--max-ctx`; the long JSONL edit needs 18,640 tokens with think
 exit code is then 1.
 
 Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used where the check on the card opened them
-(since 0.2.0 on RTX 30, 40 and 50 cards; up to 0.1.6 on compute capability 12.x only), and were measured by us on the RTX 5090 only. The
+(since 0.1.7 on RTX 30, 40 and 50 cards; up to 0.1.6 on compute capability 12.x only), and were measured by us on the RTX 5090 only. The
 header gives the widths the engine has open ([below](#wide-copy-passes-per-gpu)), and each row
 of `--json` also has the SHA-256 of the generated ids, the back-offs of the copy loop and its final times of copy cycles. The
 thinking-off tables were measured through the server's stream (2 runs per task), so these numbers are close to them, not the same. The
@@ -112,7 +112,7 @@ README: the speed table and "What 0.1.4 changed") used this same text; every ear
 
 ## Wide copy passes per GPU
 
-Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) were measured by us on the RTX 5090 only. Since 0.2.0
+Wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) were measured by us on the RTX 5090 only. Since 0.1.7
 each GPU decides which widths (32, 48, 64 rows) it uses (`yasakani/widecheck.py`; first in the 0.1.7 test build). Only answers that copy
 the input, such as edits, get faster; normal prose does not. With `serve --parallel N` a request that runs alone uses the opened widths;
 passes shared by several requests carry at most 16 rows together and do not use them.
@@ -454,7 +454,7 @@ It generates the answer of a prompt that copies most of its input (60 short JSON
 opened the wide copy passes the copied part is checked in passes of up to 64 positions), reads prompt + answer again in passes of 16 positions, and
 every generated token must be the most likely token at its position. Where passes of more than 16 positions are used, it also reads the
 text in passes of 64, and every prediction (the most likely token and the NLL, bit for bit) must be the same as in passes of 16 (since
-0.2.0: when the check of the wide copy passes found a difference at start, the self-consistency check fails). The engine
+0.1.7: when the check of the wide copy passes found a difference at start, the self-consistency check fails). The engine
 computes passes of every width with the same integer sums in the same order, so on a card that computes correctly both comparisons agree
 exactly; any difference fails the self-check (exit code 1). This finds a card whose passes of different widths do not agree; damaged
 weights give the same wrong answer in both readings, which is what `yasakani verify` and the comparison with the reference are for. On the
@@ -491,7 +491,7 @@ with Engine(pack, max_ctx=32768, dll=r"D:\yasakani\yskn.dll") as eng:
 ## Settings and environment
 
 The package sets the engine's environment variables itself (`yasakani.runtime.DEFAULT_ENV`) and removes any other `YSKN_*` variable left in your shell
-before it opens the model, because a stray setting silently changes the engine. Since 0.2.0 (first in the 0.1.7 test build) `YSKN_TEST_*` variables are kept (with a note at
+before it opens the model, because a stray setting silently changes the engine. Since 0.1.7 (first in the 0.1.7 test build) `YSKN_TEST_*` variables are kept (with a note at
 start): only an engine library built with the test exports reads them, such as `YSKN_TEST_CODE_ARCH=86`, which makes such a library take
 the decisions of sm_86 code; the released library ignores them. The published results were measured with the defaults; changing them
 means running an engine configuration that the self-check and the published numbers do not cover.
