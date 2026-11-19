@@ -46,7 +46,7 @@ OLD_PREFILL_ENV = dict(SMALL_CARD_ENV, YSKN_Q35_PF_V2="0")
 NEW_PREFILL_AREA_MIB = 579            # the work area the new prompt reading makes at the sizes of SMALL_CARD_ENV, at the first long
                                       # prompt, and keeps until the model is closed (the engine reports 607,322,112 B; measured on an
                                       # RTX 5090 shown as a 24 GB and a 16 GB card: +569 and +607 MiB at the peak)
-NEW_PREFILL_SPARE_MIB = 1024          # the engine makes that area only with this much to spare, else it reads prompts as 0.1.7 did
+NEW_PREFILL_SPARE_MIB = 1024          # the engine makes that area only with this much to spare, else it reads prompts without it (slower, same output)
 NEW_PREFILL_CUDA_GAP_MIB = 566        # CUDA reported this much less free memory than nvidia-smi on the PC of the measurements (the
                                       # RTX 5090, Windows 11); the engine asks CUDA, the planners ask nvidia-smi
 NEW_PREFILL_RESERVE_MIB = 1800        # what the planners leave free for it: area + spare + gap - MARGIN_MIB, and about 100 MiB of room
@@ -399,7 +399,7 @@ def prefill_reserve_mib(mode: str, g) -> int:
 
 
 NO_ROOM_NOTE = ("note: --prefill new: keeping %d MiB free for the work area of the new prompt reading would cost more than half of the "
-                "context, so the context is chosen without it; the engine reads prompts as 0.1.7 did when it finds no room")
+                "context, so the context is chosen without it; the engine reads prompts without that work area when it finds no room")
 
 
 def _reserve_note(plan: "ContextPlan", reserve_mib: int, chosen: bool) -> None:
@@ -409,10 +409,10 @@ def _reserve_note(plan: "ContextPlan", reserve_mib: int, chosen: bool) -> None:
     if chosen:
         plan.notes.append("note: --prefill new: the context is chosen with %d MiB more left free (the new prompt reading keeps a work "
                           "area of about %d MiB from the first long prompt on; the engine makes it only with %d MiB to spare, and "
-                          "reads prompts as 0.1.7 did when it finds less)" % (reserve_mib, NEW_PREFILL_AREA_MIB, NEW_PREFILL_SPARE_MIB))
+                          "reads prompts without it when it finds less)" % (reserve_mib, NEW_PREFILL_AREA_MIB, NEW_PREFILL_SPARE_MIB))
     else:
         plan.notes.append("note: --prefill new: the new prompt reading needs about %d MiB free in nvidia-smi after the model is loaded "
-                          "(a work area of about %d MiB, made only with %d MiB to spare); with less, prompts are read as in 0.1.7.  "
+                          "(a work area of about %d MiB, made only with %d MiB to spare); with less, prompts are read without that work area.  "
                           "The context you gave is used as it is"
                           % (NEW_PREFILL_AREA_MIB + NEW_PREFILL_SPARE_MIB + NEW_PREFILL_CUDA_GAP_MIB, NEW_PREFILL_AREA_MIB,
                              NEW_PREFILL_SPARE_MIB))

@@ -584,10 +584,10 @@ class PrefillReserveTests(unittest.TestCase):
 
     R = 1800
     CHOSEN = ("note: --prefill new: the context is chosen with 1800 MiB more left free (the new prompt reading keeps a work area of about "
-              "579 MiB from the first long prompt on; the engine makes it only with 1024 MiB to spare, and reads prompts as 0.1.7 did "
+              "579 MiB from the first long prompt on; the engine makes it only with 1024 MiB to spare, and reads prompts without it "
               "when it finds less)")
     NO_ROOM = ("note: --prefill new: keeping 1800 MiB free for the work area of the new prompt reading would cost more than half of the "
-               "context, so the context is chosen without it; the engine reads prompts as 0.1.7 did when it finds no room")
+               "context, so the context is chosen without it; the engine reads prompts without that work area when it finds no room")
 
     def test_numbers(self):
         self.assertEqual((G.NEW_PREFILL_RESERVE_MIB, G.NEW_PREFILL_AREA_MIB, G.NEW_PREFILL_SPARE_MIB, G.NEW_PREFILL_CUDA_GAP_MIB),
@@ -645,7 +645,7 @@ class PrefillReserveTests(unittest.TestCase):
         self.assertEqual((p.max_ctx, p.reserve_mib, p.env.get("YSKN_BDR_SHEAD")), (98304, self.R, "0"))
         self.assertEqual(p.notes[0], "note: --prefill new: the new prompt reading needs about 2169 MiB free in nvidia-smi after the model "
                                      "is loaded (a work area of about 579 MiB, made only with 1024 MiB to spare); with less, prompts are "
-                                     "read as in 0.1.7.  The context you gave is used as it is")
+                                     "read without that work area.  The context you gave is used as it is")
         q = G.plan_given_context(FakePack(FASTEST), det, 98304)
         self.assertEqual((q.max_ctx, q.reserve_mib), (98304, 0))
         self.assertFalse(any("--prefill new" in n for n in q.notes))
