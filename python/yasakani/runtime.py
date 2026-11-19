@@ -30,9 +30,9 @@ DEFAULT_ENV: Dict[str, str] = {
     "YSKN_Q35_KV8": "1",
     "YSKN_Q35_KV_FP16": "0",
     "YSKN_Q35_LAYER_OVERLAP": "1",
-    "YSKN_Q35_LAYER_ROWS": "4096",
+    "YSKN_Q35_LAYER_ROWS": "8192",
     "YSKN_Q35_PFALT": "1",
-    "YSKN_Q35_PMAX": "1024",
+    "YSKN_Q35_PMAX": "2048",
     "YSKN_Q35_SHARED_WEIGHTS": "1",
     "YSKN_Q35_ATX": "1",
     "YSKN_TB_CAP": "1",
@@ -41,7 +41,8 @@ DEFAULT_ENV: Dict[str, str] = {
     "YSKN_ATX_PKV": "3",
     "YSKN_ATX_VSP": "7",
     # prompt snapshots (0.1.4): up to 8 saved states in pinned host memory (about 187 MiB each); for prompts of 8,192 ids or more
-    # also on the 1,024-id grid in the last 4,096 ids before the last chat start and every 65,536 ids
+    # also on the 1,024-id grid in the last 4,096 ids and every 65,536 ids. A cold read
+    # can fill otherwise unused slots in long gaps for subsequent edits.
     "YSKN_SNAP_SLOTS": "8",
     "YSKN_SNAP_STEP": "1024",
     "YSKN_SNAP_TAIL": "4096",

@@ -41,6 +41,18 @@ void launch_attention_f32(const AttnArgs&, const KvF32&, cudaStream_t);
 void launch_attention_prefill_f32(const AttnArgs&, const KvF32&, const uint16_t* bv, uint16_t* o16, cudaStream_t);
 void launch_embedding(const EmbArgs&, cudaStream_t);
 void launch_argmax(const ArgmaxArgs&, cudaStream_t);
+void launch_prompt_logits(const ArgmaxArgs&, cudaStream_t);
+struct PromptHeadRows {
+  const int* rows;
+  const int8_t* input;
+  const float* scales;
+  const float* norms;
+  int8_t* compact_input;
+  float* compact_scales;
+  float* compact_norms;
+  int count, hidden, norm_stride;
+};
+void launch_prompt_head_rows(const PromptHeadRows&, cudaStream_t);
 void launch_nll(const NllArgs&, cudaStream_t);
 void launch_topk8(const TopkArgs&, cudaStream_t);
 void launch_advance(int* d_pos, int* d_tok, const int* d_next, int greedy, cudaStream_t);

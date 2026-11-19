@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
 #pragma once
+#ifndef YSKN_PF_QUERY_TILE
+#define YSKN_PF_QUERY_TILE 16
+#endif
+#ifndef YSKN_PF_STREAM_QUERY
+#define YSKN_PF_STREAM_QUERY 0
+#endif
+#ifndef YSKN_PF_WARP_BOUNDS
+#define YSKN_PF_WARP_BOUNDS 0
+#endif
 
 
 
@@ -59,19 +68,25 @@ template <int HALF> __device__ __forceinline__ void pk4_conv16_k5_s8(const unsig
 __device__ __forceinline__ void pk4_bar(int id, int nthreads) { asm volatile("bar.sync %0, %1;\n" :: "r"(id), "r"(nthreads) : "memory"); }   
 }  
 
-template <int KB, bool VPK, int RT, int WPT, bool QK8>
+template <int KB, bool VPK, int RT, int WPT, bool QK8, bool STREAM_Q = false, bool WARP_BOUNDS = false, bool HeadFirst = false>
 __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkArgs U) {
   constexpr int TPC = (16 * RT) / 6, JW = 4 / WPT, NB = 32 / WPT, TL = PK4_TL, PB = 32 * KB, NW = RT * WPT;
   static_assert(KB == 4 || KB == 5, "CDQ k = 4 or 5");
-  static_assert(NW == 12, "v4: the 12-warp shapes (3 x 4, 6 x 2); M <= 2 is served by v3");
-  static_assert(pk4_smem<KB, VPK, QK8>() + pk4_static<RT>() <= 101376, "shared memory: more than the 99 KB (101,376 B) a CTA may use on sm_120");
+  static_assert(NW == 12, "the three pipeline roles use four warps each");
+  constexpr int shared_tiles = WPT == 1 ? 1 : RT;
+  static_assert(pk4_smem<KB, VPK, QK8>() + pk4_static<shared_tiles>() <= 101376, "shared memory exceeds the sm_120 limit");
   const Q35AttnArgs& A = U.a;
   constexpr int D = Q35_HD;
   constexpr int KTB = QK8 ? PK4_K8 : 2 * PK4_TL;                             
   extern __shared__ __align__(16) uint16_t usm[];
   __shared__ int s_lo, s_hi;
-  __shared__ float2 x_mx[RT][4][32], x_sm[RT][4][32];
-  __shared__ uint2 x_pf[RT][4][32];
+  __shared__ float2 x_mx[shared_tiles][4][32], x_sm[shared_tiles][4][32];
+  __shared__ uint2 x_pf[shared_tiles][4][32];
+  // A single warp owns all four score fragments in the 32-query prefill tile.
+  // Its lane consumes exactly the same fragments on the next iteration.
+  constexpr int private_fragments = WPT == 1 ? 4 : 1;
+  float2 local_mx[private_fragments], local_sm[private_fragments];
+  uint2 local_pf[private_fragments];
   __shared__ float sc2[2][2][PK_KT];                                        
   const int t0 = blockIdx.x * TPC, split = blockIdx.y, kvh = blockIdx.z, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int tile = warp / WPT, part = warp % WPT, gi = lane >> 2, tig = lane & 3;
@@ -97,13 +112,45 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
   const PkRow r0 = pk_row<TPC, false>(U, base, t0, tile, gi, 0, kvh, split), r1 = pk_row<TPC, false>(U, base, t0, tile, gi, 1, kvh, split);
   const int lo0 = r0.lo, lo1 = r1.lo, ph0 = r0.ph, ph1 = r1.ph;
   const bool vrow0 = r0.v, vrow1 = r1.v;
-  if (!__syncthreads_or(r0.act || r1.act)) { if (early) { pdl_wait(); pdl_trigger(); } return; }
-  if (threadIdx.x == 0) { s_lo = 0x7fffffff; s_hi = 0; }
-  __syncthreads();
-  if (vrow0 && ph0 > lo0) { atomicMin(&s_lo, lo0); atomicMax(&s_hi, ph0); }
-  if (vrow1 && ph1 > lo1) { atomicMin(&s_lo, lo1); atomicMax(&s_hi, ph1); }
-  __syncthreads();
-  const int klo = s_lo, khi = s_hi;
+  static_assert(!STREAM_Q || (WPT == 1 && !QK8));
+  const unsigned* const query0 = reinterpret_cast<const unsigned*>(A.q16 + ((size_t)(vrow0 ? r0.tk : 0) * Q35_NH + r0.hd) * D);
+  const unsigned* const query1 = reinterpret_cast<const unsigned*>(A.q16 + ((size_t)(vrow1 ? r1.tk : 0) * Q35_NH + r1.hd) * D);
+  // One MMA fragment feeds all four score columns before the next fragment is read.
+  // Explicit loads keep these loop invariants from holding 64 registers through PV.
+  auto query_fragment = [&](int k, unsigned (&f)[4]) {
+    unsigned p0, p1, p2, p3;
+    const unsigned* a0 = query0 + 8 * k + tig;
+    const unsigned* a1 = query1 + 8 * k + tig;
+    asm volatile("ld.global.ca.u32 %0,[%1];" : "=r"(p0) : "l"(a0));
+    asm volatile("ld.global.ca.u32 %0,[%1];" : "=r"(p1) : "l"(a1));
+    asm volatile("ld.global.ca.u32 %0,[%1];" : "=r"(p2) : "l"(a0 + 4));
+    asm volatile("ld.global.ca.u32 %0,[%1];" : "=r"(p3) : "l"(a1 + 4));
+    f[0] = vrow0 ? p0 : 0u; f[1] = vrow1 ? p1 : 0u;
+    f[2] = vrow0 ? p2 : 0u; f[3] = vrow1 ? p3 : 0u;
+  };
+  int klo, khi;
+  if constexpr (WARP_BOUNDS) {
+    // In contiguous prefill every head of a given token uses the same range.
+    // Each warp can reconstruct the CTA-wide union using one lane per token.
+    static_assert(TPC <= 32);
+    const bool valid = lane < TPC && t0 + lane < A.M;
+    const int len = valid ? base + t0 + lane + 1 : 0;
+    const int parts = A.splits_short > 0 && len < A.long_len ? A.splits_short : A.splits;
+    if (!__any_sync(0xffffffffu, valid && split < parts)) return;
+    const int per = (len + parts - 1) / parts;
+    const int lo = split * per, hi = min(len - 1, lo + per);
+    const bool has_range = valid && hi > lo;
+    klo = __reduce_min_sync(0xffffffffu, has_range ? lo : 0x7fffffff);
+    khi = __reduce_max_sync(0xffffffffu, has_range ? hi : 0);
+  } else {
+    if (!__syncthreads_or(r0.act || r1.act)) { if (early) { pdl_wait(); pdl_trigger(); } return; }
+    if (threadIdx.x == 0) { s_lo = 0x7fffffff; s_hi = 0; }
+    __syncthreads();
+    if (vrow0 && ph0 > lo0) { atomicMin(&s_lo, lo0); atomicMax(&s_hi, ph0); }
+    if (vrow1 && ph1 > lo1) { atomicMin(&s_lo, lo1); atomicMax(&s_hi, ph1); }
+    __syncthreads();
+    klo = s_lo; khi = s_hi;
+  }
   const int tbeg = khi > klo ? (klo / PK_KT) * PK_KT : 0;
   const int ntiles = khi > klo ? (khi - tbeg + PK_KT - 1) / PK_KT : 0;
   const uint8_t* const kpg = U.kp + (size_t)kvh * A.max_ctx * PB;
@@ -249,7 +296,7 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
     if (busy && t >= 1) {                                                    
       float r0s = 0.f, r1s = 0.f;
       #pragma unroll
-      for (int jj = 0; jj < 4; ++jj) { const float2 q = x_sm[tile][jj][lane]; r0s += q.x; r1s += q.y; }
+      for (int jj = 0; jj < 4; ++jj) { const float2 q = WPT == 1 ? local_sm[jj] : x_sm[tile][jj][lane]; r0s += q.x; r1s += q.y; }
       r0s += __shfl_xor_sync(0xffffffffu, r0s, 1); r0s += __shfl_xor_sync(0xffffffffu, r0s, 2);
       r1s += __shfl_xor_sync(0xffffffffu, r1s, 1); r1s += __shfl_xor_sync(0xffffffffu, r1s, 2);
       l0 = l0 * c0 + r0s; l1 = l1 * c1 + r1s;
@@ -260,7 +307,8 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
       const uint16_t* const vs = vt_b + (size_t)((t - 1) & 1) * PK_KT * TL;
       #pragma unroll
       for (int kk = 0; kk < 2; ++kk) {
-        const uint2 pA = x_pf[tile][2 * kk][lane], pB = x_pf[tile][2 * kk + 1][lane];
+        const uint2 pA = WPT == 1 ? local_pf[2 * kk] : x_pf[tile][2 * kk][lane];
+        const uint2 pB = WPT == 1 ? local_pf[2 * kk + 1] : x_pf[tile][2 * kk + 1][lane];
         const unsigned pa[4] = {pA.x, pA.y, pB.x, pB.y};
         #pragma unroll
         for (int q = 0; q < NB / 2; ++q) {
@@ -286,6 +334,24 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
       const int kt0 = tbeg + t * PK_KT;
       if constexpr (!QK8) {
         const uint16_t* const ks = reinterpret_cast<const uint16_t*>(kt_b + (size_t)b * PK_KT * KTB);
+        if constexpr (STREAM_Q) {
+          #pragma unroll
+          for (int w = 0; w < JW; ++w) {
+            s[w][0] = s[w][1] = s[w][2] = s[w][3] = 0.f;
+          }
+          #pragma unroll
+          for (int kp = 0; kp < 8; ++kp) {
+            unsigned lo[4], hi[4];
+            query_fragment(2 * kp, lo); query_fragment(2 * kp + 1, hi);
+            #pragma unroll
+            for (int w = 0; w < JW; ++w) {
+              unsigned bb[4];
+              const int r = 8 * w + (lane & 7), c = 4 * kp + (lane >> 3);
+              pk_ldm4(bb, ks + r * TL + 8 * (c ^ (r & 7)));
+              pk_mma(s[w], lo, bb[0], bb[1]); pk_mma(s[w], hi, bb[2], bb[3]);
+            }
+          }
+        } else {
         #pragma unroll
         for (int w = 0; w < JW; ++w) {
           const int j = JW * part + w;
@@ -298,6 +364,7 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
             pk_mma(s[w], qa[2 * kp], bb[0], bb[1]);
             pk_mma(s[w], qa[2 * kp + 1], bb[2], bb[3]);
           }
+        }
         }
       } else {
         const uint8_t* const k8 = kt_b + (size_t)b * PK_KT * KTB;
@@ -325,7 +392,9 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
           const float v = s[w][c] * ((QK8 ? st8 : 1.f) * (ksc[kk] * 0.0625f));
           s[w][c] = (key >= (h ? lo1 : lo0) && key < (h ? ph1 : ph0)) ? v : -INFINITY;
         }
-        x_mx[tile][j][lane] = make_float2(fmaxf(s[w][0], s[w][1]), fmaxf(s[w][2], s[w][3]));
+        const float2 maximum = make_float2(fmaxf(s[w][0], s[w][1]), fmaxf(s[w][2], s[w][3]));
+        if constexpr (WPT == 1) local_mx[j] = maximum;
+        else x_mx[tile][j][lane] = maximum;
       }
     }
     __syncthreads();                                                         
@@ -333,7 +402,7 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
       const float* const vsc = sc2[b][1];
       float x0 = m0, x1 = m1;
       #pragma unroll
-      for (int jj = 0; jj < 4; ++jj) { const float2 q = x_mx[tile][jj][lane]; x0 = fmaxf(x0, q.x); x1 = fmaxf(x1, q.y); }
+      for (int jj = 0; jj < 4; ++jj) { const float2 q = WPT == 1 ? local_mx[jj] : x_mx[tile][jj][lane]; x0 = fmaxf(x0, q.x); x1 = fmaxf(x1, q.y); }
       x0 = fmaxf(x0, __shfl_xor_sync(0xffffffffu, x0, 1)); x0 = fmaxf(x0, __shfl_xor_sync(0xffffffffu, x0, 2));
       x1 = fmaxf(x1, __shfl_xor_sync(0xffffffffu, x1, 1)); x1 = fmaxf(x1, __shfl_xor_sync(0xffffffffu, x1, 2));
       c0 = exp2f((m0 - x0) * PK_LOG2E); c1 = exp2f((m1 - x1) * PK_LOG2E);
@@ -344,9 +413,13 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
         const int j = JW * part + w;
         s[w][0] = exp2f(s[w][0] * PK_LOG2E - y0); s[w][1] = exp2f(s[w][1] * PK_LOG2E - y0);
         s[w][2] = exp2f(s[w][2] * PK_LOG2E - y1); s[w][3] = exp2f(s[w][3] * PK_LOG2E - y1);
-        x_sm[tile][j][lane] = make_float2(s[w][0] + s[w][1], s[w][2] + s[w][3]);
+        const float2 sum = make_float2(s[w][0] + s[w][1], s[w][2] + s[w][3]);
+        if constexpr (WPT == 1) local_sm[j] = sum;
+        else x_sm[tile][j][lane] = sum;
         const float va = vsc[8 * j + 2 * tig], vb = vsc[8 * j + 2 * tig + 1];
-        x_pf[tile][j][lane] = make_uint2(pk_pack(s[w][0] * va, s[w][1] * vb), pk_pack(s[w][2] * va, s[w][3] * vb));
+        const uint2 packed = make_uint2(pk_pack(s[w][0] * va, s[w][1] * vb), pk_pack(s[w][2] * va, s[w][3] * vb));
+        if constexpr (WPT == 1) local_pf[j] = packed;
+        else x_pf[tile][j][lane] = packed;
       }
     }
     pk_waitn<0>();                                                           
@@ -365,7 +438,13 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
         if constexpr (!QK8) {
           #pragma unroll
           for (int kq = 0; kq < 16; ++kq) {
-            const unsigned qlo = qa[kq][h], qhi = qa[kq][2 + h];             
+            unsigned qlo, qhi;
+            if constexpr (STREAM_Q) {
+              unsigned fragment[4]; query_fragment(kq, fragment);
+              qlo = fragment[h]; qhi = fragment[2 + h];
+            } else {
+              qlo = qa[kq][h]; qhi = qa[kq][2 + h];
+            }
             const float k0 = pk_tabf(tabk, pk_state_g<KB>(kw, 16 * kq + 2 * tig)), k1 = pk_tabf(tabk, pk_state_g<KB>(kw, 16 * kq + 2 * tig + 1));
             const float k2 = pk_tabf(tabk, pk_state_g<KB>(kw, 16 * kq + 8 + 2 * tig)), k3 = pk_tabf(tabk, pk_state_g<KB>(kw, 16 * kq + 9 + 2 * tig));
             pt = __fadd_rn(pt, __fmul_rn(pk_bf_lo(qlo), k0)); pt = __fadd_rn(pt, __fmul_rn(pk_bf_hi(qlo), k1));
@@ -410,7 +489,8 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
         o[n][2 * h] += l * mu.x; o[n][2 * h + 1] += l * mu.y;
       }
     }
-    const size_t pidx = ((size_t)r.tk * A.splits + split) * Q35_NH + r.hd;
+    const size_t pidx = HeadFirst ? (size_t(r.tk) * Q35_NH + r.hd) * A.splits + split
+                                  : (size_t(r.tk) * A.splits + split) * Q35_NH + r.hd;
     if (tig == 0 && part == 0) { A.pm[pidx] = m; A.pl[pidx] = l; }
     float* const pa = A.pacc + pidx * D + 2 * tig;
     #pragma unroll
@@ -423,6 +503,15 @@ template <int KB, bool VPK, bool QK8> static void pk4_set(cudaError_t& e) {
   auto set = [&](const void* f, size_t smem) { const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
   set((const void*)q35_atxpk4_kernel<KB, VPK, 3, 4, QK8>, pk4_smem<KB, VPK, QK8>());
   set((const void*)q35_atxpk4_kernel<KB, VPK, 6, 2, QK8>, pk4_smem<KB, VPK, QK8>());
+  if constexpr (KB == 5 && !QK8)
+    set((const void*)q35_atxpk4_kernel<5,VPK,6,2,false,false,false,true>, pk4_smem<5,VPK,false>());
+  if constexpr (YSKN_PF_WARP_BOUNDS && KB == 5 && !QK8) {
+    set((const void*)q35_atxpk4_kernel<KB,VPK,6,2,false,false,true>, pk4_smem<KB,VPK,false>());
+  }
+  if constexpr (KB == 5 && !QK8)
+    set((const void*)q35_atxpk4_kernel<KB, VPK, 12, 1, QK8>, pk4_smem<KB, VPK, QK8>());
+  if constexpr (YSKN_PF_STREAM_QUERY && KB == 5 && !QK8)
+    set((const void*)q35_atxpk4_kernel<KB, VPK, 12, 1, QK8, true>, pk4_smem<KB,VPK,QK8>());
 }
 static void pk4_set_all(cudaError_t& e) {
   pk4_set<4, true, false>(e); pk4_set<4, false, false>(e); pk4_set<5, true, false>(e); pk4_set<5, false, false>(e);
@@ -430,6 +519,19 @@ static void pk4_set_all(cudaError_t& e) {
 }
 template <int KB, bool VPK, bool QK8> static void pk4_go(const Q35AtxPkArgs& U, cudaStream_t st) {
   const int M = U.a.M, sp = U.a.splits;
+  if constexpr (YSKN_PF_WARP_BOUNDS && KB == 5 && !QK8) {
+    if (M >= 16 && !U.wk && !U.a.early) {
+      launch_k(q35_atxpk4_kernel<KB,VPK,6,2,false,false,true>, dim3((M + 15) / 16, sp, Q35_KVH),
+               dim3(384), pk4_smem<KB,VPK,false>(), st, U);
+      return;
+    }
+  }
+  if constexpr (YSKN_PF_QUERY_TILE == 32 && KB == 5 && !QK8) {
+    if (M >= 32 && !U.wk) {
+      launch_k(q35_atxpk4_kernel<KB, VPK, 12, 1, QK8, bool(YSKN_PF_STREAM_QUERY)>, dim3((M + 31) / 32, sp, Q35_KVH), dim3(384), pk4_smem<KB, VPK, QK8>(), st, U);
+      return;
+    }
+  }
   if (M <= 8) launch_k(q35_atxpk4_kernel<KB, VPK, 3, 4, QK8>, dim3((M + 7) / 8, sp, Q35_KVH), dim3(384), pk4_smem<KB, VPK, QK8>(), st, U);
   else launch_k(q35_atxpk4_kernel<KB, VPK, 6, 2, QK8>, dim3((M + 15) / 16, sp, Q35_KVH), dim3(384), pk4_smem<KB, VPK, QK8>(), st, U);
 }

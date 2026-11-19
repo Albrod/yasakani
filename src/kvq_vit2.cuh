@@ -89,8 +89,57 @@ template <int KK, int CUR> __device__ __forceinline__ void tbf2_step(Vit2Smem<KK
   __syncwarp();
 }
 
-template <int KK, int CP>                                                    
-__device__ __forceinline__ void tbf2_work(const TbFastArgs& A, unsigned char* wsm, const int rj, const int mi, const int lane, const TbG& P, const TbRow& R) {
+// Each half warp traces one 64-element sequence. A predecessor depends
+// only on the top three bits of the current state.
+__device__ __forceinline__ unsigned tbf5_selectors(unsigned bytes) {
+  const unsigned pairs = (bytes | (bytes >> 4)) & 0x00ff00ffu;
+  return (pairs | (pairs >> 8)) & 0xffffu;
+}
+
+__device__ __forceinline__ uint2 tbf5_compose(uint2 after, uint2 before) {
+  return make_uint2(__byte_perm(after.x, after.y, tbf5_selectors(before.x)),
+                    __byte_perm(after.x, after.y, tbf5_selectors(before.y)));
+}
+
+__device__ __forceinline__ void tbf5_trace_parallel(Vit2Smem<5>& W, int pr, int lh, int final_state) {
+  // Lane 0 owns transitions 63..60, lane 15 owns 3..1.
+  const int last = 63 - 4 * lh;
+  uint2 edges[4];
+  const uint2 identity = make_uint2(0x03020100u, 0x07060504u);
+  uint2 transfer = identity;
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    if (last - i > 0) {
+      edges[i] = *reinterpret_cast<const uint2*>(&W.bp[last - i][pr][0]);
+      const uint2 groups = make_uint2((edges[i].x >> 2) & 0x07070707u,
+                                      (edges[i].y >> 2) & 0x07070707u);
+      transfer = tbf5_compose(groups, transfer);
+    }
+  }
+  // Scan the 16 short transfer functions in reverse chronological order.
+  #pragma unroll
+  for (int distance = 1; distance < 16; distance *= 2) {
+    const uint2 earlier = make_uint2(__shfl_up_sync(0xffffffffu, transfer.x, distance, 16),
+                                     __shfl_up_sync(0xffffffffu, transfer.y, distance, 16));
+    if (lh >= distance) transfer = tbf5_compose(transfer, earlier);
+  }
+  const uint2 prior = make_uint2(__shfl_up_sync(0xffffffffu, transfer.x, 1, 16),
+                                 __shfl_up_sync(0xffffffffu, transfer.y, 1, 16));
+  int group = final_state >> 5;
+  if (lh) group = __byte_perm(prior.x, prior.y, group) & 7u;
+  else W.st[pr][63] = static_cast<unsigned char>(final_state);
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    if (last - i > 0) {
+      const unsigned decision = __byte_perm(edges[i].x, edges[i].y, group) & 31u;
+      W.st[pr][last - i - 1] = static_cast<unsigned char>((decision << 3) | group);
+      group = decision >> 2;
+    }
+  }
+}
+
+template <int KK, int CP, bool ShareRow = false>                                                    
+__device__ __forceinline__ void tbf2_work(const TbFastArgs& A, unsigned char* wsm, const int rj, const int mi, const int lane, const TbG& P, const TbRow& R, float (*shared_input)[32] = nullptr) {
   using SM = Vit2Smem<KK>;
   constexpr int KQ = 1 << KK, UU = 256 >> KK, SH = 8 - KK;
   SM& W = *reinterpret_cast<SM*>(wsm);
@@ -98,36 +147,48 @@ __device__ __forceinline__ void tbf2_work(const TbFastArgs& A, unsigned char* ws
   const int lh = lane & 15, pr = lane >> 4;                                  
 
   
-  const unsigned char* const mup = b + P.go + 8;
-  const unsigned char* const Up = mup + (P.has_mu ? 512 : 0);
-  float r[8];
-  #pragma unroll
-  for (int w = 0; w < 8; ++w) r[w] = tbf2_y(A, R, rj, 32 * w + lane);
-  if (P.has_mu) {
+  float r[8], rms;
+  if (!ShareRow || threadIdx.x < 32) {
+    const unsigned char* const mup = b + P.go + 8;
+    const unsigned char* const Up = mup + (P.has_mu ? 512 : 0);
     #pragma unroll
-    for (int w = 0; w < 8; ++w) r[w] = __fsub_rn(r[w], tb_h2f(tb_u16(mup + 2 * (32 * w + lane))));
-  }
-  #pragma unroll
-  for (int j = 0; j < 2; ++j) {
-    if (P.m > j) {
-      float u[8], v[8];
+    for (int w = 0; w < 8; ++w) r[w] = tbf2_y(A, R, rj, 32 * w + lane);
+    if (P.has_mu) {
       #pragma unroll
-      for (int w = 0; w < 8; ++w) { u[w] = tb_h2f(tb_u16(Up + 2 * (256 * j + 32 * w + lane))); v[w] = __fmul_rn(r[w], u[w]); }
-      const float cj = tb_f16r(tbf2_sum(v));
+      for (int w = 0; w < 8; ++w) r[w] = __fsub_rn(r[w], tb_h2f(tb_u16(mup + 2 * (32 * w + lane))));
+    }
+    #pragma unroll
+    for (int j = 0; j < 2; ++j) {
+      if (P.m > j) {
+        float u[8], v[8];
+        #pragma unroll
+        for (int w = 0; w < 8; ++w) { u[w] = tb_h2f(tb_u16(Up + 2 * (256 * j + 32 * w + lane))); v[w] = __fmul_rn(r[w], u[w]); }
+        const float cj = tb_f16r(tbf2_sum(v));
+        #pragma unroll
+        for (int w = 0; w < 8; ++w) r[w] = __fsub_rn(r[w], __fmul_rn(cj, u[w]));
+      }
+    }
+    {
+      float v[8];
       #pragma unroll
-      for (int w = 0; w < 8; ++w) r[w] = __fsub_rn(r[w], __fmul_rn(cj, u[w]));
+      for (int w = 0; w < 8; ++w) v[w] = __fmul_rn(r[w], r[w]);
+      const float ssq = tbf2_sum(v);
+      rms = __fsqrt_rn(__fdiv_rn(ssq, 256.f)); if (rms == 0.f) rms = 1.f;
+    }
+
+
+    if constexpr (ShareRow) {
+      #pragma unroll
+      for (int k = 0; k < 4; ++k) shared_input[k][lane] = r[4 * CP + k];
+      shared_input[4][lane] = rms;
     }
   }
-  float rms;
-  {
-    float v[8];
+  if constexpr (ShareRow) {
+    __syncthreads();
     #pragma unroll
-    for (int w = 0; w < 8; ++w) v[w] = __fmul_rn(r[w], r[w]);
-    const float ssq = tbf2_sum(v);
-    rms = __fsqrt_rn(__fdiv_rn(ssq, 256.f)); if (rms == 0.f) rms = 1.f;
+    for (int k = 0; k < 4; ++k) r[4 * CP + k] = shared_input[k][lane];
+    rms = shared_input[4][lane];
   }
-
-  
   const unsigned to = tb_u32(b + P.off_t + 4u * (unsigned)P.tix);
   const float gain = tb_f32(b + to + 4);
   if (b[to] != 8 || b[to + 2] != 64 || b[to + 3] != 8 || tb_u16(b + 16) != 256) __trap();
@@ -181,7 +242,9 @@ __device__ __forceinline__ void tbf2_work(const TbFastArgs& A, unsigned char* ws
   }
 
   
-  if (lh == 0) {
+  if constexpr (ShareRow && KK == 5) {
+    tbf5_trace_parallel(W, pr, lh, fin);
+  } else if (lh == 0) {
     int sx = fin;
     #pragma unroll 4
     for (int t = 63; t > 0; --t) {
@@ -231,4 +294,19 @@ __global__ void __launch_bounds__(128) tbf2_vit_kernel(TbFastArgs A) {
     case 5: if (cp) tbf2_work<5, 1>(A, wsm, rj, mi, lane, P, R); else tbf2_work<5, 0>(A, wsm, rj, mi, lane, P, R); break;
     default: break;                                                          
   }
+}
+
+__global__ void __launch_bounds__(288) tbf5_shared_row_kernel(TbFastArgs A) {
+  constexpr int multipliers = 9;
+  __shared__ Vit2Smem<5> workspace[multipliers];
+  __shared__ float shared_input[5][32];
+  const int row = blockIdx.x / 2, half = blockIdx.x % 2;
+  const int lane = threadIdx.x % 32, multiplier = threadIdx.x / 32;
+  const TbRow input = tbf_row(A, row, lane);
+  const TbG plan = tbf_group(A.blob, input.g);
+  if (!plan.okg || input.pos < plan.guard || plan.mode != 0) return;
+  if (plan.kk != 5 || A.nm != multipliers) __trap();
+  auto* storage = reinterpret_cast<unsigned char*>(&workspace[multiplier]);
+  if (half) tbf2_work<5,1,true>(A, storage, row, multiplier, lane, plan, input, shared_input);
+  else tbf2_work<5,0,true>(A, storage, row, multiplier, lane, plan, input, shared_input);
 }

@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <atomic>
+#include <unordered_set>
 namespace yskn {
 
 
@@ -121,7 +122,7 @@ template <class Eng> int SpecxT<Eng>::prefill(const int32_t* ids, int n) {
   // slot on that grid runs the same passes as a fresh read.
   using clk = std::chrono::steady_clock;
   int start = 0, mode = 0, lcp = 0, saved = 0, nslots = 0; double ms_snap = 0;
-  std::vector<int> cuts;
+  std::vector<int> cuts, extra_cuts;
   int chunk = 0;
   if (c_.frontier) {
     // The frontier form: the engine holds ids[0 .. n-2] (its live sequence, e.g. set by yskn_ms_unload) and ids[n-1] was emitted but
@@ -180,11 +181,36 @@ template <class Eng> int SpecxT<Eng>::prefill(const int32_t* ids, int n) {
       }
       std::sort(pick.begin(), pick.end()); pick.erase(std::unique(pick.begin(), pick.end()), pick.end());
       cuts = pick;
+      if (mode == 0) e_.snap_add_gap_cuts(n, cuts, extra_cuts);
+    }
+  }
+  std::vector<uint8_t> keep;
+  if constexpr (std::is_same_v<Eng, Engine35>) {
+    if (c_.prefill_head && n - start >= 2048 && !std::getenv("YSKN_Q35_PREFILL_DENSE_HEAD")) {
+      keep.resize(n);
+      std::vector<uint8_t> seen(V_);
+      std::unordered_set<uint64_t> bigrams, trigrams;
+      if (c_.d1_bigram) bigrams.reserve(n - start);
+      if (c_.d1_trigram) trigrams.reserve(n - start);
+      // record() overwrites each table entry. Its final value comes from
+      // the last position with that key, even across prefill passes.
+      for (int p = n - 1; p >= start; --p) {
+        const int32_t cur = ids[p], prev = p > 0 ? ids[p - 1] : -1, p2 = p > 1 ? ids[p - 2] : -1;
+        const bool valid = cur >= 0 && cur < V_;
+        bool needed = !valid || !seen[cur];
+        if (valid) seen[cur] = 1;
+        if (c_.d1_bigram && prev >= 0 && bigrams.insert(bkey(prev, cur)).second) needed = true;
+        if (c_.d1_trigram && p2 >= 0 && prev >= 0 && trigrams.insert(tkey(p2, prev, cur)).second) needed = true;
+        keep[p] = needed;
+      }
     }
   }
   std::vector<int32_t> am(n), ti((size_t)n * 8); std::vector<float> tv((size_t)n * 8);
   auto run = [&](int a, int b) -> int {
     if (!c_.prefill_head) return e_.prefill(ids + a, b - a);
+    if constexpr (std::is_same_v<Eng, Engine35>)
+      return e_.prefill_prompt_rows(ids + a, b - a, chunk, am.data() + a, ti.data() + (size_t)a * 8, tv.data() + (size_t)a * 8,
+                                    keep.empty() ? nullptr : keep.data() + a);
     if (chunk <= 0) return e_.prefill_rows(ids + a, b - a, am.data() + a, ti.data() + (size_t)a * 8, tv.data() + (size_t)a * 8);
     int r = 0;
     for (int x = a; x < b;) {                                    // one pass per piece of the absolute grid
@@ -197,14 +223,18 @@ template <class Eng> int SpecxT<Eng>::prefill(const int32_t* ids, int n) {
   for (int c : cuts) {
     run(a, c); a = c;
     if constexpr (std::is_same_v<Eng, Engine35>) {
-      const auto t0 = clk::now(); saved += e_.snap_save_at(c) ? 1 : 0; ms_snap += std::chrono::duration<double, std::milli>(clk::now() - t0).count(); }
+      const bool extra = std::find(extra_cuts.begin(), extra_cuts.end(), c) != extra_cuts.end();
+      const auto t0 = clk::now(); saved += e_.snap_save_at(c, extra) ? 1 : 0; ms_snap += std::chrono::duration<double, std::milli>(clk::now() - t0).count(); }
   }
   const int first = run(a, n);
   if constexpr (std::is_same_v<Eng, Engine35>) nslots = e_.snap_count();
   S_.assign(ids, ids + n); S_.push_back(first);
   T2_.clear(); T2m_.clear(); T3_.clear(); draft_done_ = n;
   if (c_.prefill_head)
-    for (int p = start; p < n; ++p) record(p > 1 ? ids[p - 2] : -1, p > 0 ? ids[p - 1] : -1, ids[p], ti.data() + (size_t)p * 8, tv.data() + (size_t)p * 8);
+    for (int p = start; p < n; ++p) {
+      if (keep.empty() || keep[p])
+        record(p > 1 ? ids[p - 2] : -1, p > 0 ? ids[p - 1] : -1, ids[p], ti.data() + (size_t)p * 8, tv.data() + (size_t)p * 8);
+    }
   indexed_ = 0; for (auto& m : ng_) m.clear(); recent_.clear(); stats = SpecxStats{};
   stats.sh_mode = mode; stats.sh_start = start; stats.sh_lcp = lcp; stats.sh_slots = nslots; stats.sh_saved = saved; stats.ms_snap = ms_snap;
   return first;

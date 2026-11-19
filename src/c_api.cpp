@@ -64,6 +64,17 @@ extern "C" int yskn_logits_rows(yskn_engine* e, int row0, int n, float* out) { Y
 #else
 #  define YSKN_TEST_API
 #endif
+#if defined(YSKN_TEST_EXPORTS)
+extern "C" YSKN_TEST_API int yskn_test_prompt_rows(yskn_engine* e, const int32_t* ids, int n, int32_t* first, int32_t* predictions, int32_t* top_ids, float* top_vals) {
+  YSKN_TRY(if (!e->q) throw std::runtime_error("prompt row check needs 27B");
+           *first = e->q->prefill_prompt_rows(ids, n, e->q->prefill_chunk(), predictions, top_ids, top_vals))
+}
+extern "C" YSKN_TEST_API int yskn_test_sparse_prompt_rows(yskn_engine* e, const int32_t* ids, int n, int32_t* first, int32_t* predictions, int32_t* top_ids,
+                                                       float* top_vals, const uint8_t* keep) {
+  YSKN_TRY(if (!e->q) throw std::runtime_error("prompt row check needs 27B");
+           *first = e->q->prefill_prompt_rows(ids, n, e->q->prefill_chunk(), predictions, top_ids, top_vals, keep))
+}
+#endif
 extern "C" YSKN_TEST_API int yskn_test_xsum(yskn_engine* e, const char* name, int M, unsigned seed, int variant, long long* out4) {
   YSKN_TRY(if (!e->q) throw std::runtime_error("test_xsum: qwen3_5 engine only"); e->q->test_xsum(name, M, seed, variant, out4)) }
 extern "C" YSKN_TEST_API int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(ms_gate(e); *ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }

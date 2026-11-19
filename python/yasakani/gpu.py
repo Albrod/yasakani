@@ -33,6 +33,9 @@ MARGIN_MIB = 512                      # the desktop's drift, CUDA graphs, image 
 OVERHEAD_MIB = {"fastest": 2100, "quality": 2300}    # GPU memory above the three model files (measured 2,090 and 2,291 MiB)
 QUALITY_WEIGHTS_MIB = 11000           # weights larger than this are counted with the overhead of the quality model
 FULL_CONTEXT_MIN_TOTAL_MIB = 30000    # cards with this much memory keep the model's own context (as before 0.1.3)
+# Cards with less than FULL_CONTEXT_MIN_TOTAL_MIB keep the prompt-reading sizes of 0.1.7: OVERHEAD_MIB was measured with them.  The
+# larger defaults of runtime.py (2,048 rows per pass, 8,192 rows of layer work area) take about 0.6 to 0.7 GB more at load.
+SMALL_CARD_ENV = {"YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"}
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the released models fit on (fastest model only)
 QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
 HEAD_SLOWER = "about 3%"              # each pass without the output head, measured on the RTX 5090
@@ -313,6 +316,13 @@ class ContextPlan:
     parallel: int = 1                     # stream slots the context was chosen for (plan_parallel; 1 = one request at a time)
 
 
+def _small_card_env(plan: "ContextPlan", g) -> None:
+    """On a card with less than FULL_CONTEXT_MIN_TOTAL_MIB: the prompt-reading sizes of 0.1.7 (SMALL_CARD_ENV), so that the overhead
+    the context is chosen with stays true."""
+    if g is not None and g.total_mib is not None and g.total_mib < FULL_CONTEXT_MIN_TOTAL_MIB:
+        plan.env.update(SMALL_CARD_ENV)
+
+
 def overhead_mib(weights_bytes: int) -> int:
     return OVERHEAD_MIB["quality"] if weights_bytes / MIB > QUALITY_WEIGHTS_MIB else OVERHEAD_MIB["fastest"]
 
@@ -367,6 +377,7 @@ def plan_context(pack, det: Detected) -> ContextPlan:
     nvidia-smi gave no answer.  Raises YasakaniError when not even MIN_CONTEXT tokens fit."""
     plan = ContextPlan()
     g = det.worst()
+    _small_card_env(plan, g)
     if g is None or g.total_mib is None or g.free_mib is None:
         if len(det.candidates) > 1:
             plan.notes.append("note: this PC has %d GPUs and their memory could not be read; the context stays %d tokens"
@@ -404,6 +415,7 @@ def plan_given_context(pack, det: Detected, max_ctx: int) -> ContextPlan:
     the free-memory check it makes for one it finds by itself.  Unchanged on larger cards and when nvidia-smi gave no answer."""
     plan = ContextPlan(max_ctx=int(max_ctx))
     g = det.worst()
+    _small_card_env(plan, g)
     if g is None or g.total_mib is None or g.free_mib is None or g.total_mib >= FULL_CONTEXT_MIN_TOTAL_MIB:
         return plan
     plan.free_mib = g.free_mib
@@ -453,6 +465,7 @@ def plan_parallel(pack, det: Detected, n: int) -> ContextPlan:
     n = int(n)
     plan = ContextPlan(parallel=n)
     g = det.worst()
+    _small_card_env(plan, g)
     if g is None or g.total_mib is None or g.free_mib is None:
         plan.parallel = 1
         plan.notes.append("note: --parallel %d chooses the context from the free GPU memory, and nvidia-smi could not tell it; serving "
@@ -485,6 +498,7 @@ def plan_given_parallel(pack, det: Detected, max_ctx: int, n: int) -> ContextPla
     only without it.  Unchanged when nvidia-smi gave no answer."""
     plan = ContextPlan(max_ctx=int(max_ctx), parallel=int(n))
     g = det.worst()
+    _small_card_env(plan, g)
     if g is None or g.total_mib is None or g.free_mib is None:
         return plan
     plan.free_mib = g.free_mib

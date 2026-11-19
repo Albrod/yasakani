@@ -20,4 +20,6 @@ struct Q35PkMs { Q35MsRows ms; const uint8_t* const* kp = nullptr; const uint8_t
 void launch_q35_atx_pk_ms(const Q35AttnArgs&, const Q35PkArgs&, const Q35PkMs&, cudaStream_t);
 // "" when the attention settings of this process (YSKN_ATX_PK3_*) and kb take a multi-stream kernel the library has, else the reason
 std::string q35_atx_pk_ms_unsupported(int kb);
+bool launch_q35_prefill_atx_pk(const Q35AttnArgs&, const uint8_t* wk, const Q35PkArgs&, cudaStream_t);
+void launch_q35_head_first_combine(const Q35CombineArgs&, cudaStream_t);
 }  

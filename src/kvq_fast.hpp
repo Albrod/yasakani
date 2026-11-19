@@ -8,6 +8,7 @@
 #include <cuda_runtime.h>
 namespace yskn {
 constexpr int TBF_TILE = 128;                                   
+constexpr int TBF_ALL_FIVE = 8;
 constexpr int TBF_MAXNM = 16;                                   
 constexpr size_t TBF_W_OFS = (size_t)TBF_TILE * 8 * TBF_MAXNM * 256;                                   
 inline size_t tbf_scratch_bytes() { return TBF_W_OFS + (size_t)TBF_TILE * 8 * TBF_MAXNM * 8 * sizeof(float); }
@@ -53,7 +54,7 @@ inline bool tbf_parse_blob(const unsigned char* b, size_t n, int& nm, int& has_c
   auto u32 = [&](size_t o) { return u16(o) | (u16(o + 2) << 16); };
   if (n < 100) return false;
   nm = (int)u16(24); const unsigned ngrp = u32(28), off_tab = u32(36), off_g = u32(40); has_cdq = 0;
-  int n45 = 0, bad45 = 0, nother = 0;
+  int n5 = 0, n45 = 0, bad45 = 0, nother = 0;
   for (unsigned g = 0; g < ngrp; ++g) {
     const size_t go = u32(off_g + 4 * (size_t)g); if (go + 8 > n) return false;
     if (b[go] != 0) continue;
@@ -61,6 +62,7 @@ inline bool tbf_parse_blob(const unsigned char* b, size_t n, int& nm, int& has_c
     const int kk = b[go + 1];
     if (kk != 4 && kk != 5) { ++nother; continue; }
     ++n45;
+    if (kk == 5) ++n5;
     const size_t tp = off_tab + 4 * (size_t)b[go + 2];
     bool ok = tp + 4 <= n;
     const size_t to = ok ? (size_t)u32(tp) : 0;
@@ -68,6 +70,7 @@ inline bool tbf_parse_blob(const unsigned char* b, size_t n, int& nm, int& has_c
     for (int s = 0; ok && s < 256; ++s) { const int c = (int)(short)u16(to + 12 + 2 * (size_t)s); if (c > 1100 || c < -1100) ok = false; }
     if (!ok) ++bad45;
   }
+  if (n45 && n5 == n45 && !bad45 && !nother) has_cdq |= TBF_ALL_FIVE;
   if (n45 && !bad45) has_cdq |= 2 | (nother ? 4 : 0);
   return true;
 }

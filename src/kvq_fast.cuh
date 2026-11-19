@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
 #pragma once
+#include <cstdio>
 
 
 
@@ -242,7 +243,16 @@ void launch_tb_fast(const TbFastArgs& A, cudaStream_t st) {
   if (A.nrow <= 0) return;
   if (A.has_cdq && (A.stage & 1)) {
     if ((A.has_cdq & 2) && !A.vit2_off && tbf_vit2_env()) {                  
-      tbf2_vit_kernel<<<(A.nrow * A.nm * 2 + 3) / 4, 128, 0, st>>>(A);
+      if ((A.has_cdq & TBF_ALL_FIVE) && A.nm == 9 && A.nrow == 1024) {
+        static thread_local bool reported = false;
+        if (!reported) {
+          std::fprintf(stderr, "[prefill kv shared row] 1024 rows, nine multipliers\n");
+          reported = true;
+        }
+        tbf5_shared_row_kernel<<<2 * A.nrow, 288, 0, st>>>(A);
+      } else {
+        tbf2_vit_kernel<<<(A.nrow * A.nm * 2 + 3) / 4, 128, 0, st>>>(A);
+      }
       if (A.has_cdq & 4) { TbFastArgs L = A; L.k3_only = 1; tbf_vit_kernel<<<L.nrow * L.nm * 4, 256, 0, st>>>(L); }
     } else tbf_vit_kernel<<<A.nrow * A.nm * 4, 256, 0, st>>>(A);
   }

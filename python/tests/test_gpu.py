@@ -221,7 +221,7 @@ class DeviceOrderTests(unittest.TestCase):
 
     def test_plan_for_the_chosen_gpu(self):
         plan = G.plan_context(FakePack(FASTEST), G.detect(1, environ=PCI, gpus=self.gpus()))
-        self.assertEqual((plan.max_ctx, plan.env, plan.free_mib), (98304, {"YSKN_BDR_SHEAD": "0"}, 15911))
+        self.assertEqual((plan.max_ctx, plan.env, plan.free_mib), (98304, dict(G.SMALL_CARD_ENV, YSKN_BDR_SHEAD="0"), 15911))
         self.assertFalse(any("GPUs" in n for n in plan.notes))
         with self.assertRaises(YasakaniError) as cm:                           # GPU 0 is the A2000: it says so, and which GPU has room
             G.plan_context(FakePack(FASTEST), G.detect(0, environ=PCI, gpus=self.gpus()))
@@ -369,17 +369,17 @@ class ContextRuleTests(unittest.TestCase):
     def test_plan_16gb(self):
         plan = G.plan_context(FakePack(FASTEST), det_of(smi_line(0, "NVIDIA GeForce RTX 4080", "8.9", 16376, 1000)))
         self.assertEqual(plan.max_ctx, 81920)
-        self.assertEqual(plan.env, {"YSKN_BDR_SHEAD": "0"})
+        self.assertEqual(plan.env, dict(G.SMALL_CARD_ENV, YSKN_BDR_SHEAD="0"))
         self.assertTrue(any("bdraft2_k8.shead" in n and "3%" in n for n in plan.notes))
         self.assertTrue(any(n.startswith("context: 81920 tokens") for n in plan.notes))
         plan = G.plan_context(FakePack(FASTEST), det_of(smi_line(0, "NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 0)))
-        self.assertEqual((plan.max_ctx, plan.env), (65536, {}))
+        self.assertEqual((plan.max_ctx, plan.env), (65536, G.SMALL_CARD_ENV))
 
     def test_plan_24gb(self):
         plan = G.plan_context(FakePack(QUALITY), det_of(smi_line(0, "NVIDIA GeForce RTX 3090", "8.6", 24576, 1000)))
-        self.assertEqual((plan.max_ctx, plan.env, plan.notes), (None, {}, []))
+        self.assertEqual((plan.max_ctx, plan.env, plan.notes), (None, G.SMALL_CARD_ENV, []))
         plan = G.plan_context(FakePack(QUALITY), det_of(smi_line(0, "NVIDIA GeForce RTX 4090", "8.9", 24564, 4000)))
-        self.assertEqual((plan.max_ctx, plan.env), (163840, {}))
+        self.assertEqual((plan.max_ctx, plan.env), (163840, G.SMALL_CARD_ENV))
 
     def test_plan_does_not_fit(self):
         with self.assertRaises(YasakaniError) as cm:
@@ -399,22 +399,42 @@ class ContextRuleTests(unittest.TestCase):
         """--max-ctx: the context stays as given; the draft model's output head only where it fits beside it (plan_given_context)."""
         ti = det_of(smi_line(0, "NVIDIA GeForce RTX 5070 Ti", "12.0", 16303, 340))     # no display on the card: 340 MiB in use
         plan = G.plan_given_context(FakePack(FASTEST), ti, 16384)                    # the head fits beside 16,384 tokens
-        self.assertEqual((plan.max_ctx, plan.env, plan.notes), (16384, {}, []))
+        self.assertEqual((plan.max_ctx, plan.env, plan.notes), (16384, G.SMALL_CARD_ENV, []))
         plan = G.plan_given_context(FakePack(FASTEST), ti, 98304)                    # it does not beside 98,304 (0.1.4 loaded it anyway)
-        self.assertEqual((plan.max_ctx, plan.env), (98304, {"YSKN_BDR_SHEAD": "0"}))
+        self.assertEqual((plan.max_ctx, plan.env), (98304, dict(G.SMALL_CARD_ENV, YSKN_BDR_SHEAD="0")))
         self.assertEqual(len(plan.notes), 1)
         self.assertIn("bdraft2_k8.shead", plan.notes[0])
         self.assertIn("beside 98304 tokens", plan.notes[0])
         self.assertNotIn("context: ", plan.notes[0])                                 # only the rule's own choice is reported that way
         plan = G.plan_given_context(FakePack(FASTEST), ti, 1048576)                  # far too long: still tried as given
-        self.assertEqual((plan.max_ctx, plan.env), (1048576, {"YSKN_BDR_SHEAD": "0"}))
+        self.assertEqual((plan.max_ctx, plan.env), (1048576, dict(G.SMALL_CARD_ENV, YSKN_BDR_SHEAD="0")))
         rtx4090 = det_of(smi_line(0, "NVIDIA GeForce RTX 4090", "8.9", 24564, 4000))
-        self.assertEqual(G.plan_given_context(FakePack(QUALITY), rtx4090, 163840).env, {})     # what plan_context chooses there
-        self.assertEqual(G.plan_given_context(FakePack(QUALITY), rtx4090, 262144).env, {"YSKN_BDR_SHEAD": "0"})
-        for det in (det_of(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 20000)), G.Detected(),
-                    det_of("0, GPU-1, NVIDIA GeForce RTX 4080, 8.9, 16376, [N/A], 581.57")):   # 30,000 MiB or more, or unknown: unchanged
+        self.assertEqual(G.plan_given_context(FakePack(QUALITY), rtx4090, 163840).env, G.SMALL_CARD_ENV)     # what plan_context chooses there
+        self.assertEqual(G.plan_given_context(FakePack(QUALITY), rtx4090, 262144).env, dict(G.SMALL_CARD_ENV, YSKN_BDR_SHEAD="0"))
+        for det in (det_of(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 20000)), G.Detected()):   # 30,000 MiB or more, or unknown
             plan = G.plan_given_context(FakePack(QUALITY), det, 262144)
             self.assertEqual((plan.max_ctx, plan.env, plan.notes), (262144, {}, []))
+        plan = G.plan_given_context(FakePack(QUALITY), det_of("0, GPU-1, NVIDIA GeForce RTX 4080, 8.9, 16376, [N/A], 581.57"), 262144)
+        self.assertEqual((plan.max_ctx, plan.env, plan.notes), (262144, G.SMALL_CARD_ENV, []))      # free unknown: only the sizes of 0.1.7
+
+    def test_small_card_keeps_the_prompt_sizes_of_017(self):
+        """Under FULL_CONTEXT_MIN_TOTAL_MIB the prompt-reading sizes stay those of 0.1.7 (OVERHEAD_MIB was measured with them); the
+        RTX 5090 keeps the larger defaults of runtime.py.  The 16 GB case with the published sizes: the context is chosen as before."""
+        self.assertEqual(G.SMALL_CARD_ENV, {"YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"})
+        for line in (smi_line(0, "NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 900), smi_line(0, "NVIDIA GeForce RTX 3090", "8.6", 24576, 1000)):
+            det = det_of(line)
+            for plan in (G.plan_context(FakePack(FASTEST), det), G.plan_given_context(FakePack(FASTEST), det, 32768),
+                         G.plan_parallel(FakePack(FASTEST), det, 2), G.plan_given_parallel(FakePack(FASTEST), det, 16384, 2)):
+                self.assertEqual({k: plan.env[k] for k in G.SMALL_CARD_ENV}, G.SMALL_CARD_ENV, line)
+        plan = G.plan_context(FakePack(FASTEST), det_of(smi_line(0, "NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, 900)))
+        self.assertEqual(plan.max_ctx, G.choose(16311 - 900, *FASTEST, 262144)[0])
+        r5090 = det_of(smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607, 1107))
+        for plan in (G.plan_context(FakePack(FASTEST), r5090), G.plan_parallel(FakePack(FASTEST), r5090, 2)):
+            self.assertFalse(set(G.SMALL_CARD_ENV) & set(plan.env))
+        from yasakani.runtime import RuntimeProfile
+        with tempfile.TemporaryDirectory() as t:
+            prof = RuntimeProfile.default(support.make_pack(Path(t)), G.SMALL_CARD_ENV)
+        self.assertEqual((prof.env["YSKN_Q35_PMAX"], prof.env["YSKN_Q35_LAYER_ROWS"]), ("1024", "4096"))
 
 
 class QuickstartTests(unittest.TestCase):

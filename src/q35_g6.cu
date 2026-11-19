@@ -276,6 +276,8 @@ __global__ void __launch_bounds__(G6_NT, 1) mt_gemm6_kernel(Q35G6Args P, int MT,
 #undef G6F
 }
 
+#include "q35_g6_whole.cuh"
+
 template <int MB, bool BG, bool PN> static int g6_prepare_kernel(int sms) {
   using C = G6C<MB>;
   if (cudaFuncSetAttribute(mt_gemm6_kernel<MB, BG, PN>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)C::SMEM) != cudaSuccess)
@@ -293,12 +295,30 @@ void q35_g6_prepare(Q35G6Workspace& W, int sms) {
   int cap = *std::max_element(W.resident, W.resident + 4);
   W.partial_bytes = (size_t)(cap + 1) * G6_NT * G6C<4>::NACC * sizeof(long long);
   W.flags_bytes = (size_t)(cap + 1) * 2 * sizeof(int);
+  if (W.tile == 4 && sms == 170) {
+    Q35G6Workspace wide;
+    g6_prepare_whole<4, 2, 4, 34>(wide, sms);
+    W.wide_ready = wide.tile_rows == 128 && wide.tile_resident >= sms;
+  }
+  switch (W.tile) {
+    case 1: g6_prepare_whole<2, 4, 4>(W, sms); break;
+    case 2: g6_prepare_whole<2, 2, 4>(W, sms); break;
+    case 3: g6_prepare_whole<2, 2, 2>(W, sms); break;
+    case 4: g6_prepare_whole<4, 2, 4>(W, sms); break;
+    default: W.tile = 0; break;
+  }
 }
 template <int MB, bool BG, bool PN> static void g6_launch(Q35G6Args P, Q35G6Workspace& W, cudaStream_t st) {
   const int MT = (P.R + G6C<MB>::BM - 1) / G6C<MB>::BM;
   const int NT = P.seg[P.n_seg - 1].cta_begin + P.seg[P.n_seg - 1].ctas;
   const int G = P.seg[0].t.Kc / 512;
-  const int ctas = std::min(MT * NT, W.resident[(BG ? 2 : 0) + (PN ? 1 : 0)]);
+  const int tiles = MT * NT;
+  const int resident = W.resident[(BG ? 2 : 0) + (PN ? 1 : 0)];
+  const int waves = (tiles + resident - 1) / resident;
+  // When whole tiles already occupy at least 90% of the available slots, scheduling
+  // one CTA per tile avoids writing partial int64 tiles and waiting on other CTAs.
+  const bool whole = waves > 1 && (long long)tiles * 10 >= (long long)waves * resident * 9;
+  const int ctas = whole ? tiles : std::min(tiles, resident);
   mt_gemm6_kernel<MB, BG, PN><<<ctas, G6_NT, G6C<MB>::SMEM, st>>>(P, MT, G, W.partial, W.flags);
 }
 void q35_g6_decode(const TensorDev& t, uint4* dst, cudaStream_t st) {
@@ -312,6 +332,10 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
     return false;
   size_t bytes = 0, shape_bytes = 0; int nt = 0; bool pn = false; const int Kc = P.seg[0].t.Kc;
   if (Kc < 512 || Kc % 512) return false;
+  const int groups = Kc / 512;
+  bool whole = W.tile && groups <= G6_GP && P.M % W.tile_rows == 0;
+  for (int s = 0; whole && s < P.n_seg; ++s) whole = P.seg[s].t.N % W.tile_cols == 0;
+  const int tile_cols = whole ? W.tile_cols : G6_BN;
   Q35G6Args Q{}; Q.n_seg = P.n_seg; Q.R = P.M; Q.eps = P.xsm_eps; Q.us_out = P.us_out;
   Q.xsm_sst = P.xsm_sst; Q.xsm_nb = P.xsm_nb; Q.xsm_n = P.xsm_n; Q.pm = pm;
   for (int s = 0; s < P.n_seg; ++s) {
@@ -319,7 +343,7 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
     if (!t.lno || !t.lut8 || t.tile_k || t.group_worker || t.Kc != Kc || t.N <= 0 || t.N % 16 || (t.k_default != 4 && t.k_default != 6 && t.k_default != 8))
       return false;
     auto& g = Q.seg[s]; g.t = t; g.y = P.seg[s].part; g.ldy = t.N; g.qx = P.qx; g.alpha = P.alpha; g.S = P.xsm_S;
-    g.cta_begin = nt; g.ctas = (t.N + 127) / 128; nt += g.ctas; pn |= t.N % 128 != 0;
+    g.cta_begin = nt; g.ctas = (t.N + tile_cols - 1) / tile_cols; nt += g.ctas; pn |= t.N % tile_cols != 0;
     shape_bytes += (size_t)t.N*t.Kc;
     const auto saved=W.cached.find(t.lno);
     if (saved!=W.cached.end()) g.w8=saved->second;
@@ -346,7 +370,23 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
     else if (t.k_default == 8) mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst);
     else mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
   }
-  if (Kc / 512 > G6_GP) { if (pn) g6_launch<2, true, true>(Q, W, st); else g6_launch<2, true, false>(Q, W, st); }
+  if (W.wide_ready && W.tile == 4 && P.M == 2048 && P.n_seg == 1 &&
+      P.seg[0].t.N == 5120 && Kc == 17408) {
+    static thread_local bool reported = false;
+    if (!reported) {
+      fprintf(stderr, "[prefill wide34] rows=2048 cols=5120 K=17408\n");
+      reported = true;
+    }
+    g6_launch_whole<4, 2, 4, 34>(Q, nt, groups, st);
+  } else if (whole) {
+    switch (W.tile) {
+      case 1: g6_launch_whole<2, 4, 4>(Q, nt, groups, st); break;
+      case 2: g6_launch_whole<2, 2, 4>(Q, nt, groups, st); break;
+      case 3: g6_launch_whole<2, 2, 2>(Q, nt, groups, st); break;
+      case 4: g6_launch_whole<4, 2, 4>(Q, nt, groups, st); break;
+    }
+  }
+  else if (groups > G6_GP) { if (pn) g6_launch<2, true, true>(Q, W, st); else g6_launch<2, true, false>(Q, W, st); }
   else { if (pn) g6_launch<4, false, true>(Q, W, st); else g6_launch<4, false, false>(Q, W, st); }
   return true;
 }

@@ -1280,6 +1280,61 @@ void launch_q35_attention(const Q35AttnArgs& A, cudaStream_t st) {
   else launch_k(q35_attention_kernel<false>, dim3(Q35_KVH, A.splits, A.M), dim3(128), 0, st, A); }
 
 
+
+// One block handles the same pair of heads as the general reduction.
+template <int Splits, bool HeadFirst>
+__device__ __forceinline__ float q35_prefill_combine_fixed(const Q35CombineArgs& A, int tok,
+                                                           int blk, int tid, int head, int d) {
+  static_assert(Splits == 31 || Splits == 42);
+  __shared__ float scales[2][Splits], denominators[2];
+  float partial[Splits];
+  const size_t first = (size_t)tok * A.splits * Q35_NH;
+  #pragma unroll
+  for (int s = 0; s < Splits; ++s)
+    partial[s] = HeadFirst ? A.pacc[((size_t(tok) * Q35_NH + head) * A.splits + s) * Q35_HD + d]
+                           : A.pacc[(first + s * Q35_NH + head) * Q35_HD + d];
+
+  if (tid < 64) {
+    const int h = tid >> 5, lane = tid & 31;
+    const size_t offset = HeadFirst ? (size_t(tok) * Q35_NH + 2 * blk + h) * A.splits + lane
+                                    : first + lane * Q35_NH + 2 * blk + h;
+    constexpr int split_stride = HeadFirst ? 1 : Q35_NH;
+    float maxima[2] = {-1e30f, -1e30f}, sums[2] = {}, products[2];
+    #pragma unroll
+    for (int part = 0; part < (Splits + 31) / 32; ++part) {
+      if (lane + 32 * part < Splits) {
+        maxima[part] = A.pm[offset + 32 * part * split_stride];
+        sums[part] = A.pl[offset + 32 * part * split_stride];
+      }
+    }
+    float largest = fmaxf(maxima[0], maxima[1]);
+    #pragma unroll
+    for (int delta = 16; delta; delta /= 2)
+      largest = fmaxf(largest, __shfl_xor_sync(0xffffffffu, largest, delta));
+    largest = fmaxf(-1e30f, largest);
+    #pragma unroll
+    for (int part = 0; part < (Splits + 31) / 32; ++part) {
+      const float sc = maxima[part] > -1e29f ? expf(maxima[part] - largest) : 0.f;
+      if (lane + 32 * part < Splits) scales[h][lane + 32 * part] = sc;
+      products[part] = __fmul_rn(sc, sums[part]);
+    }
+    float denominator = 0.f;
+    #pragma unroll
+    for (int s = 0; s < Splits; ++s)
+      denominator = __fadd_rn(denominator, __shfl_sync(0xffffffffu, products[s / 32], s % 32));
+    if (lane == 0) denominators[h] = __fadd_rn(denominator, 0.f);
+  }
+  __syncthreads();
+  const int h = head - 2 * blk;
+  float output = 0.f;
+  #pragma unroll
+  for (int s = 0; s < Splits; ++s)
+    output = __fadd_rn(output, __fmul_rn(scales[h][s], partial[s]));
+  // Match the sign of zero after the general path processes padded splits.
+  return __fdiv_rn(__fadd_rn(output, 0.f), denominators[h]);
+}
+
+template <bool Fixed = false, bool HeadFirst = false>
 __global__ void __launch_bounds__(512) q35_combine_kernel(Q35CombineArgs A) {
   __shared__ float buf[512]; __shared__ unsigned s_amax;
   const int blk = blockIdx.x, tok = blockIdx.y, tid = threadIdx.x, e = blk * 512 + tid, head = e / Q35_HD, d = e % Q35_HD;
@@ -1288,7 +1343,13 @@ __global__ void __launch_bounds__(512) q35_combine_kernel(Q35CombineArgs A) {
   float y;
   int S = A.splits;                                                        
   if (A.splits_short > 0) { const int dp = A.wk ? (int)A.wk[tok] : tok; if (*A.d_pos + dp + 1 < A.long_len) S = A.splits_short; }
-  if (S <= 32) {                                                    
+  if constexpr (Fixed) {
+    y = S == 31 ? q35_prefill_combine_fixed<31, HeadFirst>(A, tok, blk, tid, head, d)
+                : q35_prefill_combine_fixed<42, HeadFirst>(A, tok, blk, tid, head, d);
+    #if !YSKN_KVX_ROT
+    y = rbf(y);
+    #endif
+  } else if (S <= 32) {                                                    
     
     __shared__ float s_sc[2][32], s_L[2];                                  
     float pa[32];
@@ -1400,7 +1461,23 @@ __global__ void __launch_bounds__(512) q35_kz_combine_kernel(Q35CombineArgs A, f
 void launch_q35_kz_combine(const Q35CombineArgs& A, float* dbg, cudaStream_t st) {
   launch_k(q35_kz_combine_kernel, dim3(Q35_NH * Q35_HD / 512, A.M), dim3(512), 0, st, A, dbg);
 }
-void launch_q35_combine(const Q35CombineArgs& A, cudaStream_t st) { launch_k(q35_combine_kernel, dim3(Q35_NH * Q35_HD / 512, A.M), dim3(512), 0, st, A); }
+void launch_q35_head_first_combine(const Q35CombineArgs& A, cudaStream_t st) {
+  const dim3 blocks(Q35_NH * Q35_HD / 512, A.M);
+  launch_k(q35_combine_kernel<true,true>, blocks, dim3(512), 0, st, A);
+}
+void launch_q35_combine(const Q35CombineArgs& A, cudaStream_t st) {
+  const dim3 blocks(Q35_NH * Q35_HD / 512, A.M);
+  if (A.M == 64 && !A.wk && A.splits == 42 && (!A.splits_short || A.splits_short == 31)) {
+    static thread_local bool reported = false;
+    if (!reported) {
+      fprintf(stderr, "[prefill combine] rows=64 splits=42 short=%d\n", A.splits_short);
+      reported = true;
+    }
+    launch_k(q35_combine_kernel<true>, blocks, dim3(512), 0, st, A);
+  } else {
+    launch_k(q35_combine_kernel<false>, blocks, dim3(512), 0, st, A);
+  }
+}
 
 
 __global__ void __launch_bounds__(512) q35_mlp_kernel(Q35MlpArgs A) {

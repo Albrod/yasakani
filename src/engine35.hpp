@@ -77,7 +77,9 @@ public:
   
   
   float time_verify(int M, int mask, int iters);
-  int  prefill_rows(const int32_t* ids, int n, int32_t* out_argmax, int32_t* top_ids, float* top_vals);   
+  int  prefill_rows(const int32_t* ids, int n, int32_t* out_argmax, int32_t* top_ids, float* top_vals);
+  int  prefill_prompt_rows(const int32_t* ids, int n, int grid, int32_t* out_argmax, int32_t* top_ids, float* top_vals,
+                           const uint8_t* keep = nullptr);
   
   void load_draft(const std::string& path, const std::string& head_ids_path);   
   bool has_draft() const { return mtp_.on; }
@@ -128,7 +130,8 @@ public:
   // GPU.  A slot holds the linear-attention state, the conv history and the drafter ring at one position.
   void snap_set_seq(const int32_t* ids, int n) { sh_seq_.assign(ids, ids + n); }
   const std::vector<int32_t>& snap_seq() const { return sh_seq_; }
-  bool snap_save_at(int n);                          // take a slot at the current position n (<= snap_seq().size())
+  bool snap_save_at(int n, bool extra = false);
+  void snap_add_gap_cuts(int n, std::vector<int>& cuts, std::vector<int>& extra);
   void snap_load_slot(int i);                        // restore slot i (position = its position)
   int  snap_best(int L) const;                       // the slot with the largest position <= L, or -1
   int  snap_slot_pos(int i) const { return sh_slots_[(size_t)i].pos; }
@@ -378,6 +381,8 @@ private:
   int nwk(const DevTensor& t, int M) const { return (pfa_ && M > Mmax_) ? 1 : t.dev.n_workers; }   
   int xsm_ = 1;          
   Q35G6Workspace g6_; 
+  int mlp_stripe_rows_ = 0;
+  bool prefill_mlp_stripes(Q35Layer& layer, int rows);
   bool xsmc_ = false;    
   float *us_ = nullptr, *S_ = nullptr, *mtp_part_ = nullptr;   
   float* ybuf_ = nullptr;  
@@ -396,7 +401,8 @@ private:
   int xw_head_ = 1;                  // the output layer in one exact-sum GEMV for passes of up to xw_rows_ rows
   int xw_nw(const DevTensor& t, int M) const;
   void gemv_xw(GemvLaunch& P);
-  void head_wide(int M, bool topk, bool nll);
+  void head_wide(int M, bool topk, bool nll, int first = 0, bool prompt = false);
+  void head_all_rows(int M, bool topk, bool nll);
 public:
   int test_xsum(const std::string& name, int M, unsigned seed, int variant, long long* out4);   // compare with 16-row launches
 private:
@@ -486,7 +492,8 @@ private:
   int layer_rows_=0; bool layer_ready_=false, layer_unavailable_=false;
   uint4* layer_weights_=nullptr; size_t layer_weight_bytes_=0;
   bool layer_prepare(); void layer_decode(int l);
-  int prefill_vsp(const int32_t* ids,int n);
+  int prefill_vsp(const int32_t* ids, int n, int32_t* prediction = nullptr,
+                  int32_t* top_ids = nullptr, float* top_vals = nullptr, const uint8_t* keep = nullptr);
   int prefill_chunks(const int32_t* ids,int n);
 public:
   void nll_layer(const int32_t* ids,int n,float* out);
@@ -518,11 +525,13 @@ private:
   bool pre_committed_ = false;   
   
   struct SnapSlot { float* S = nullptr; uint16_t* hist = nullptr; uint16_t* ring = nullptr; uint16_t* pend = nullptr; int pos = -1; unsigned long long tick = 0;
-                    unsigned long long born = 0; };   // born: the tick of the save (a restore moves tick, not born)
+                    unsigned long long born = 0; bool extra = false; };   // born: the tick of the save (a restore moves tick, not born)
   std::vector<SnapSlot> sh_slots_; int sh_max_ = 1, sh_step_ = 1024, sh_tail_ = 4096, sh_sparse_ = 65536, sh_min_ = 8192, sh_last_ = -1;
   unsigned long long sh_tick_ = 0; bool sh_warned_ = false;
   std::vector<int32_t> sh_seq_, sh_cur_; unsigned long long sh_epoch_ = 1, sh_note_ = 0; int32_t sh_front_ = -1;
   bool snap_alloc(SnapSlot& s);
+  bool snap_grow();
+  bool sh_fill_gaps_ = true;
   void snap_free();
   int last_keep_ = 1;          // the last verify pass kept the conv outputs for the commit replay (rows <= 16)
   bool wide_ok_ = false;       // wide copy passes allowed on this GPU

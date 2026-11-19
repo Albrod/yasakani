@@ -252,6 +252,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
     sh_tail_ = std::max(0, ienv("YSKN_SNAP_TAIL", 4096));
     sh_sparse_ = ienv("YSKN_SNAP_SPARSE", 65536); if (sh_sparse_ > 0 && sh_sparse_ % sh_step_) sh_sparse_ = ((sh_sparse_ + sh_step_ - 1) / sh_step_) * sh_step_;
     sh_min_ = std::max(0, ienv("YSKN_SNAP_MIN", 8192));
+    sh_fill_gaps_ = ienv("YSKN_SNAP_FILL_GAPS", 1) != 0;
     int dev = 0; cudaGetDevice(&dev);
     { cudaDeviceProp dp{}; if (cudaGetDeviceProperties(&dp, dev) == cudaSuccess) {
         cc_ = dp.major * 10 + dp.minor; pci_[0] = dp.pciDomainID; pci_[1] = dp.pciBusID; pci_[2] = dp.pciDeviceID;
@@ -384,6 +385,11 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
       auto n = [](const DevTensor& t) { return (size_t)t.dev.N * t.dev.Kc; };
       for (const Q35Layer& Y : L_) g6_.weight_bytes = std::max({g6_.weight_bytes,
         n(Y.q), n(Y.k), n(Y.v), n(Y.qkv), n(Y.z), n(Y.o), n(Y.out), n(Y.gate), n(Y.up), n(Y.down)});
+      if (const char* tile = std::getenv("YSKN_Q35_G6_TILE")) g6_.tile = std::atoi(tile);
+      if (const char* stripe = std::getenv("YSKN_Q35_PF_MLP_STRIPE")) {
+        const int rows = std::atoi(stripe);
+        if (rows == 256 || rows == 512 || rows == 1024) mlp_stripe_rows_ = rows;
+      }
       q35_g6_prepare(g6_, m_.sm_count);
       g6_.weights = dz35<uint4>(g6_.weight_bytes); g6_.partial = dz35<long long>(g6_.partial_bytes); g6_.flags = dz35<int>(g6_.flags_bytes);
       std::fprintf(stderr, "[q35_g6] prefill only, temporary workspace %zu bytes\n", g6_.weight_bytes + g6_.partial_bytes + g6_.flags_bytes);
@@ -907,29 +913,31 @@ void Engine35::attn_block(Q35Layer& Y, int M, const int* dpos, int* slices) {
   float* const kdbg = (kz && kz_dbg_ && (int)(&Y - L_.data()) == kz_dbg_layer_) ? kz_dbg_ : nullptr;
   if (kdbg && S) { cudaMemcpyAsync(kz_dbgq_, q16_, (size_t)M * Q35_NH * Q35_HD * 2, cudaMemcpyDeviceToDevice, st_); kz_dbg_rows_ = M; }
   if (S && M <= Mmax_) {
+    bool head_first = false;
     if (!ks(16384)) { Q35AttnArgs AT{q16_, Y.kc, Y.vc, max_ctx_, M, dpos, sp, pm_, pl_, pacc_, 1}; AT.k8 = Y.k8; AT.v8 = Y.v8; AT.ks = Y.ks; AT.vs = Y.vs; AT.kv_fp16 = kv_fp16_;
                       if (atx_ && atx_long_ > 0 && sp != atx_short_) { AT.splits_short = atx_short_; AT.long_len = atx_long_; }
                       AT.vsp = atx_vsp_;
                       if (ms_now_) ms_attention(Y, AT, cap_ord, kz);         // multi-stream pass: its own kernels
                       else if (kz) launch_q35_kz(AT, wk_now_ ? d_wk_ : nullptr, st_);
-                      else if (atx_) { if (cap_ord >= 0) launch_q35_atx_pk(AT, wk_now_ ? d_wk_ : nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AT, wk_now_ ? d_wk_ : nullptr, st_); }
+                      else if (atx_) { if (cap_ord >= 0) head_first = launch_q35_prefill_atx_pk(AT, wk_now_ ? d_wk_ : nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AT, wk_now_ ? d_wk_ : nullptr, st_); }
                       else if (wk_now_) launch_wk_attention(AT, d_wk_, st_);
                       else if (fa) launch_q35_fa(AT, st_); else launch_q35_attention(AT, st_); }
     if (!ks(16384)) { Q35CombineArgs CB{pm_, pl_, pacc_, sp, M, gate16_, Y.o.signs_in, qx_, alpha_}; CB.lo = lo_now_ ? 1 : 0;
                       if (atx_ && atx_long_ > 0 && sp != atx_short_) { CB.d_pos = dpos; CB.wk = wk_now_ ? d_wk_ : nullptr; CB.splits_short = atx_short_; CB.long_len = atx_long_; }
                       if (ms_now_) launch_q35_combine_ms(CB, ms_pos_, st_);
-                      else if (kz) launch_q35_kz_combine(CB, kdbg, st_); else launch_q35_combine(CB, st_); }
+                      else if (kz) launch_q35_kz_combine(CB, kdbg, st_); else if (head_first) launch_q35_head_first_combine(CB, st_); else launch_q35_combine(CB, st_); }
   } else if (S) {                                                       
     launch_q35_pos_slices(dpos, slices, (M + Mmax_ - 1) / Mmax_, Mmax_, st_);
     for (int s = 0; s < M; s += Mmax_) {
       const int Ms = std::min(Mmax_, M - s); const size_t qo = (size_t)s * Q35_NH * Q35_HD;
+      bool head_first = false;
       Q35AttnArgs AS{q16_ + qo, Y.kc, Y.vc, max_ctx_, Ms, slices + s / Mmax_, sp, pm_, pl_, pacc_}; AS.k8 = Y.k8; AS.v8 = Y.v8; AS.ks = Y.ks; AS.vs = Y.vs; AS.kv_fp16 = kv_fp16_;
       if (atx_ && atx_long_ > 0 && sp != atx_short_) { AS.splits_short = atx_short_; AS.long_len = atx_long_; }
       AS.vsp = atx_vsp_;
-      if (kz) launch_q35_kz(AS, nullptr, st_); else if (atx_) { if (cap_ord >= 0) launch_q35_atx_pk(AS, nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AS, nullptr, st_); } else if (fa) launch_q35_fa(AS, st_); else launch_q35_attention(AS, st_);
+      if (kz) launch_q35_kz(AS, nullptr, st_); else if (atx_) { if (cap_ord >= 0) head_first = launch_q35_prefill_atx_pk(AS, nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AS, nullptr, st_); } else if (fa) launch_q35_fa(AS, st_); else launch_q35_attention(AS, st_);
       Q35CombineArgs CB{pm_, pl_, pacc_, sp, Ms, gate16_ + qo, Y.o.signs_in, qx_ + qo, alpha_ + (size_t)s * (Q35_NH * Q35_HD / 512)};
       if (atx_ && atx_long_ > 0 && sp != atx_short_) { CB.d_pos = slices + s / Mmax_; CB.splits_short = atx_short_; CB.long_len = atx_long_; }
-      if (kz) launch_q35_kz_combine(CB, kdbg ? kdbg + qo : nullptr, st_); else launch_q35_combine(CB, st_);
+      if (kz) launch_q35_kz_combine(CB, kdbg ? kdbg + qo : nullptr, st_); else if (head_first) launch_q35_head_first_combine(CB, st_); else launch_q35_combine(CB, st_);
     }
   }
   if (pf_on(4, M)) next_pf_ = pf_of({&Y.gate, &Y.up}, l2pf_mb_[0]);
@@ -954,7 +962,48 @@ void Engine35::flow_mlp(Q35Layer& Y, int M, int l, bool prepare_only) {
   if (l == 0) A.trace = flow_trace_;
   launch_q35_flow_mlp(A, st_);
 }
+bool Engine35::prefill_mlp_stripes(Q35Layer& Y, int M) {
+  const int rows = mlp_stripe_rows_;
+  if (!rows || M <= rows || M % rows || rows <= xw_rows_ || !g6_.weights ||
+      !xsmc_ || xsm_part_ || lo_now_ || kskip_ || F_ < H_ ||
+      !g6_.cached.count(Y.gate.dev.lno) || !g6_.cached.count(Y.up.dev.lno))
+    return false;
+
+  // A row's gate and up floats are used only by the activation transform.
+  // Keep two row stripes hot and consume them before producing the next pair.
+  const int input_groups = H_ / 512, output_groups = F_ / 512;
+  const auto* const input = in2_ ? qx2_ : qx_;
+  const auto* const input_scales = in2_ ? alpha2_ : alpha_;
+  GemvLaunch P{};
+  P.M = rows; P.xsum = 1; P.n_seg = 2;
+  P.seg[0] = GemvSeg{Y.gate.dev, pt(Y.gate, M), 0};
+  P.seg[1] = GemvSeg{Y.up.dev, pt(Y.up, M), 0};
+  P.xsm_sst = Q35_SST; P.xsm_nb = input_groups; P.xsm_n = float(H_); P.xsm_eps = eps_;
+  Q35MlpArgs X{P.seg[0].part, P.seg[1].part, Y.gate.tau, Y.up.tau, nwk(Y.gate, rows), nwk(Y.up, rows),
+               Y.gate.signs_out, Y.up.signs_out, rows, F_, Y.down.signs_in, nullptr, nullptr};
+  // The output can share the input allocation. F >= H, so expanding from the
+  // highest row towards zero preserves all as-yet unread activations and scales.
+  for (int start = M - rows; start >= 0; start -= rows) {
+    const size_t offset = size_t(start);
+    P.qx = input + offset * H_; P.alpha = input_scales + offset * input_groups;
+    P.xsm_S = S_ + offset * Q35_SST; P.us_out = us_ + offset;
+    if (!launch_q35_g6(P, g6_, smp_p_.pm, st_)) {
+      if (start == M - rows) return false;
+      throw std::runtime_error("prefill MLP stripe lost GEMM eligibility");
+    }
+    X.qx = qx_ + offset * F_; X.alpha = alpha_ + offset * output_groups;
+    X.xsm = Q35Xsm{P.us_out, P.xsm_S, eps_, nmode(rows, true)};
+    launch_q35_mlp(X, st_);
+  }
+  in2_ = false;
+  return true;
+}
+
 void Engine35::mlp_block(Q35Layer& Y, int M, bool down) {
+  if (mlp_stripe_rows_ && prefill_mlp_stripes(Y, M)) {
+    if (down) gemv({&Y.down}, M);
+    return;
+  }
   const bool G = !(kskip_ & 16), S = !(kskip_ & 32);
   if (G) gemv({&Y.gate, &Y.up}, M, true);
   if (S && !ks(128)) { Q35MlpArgs X{pt(Y.gate, M), pt(Y.up, M), Y.gate.tau, Y.up.tau, nwk(Y.gate, M), nwk(Y.up, M), Y.gate.signs_out, Y.up.signs_out, M, F_,
@@ -1030,24 +1079,41 @@ void Engine35::head_slice(int row0, int rows, bool advance, bool topk, bool nll)
 }
 // The output layer of a pass of 17..64 rows: one exact-sum GEMV of all rows, then the same per-16-row argmax / sampling / top-8 / NLL
 // launches as head_slice, reading rows row0.. of the int64 partials, us_ and S_.
-void Engine35::head_wide(int M, bool topk, bool nll) {
+void Engine35::head_wide(int M, bool topk, bool nll, int first, bool prompt) {
   GemvLaunch P{}; P.M = M; P.stage_bytes = 0; P.seg[0] = GemvSeg{head_.dev, head_.part, 0}; P.n_seg = 1;
   P.seg[0].t.n_workers = xw_nw(head_, M); P.max_workers = P.seg[0].t.n_workers;
-  P.n_ctas = (head_.dev.N / 64 + GEMV_WARPS - 1) / GEMV_WARPS; P.qx = qx_; P.alpha = alpha_; P.xsum = 1; P.us_out = us_;
+  P.n_ctas = (head_.dev.N / 64 + GEMV_WARPS - 1) / GEMV_WARPS;
+  P.qx = qx_ + (size_t)first * H_; P.alpha = alpha_ + (size_t)first * (H_ / 512); P.xsum = 1; P.us_out = us_;
   gemv_xw(P);
   for (int row0 = 0; row0 < M; row0 += HM_) {
     const int rows = std::min(HM_, M - row0);
-    ArgmaxArgs AA{head_.part, head_.tau, V_, logits_, d_next8_ + row0, blk_val_, blk_idx_, head_.dev.n_workers, M, row0, rows}; AA.cnt = am_cnt_;
-    AA.us = us_; AA.rr = S_; AA.xsm_eps = eps_; AA.xsm_nb = H_ / 512; AA.xsm_stride = Q35_SST; AA.xsm_n = (float)H_;
-    launch_argmax(AA, st_);
+    const int pos = first + row0;
+    ArgmaxArgs AA{head_.part, head_.tau, V_, logits_, d_next8_ + pos, blk_val_, blk_idx_, head_.dev.n_workers, M, row0, rows}; AA.cnt = am_cnt_;
+    AA.us = us_; AA.rr = S_ + (size_t)first * Q35_SST; AA.xsm_eps = eps_; AA.xsm_nb = H_ / 512; AA.xsm_stride = Q35_SST; AA.xsm_n = (float)H_;
+    if (prompt && smp_) launch_prompt_logits(AA, st_);
+    else launch_argmax(AA, st_);
     if (smp_) {
-      Q35SmpArgs KA{logits_, V_, rows, row0, d_next8_ + row0, d_pos_, wk_now_ ? d_wk_ : nullptr, d_smp_, kj_val_, kj_idx_, kj_cnt_};
-      if (topk && q35_smp2_on()) { KA.top_val = top_val_ + (size_t)row0 * 8; KA.top_idx = top_idx_ + (size_t)row0 * 8; }
-      if (k20_on_ && q35_smp2_on()) { KA.topk_val = d_k20v_ + (size_t)row0 * Q35_SMP_K; KA.topk_idx = d_k20i_ + (size_t)row0 * Q35_SMP_K; }
+      Q35SmpArgs KA{logits_, V_, rows, pos, d_next8_ + pos, d_pos_, wk_now_ ? d_wk_ : nullptr, d_smp_, kj_val_, kj_idx_, kj_cnt_};
+      if (topk && q35_smp2_on()) { KA.top_val = top_val_ + (size_t)pos * 8; KA.top_idx = top_idx_ + (size_t)pos * 8; }
+      if (k20_on_ && q35_smp2_on()) { KA.topk_val = d_k20v_ + (size_t)pos * Q35_SMP_K; KA.topk_idx = d_k20i_ + (size_t)pos * Q35_SMP_K; }
       launch_q35_smp(KA, st_);
     }
-    if (topk && !(smp_ && q35_smp2_on())) { TopkArgs TA{logits_, V_, tk_val_, tk_idx_, top_val_ + (size_t)row0 * 8, top_idx_ + (size_t)row0 * 8, rows}; TA.cnt = tk_cnt_; launch_topk8(TA, st_); }
-    if (nll) launch_nll(NllArgs{logits_, V_, d_target8_ + row0, d_nll8_ + row0, blk_max_, blk_sum_, rows}, st_);
+    if (topk && !(smp_ && q35_smp2_on())) { TopkArgs TA{logits_, V_, tk_val_, tk_idx_, top_val_ + (size_t)pos * 8, top_idx_ + (size_t)pos * 8, rows}; TA.cnt = tk_cnt_; launch_topk8(TA, st_); }
+    if (nll) launch_nll(NllArgs{logits_, V_, d_target8_ + pos, d_nll8_ + pos, blk_max_, blk_sum_, rows}, st_);
+  }
+}
+void Engine35::head_all_rows(int M, bool topk, bool nll) {
+  const bool wide = xw_head_ && xsmc_ && !in2_ && !lo_now_ && xw_rows_ > HM_;
+  for (int first = 0; first < M;) {
+    const int rows = std::min(wide ? xw_rows_ : HM_, M - first);
+    if (rows > HM_ && (size_t)head_.dev.n_workers * HM_ * sizeof(float) >= (size_t)rows * sizeof(long long)) {
+      head_wide(rows, topk, nll, first, M > 64);
+      first += rows;
+    } else {
+      const int small = std::min(HM_, rows);
+      head_slice(first, small, false, topk, nll);
+      first += small;
+    }
   }
 }
 void Engine35::pass_body(int M, bool commit, int upto, int head_mode, bool topk, bool nll, bool advance) {
@@ -1063,11 +1129,7 @@ void Engine35::pass_body(int M, bool commit, int upto, int head_mode, bool topk,
   }
   g_pdl_rows = std::min(M, HM_);
   if (head_mode == HEAD_LAST) head_slice(M - 1, 1, advance, topk, nll);
-  else if (head_mode == HEAD_ALL) {
-    // head_wide writes M x V int64 sums into head_.part (n_workers x 16 x V floats): it fits with 8 or more workers for 64 rows
-    if (M > HM_ && M <= xw_rows_ && xw_head_ && xsmc_ && !in2_ && !lo_now_
-        && (size_t)head_.dev.n_workers * HM_ * 4 >= (size_t)M * 8) head_wide(M, topk, nll);
-    else for (int s = 0; s < M; s += HM_) head_slice(s, std::min(HM_, M - s), false, topk, nll); }
+  else if (head_mode == HEAD_ALL) head_all_rows(M, topk, nll);
   if (xsmc_ && mtp_.on && upto == nlayers_ && !ks(32)) { g_pdl_rows = M; launch_q35_xsm_xn(h_, S_, fnorm_, eps_, M, xn_, st_); }   
   if (pf2_live_) { cudaEventRecord(ev_pf_, st3_); cudaStreamWaitEvent(st_, ev_pf_, 0); pf2_live_ = false; }   
   lo_now_ = false;
@@ -2047,7 +2109,7 @@ void Engine35::gdn_b(int l, int M, int b) {
   if (l + 1 < nlayers_) { const Q35Layer& Nx = L_[l + 1]; gemv_res(Y.down, M, Nx.ln1, Nx.full ? Nx.q.signs_in : Nx.qkv.signs_in, Nx.full ? nullptr : xn_); }
   else gemv_res(Y.down, M, fnorm_, head_.signs_in, mtp_.on ? xn_ : nullptr);
 }
-int Engine35::prefill_vsp(const int32_t* ids, int n) {
+int Engine35::prefill_vsp(const int32_t* ids, int n, int32_t* prediction, int32_t* top_ids, float* top_vals, const uint8_t* keep) {
   if (n < 1 || pos_ + n > max_ctx_) throw std::runtime_error("prefill_vsp: context overflow");
   replay_fence(); ++sh_epoch_;
   const int SC=tc_rows_, G0=H_/512;
@@ -2114,7 +2176,51 @@ int Engine35::prefill_vsp(const int32_t* ids, int n) {
       }
     }
     g6_.cached.clear();
-    if (r0 + nsc == n) { g_pdl_rows = 1; head_slice(last_m - 1, 1, false, false, false); }   
+    if (top_ids) {
+      // All body rows are retained. Emit exactly the same per-row heads on the original sampling-position grid.
+      for (int s = 0; s < nsc; s += PM_) {
+        const int m = std::min(PM_, nsc - s), dest = r0 + s;
+        qx_ = tc_qx_ + (size_t)s * H_;
+        alpha_ = tc_al_ + (size_t)s * G0;
+        S_ = tc_S_ + (size_t)s * Q35_SST;
+        int count = m;
+        if (keep) {
+          int selected = 0;
+          for (int j = 0; j < m; ++j)
+            if (keep[dest + j] || j == m - 1) h_pin_[PIN_IDS + selected++] = j;
+          // Keep the contiguous launch when the gather would save too few rows.
+          if (selected <= m - m / 8) count = selected;
+        }
+        if (count < m) {
+          cudaMemcpyAsync(d_toks_, h_pin_ + PIN_IDS, (size_t)count * sizeof(int), cudaMemcpyHostToDevice, st_);
+          launch_prompt_head_rows({d_toks_, qx_, alpha_, S_, scr_qx_, scr_al_, S_scr, count, H_, Q35_SST}, st_);
+          qx_ = scr_qx_;
+          alpha_ = scr_al_;
+          S_ = S_scr;
+        }
+        // Only the last sample is consumed. Its depth is unchanged by the gather.
+        launch_set_int(d_pos_, pos_ + s + m - count, st_);
+        g_pdl_rows = std::min(HM_, count);
+        head_all_rows(count, true, false);
+        cudaMemcpyAsync(h_pin_ + PIN_AM, d_next8_, (size_t)count * sizeof(int), cudaMemcpyDeviceToHost, st_);
+        cudaMemcpyAsync(h_pin_ + PIN_TI, top_idx_, (size_t)count * 8 * sizeof(int), cudaMemcpyDeviceToHost, st_);
+        cudaMemcpyAsync(h_pinf_ + PINF_TV, top_val_, (size_t)count * 8 * sizeof(float), cudaMemcpyDeviceToHost, st_);
+        if (cudaStreamSynchronize(st_) != cudaSuccess) throw std::runtime_error("prefill_vsp: prompt head transfer failed");
+        if (count < m) {
+          for (int j = 0; j < count; ++j) {
+            const int row = dest + h_pin_[PIN_IDS + j];
+            prediction[row] = h_pin_[PIN_AM + j];
+            std::copy_n(h_pin_ + PIN_TI + (size_t)j * 8, 8, top_ids + (size_t)row * 8);
+            std::copy_n(h_pinf_ + PINF_TV + (size_t)j * 8, 8, top_vals + (size_t)row * 8);
+          }
+        } else {
+          std::copy_n(h_pin_ + PIN_AM, m, prediction + dest);
+          std::copy_n(h_pin_ + PIN_TI, (size_t)m * 8, top_ids + (size_t)dest * 8);
+          std::copy_n(h_pinf_ + PINF_TV, (size_t)m * 8, top_vals + (size_t)dest * 8);
+        }
+        last_m = count;
+      }
+    } else if (r0 + nsc == n) { g_pdl_rows = 1; head_slice(last_m - 1, 1, false, false, false); }
     xsmc_ = false;
     pos_ += nsc;
   }
@@ -2216,6 +2322,32 @@ int Engine35::prefill_rows(const int32_t* ids, int n, int32_t* out_argmax, int32
   h_pin_[PIN_IDS] = next; cudaMemcpyAsync(d_toks_, h_pin_ + PIN_IDS, 4, cudaMemcpyHostToDevice, st_); launch_set_int(d_pos_, pos_, st_); cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("prefill_rows: ") + cudaGetErrorString(e));
   last_M_ = 0; pre_committed_ = false;
+  return next;
+}
+int Engine35::prefill_prompt_rows(const int32_t* ids, int n, int grid, int32_t* prediction, int32_t* top_ids, float* top_vals,
+                                  const uint8_t* keep) {
+  if (n < 1 || n > max_ctx_ - pos_) throw std::runtime_error("prefill_prompt_rows: context overflow");
+  int done = 0, next = 0;
+  while (done < n) {
+    const int left = n - done;
+    const int grid_left = grid > 0 ? grid - pos_ % grid : PM_;
+    int count = std::min(grid_left, left);
+    const bool multiple = grid_left == PM_ && left >= 2 * PM_;
+    const bool sparse_pass = keep && count >= 1024 &&
+        std::count(keep + done, keep + done + count, uint8_t(1)) <= count - count / 8;
+    if ((multiple || sparse_pass) && layer_rows_ && !mtp_.on && !visual_on_ &&
+        (!cap_ || (bdr_.on && cap_layers_.size() == 5)) &&
+        xsm_ && !xsm_part_ && !kz_ && atx_ && !kskip_ && layer_prepare()) {
+      // A saved-state boundary is always the end of this call. Do not change the size
+      // or absolute positions of the individual body passes on either side of it.
+      if (multiple) count = (left / PM_) * PM_;
+      next = prefill_vsp(ids + done, count, prediction + done, top_ids + (size_t)done * 8, top_vals + (size_t)done * 8,
+                         keep ? keep + done : nullptr);
+    } else {
+      next = prefill_rows(ids + done, count, prediction + done, top_ids + (size_t)done * 8, top_vals + (size_t)done * 8);
+    }
+    done += count;
+  }
   return next;
 }
 void Engine35::decode(int32_t* out, int steps) {
@@ -2523,23 +2655,64 @@ int Engine35::snap_best(int L) const {
   return b;
 }
 void Engine35::snap_trim(int L) { for (SnapSlot& sl : sh_slots_) if (sl.pos > L) sl.pos = -1; }
-bool Engine35::snap_save_at(int n) {
+bool Engine35::snap_grow() {
+  if ((int)sh_slots_.size() >= sh_max_) return false;
+  SnapSlot sl;
+  if (snap_alloc(sl)) { sh_slots_.push_back(sl); return true; }
+  if (sl.S) cudaFreeHost(sl.S);
+  if (sl.hist) cudaFreeHost(sl.hist);
+  if (sl.ring) cudaFreeHost(sl.ring);
+  if (sl.pend) cudaFreeHost(sl.pend);
+  sh_max_ = (int)sh_slots_.size();
+  if (!sh_warned_) {
+    std::fprintf(stderr, "[yskn] prompt snapshots: pinned host memory for %d slot(s) only\n", sh_max_);
+    sh_warned_ = true;
+  }
+  return false;
+}
+void Engine35::snap_add_gap_cuts(int n, std::vector<int>& cuts, std::vector<int>& extra) {
+  if (!sh_fill_gaps_ || !sh_sparse_ || n < sh_min_ || (int)cuts.size() >= sh_max_) return;
+  // Fill the largest uncovered spans on the same absolute input grid. Reserve the
+  // ordinary chat/tail checkpoints first even if pinned host memory runs short.
+  const int required = (int)cuts.size();
+  std::vector<int> anchors = cuts;
+  // A wider GPU pass should not remove the interior checkpoints for long edits.
+  const long long gap = std::max(4LL * std::min(sh_step_, 1024), (long long)sh_tail_);
+  while ((int)anchors.size() < sh_max_) {
+    int left = 0, best = 0, width = 0;
+    for (size_t i = 0; i <= anchors.size(); ++i) {
+      const int right = i < anchors.size() ? anchors[i] : n;
+      const int mid = ((left + (right - left) / 2) / sh_step_) * sh_step_;
+      if (right - left > width && mid - left >= gap && right - mid >= gap) {
+        best = mid;
+        width = right - left;
+      }
+      left = right;
+    }
+    if (!best) break;
+    extra.push_back(best);
+    anchors.insert(std::lower_bound(anchors.begin(), anchors.end(), best), best);
+  }
+  if (extra.empty()) return;
+  const int wanted = required + (int)extra.size();
+  while ((int)sh_slots_.size() < wanted && snap_grow()) {}
+  extra.resize(std::min((int)extra.size(), std::max(0, (int)sh_slots_.size() - required)));
+  cuts.insert(cuts.end(), extra.begin(), extra.end());
+  std::sort(cuts.begin(), cuts.end());
+}
+bool Engine35::snap_save_at(int n, bool extra) {
   if (n != pos_ || n < 1 || n > (int)sh_seq_.size()) throw std::runtime_error("snap_save: the slot must be at the current position, inside the prompt ids");
   if (sh_max_ < 1) return false;
   replay_fence();
   int pick = -1;
   for (int i = 0; i < (int)sh_slots_.size(); ++i) if (sh_slots_[(size_t)i].pos == n) pick = i;          // same position: refresh it
   if (pick < 0) for (int i = 0; i < (int)sh_slots_.size(); ++i) if (sh_slots_[(size_t)i].pos < 0 && sh_slots_[(size_t)i].S) { pick = i; break; }
-  if (pick < 0 && (int)sh_slots_.size() < sh_max_) {
-    SnapSlot sl; if (snap_alloc(sl)) { sh_slots_.push_back(sl); pick = (int)sh_slots_.size() - 1; }
-    else {                                                              // not enough pinned host memory: keep the slots there are
-      if (sl.S) cudaFreeHost(sl.S); if (sl.hist) cudaFreeHost(sl.hist); if (sl.ring) cudaFreeHost(sl.ring); if (sl.pend) cudaFreeHost(sl.pend);
-      sh_max_ = (int)sh_slots_.size();
-      if (!sh_warned_) { std::fprintf(stderr, "[yskn] prompt snapshots: pinned host memory for %d slot(s) only\n", sh_max_); sh_warned_ = true; }
-    } }
+  if (pick < 0 && snap_grow()) pick = (int)sh_slots_.size() - 1;
   if (pick < 0) {                                                       // reuse the least recently used slot (not the one just restored)
     for (int i = 0; i < (int)sh_slots_.size(); ++i) { if (i == sh_last_ && sh_slots_.size() > 1) continue;
-      if (pick < 0 || sh_slots_[(size_t)i].tick < sh_slots_[(size_t)pick].tick) pick = i; } }
+      const SnapSlot& s = sh_slots_[(size_t)i];
+      if (extra && !s.extra) continue;
+      if (pick < 0 || (s.extra != sh_slots_[pick].extra ? s.extra : s.tick < sh_slots_[pick].tick)) pick = i; } }
   if (pick < 0) return false;
   SnapSlot& sl = sh_slots_[(size_t)pick];
   if (!snap_alloc(sl)) { sl.pos = -1; return false; }                   // e.g. the drafter was loaded after this slot was made
@@ -2552,7 +2725,7 @@ bool Engine35::snap_save_at(int n) {
   if (mtp_.on) cudaMemcpyAsync(sl.pend, mtp_.pend, (size_t)H_ * 2, cudaMemcpyDeviceToHost, st_);
   cudaStreamSynchronize(st_);
   const cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(std::string("snap_save: ") + cudaGetErrorString(e));
-  sl.pos = n; sl.tick = ++sh_tick_; sl.born = sl.tick;
+  sl.pos = n; sl.tick = ++sh_tick_; sl.born = sl.tick; sl.extra = extra;
   return true;
 }
 void Engine35::snap_load_slot(int i) {

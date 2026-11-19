@@ -36,7 +36,7 @@ class RuntimeTests(unittest.TestCase):
             prof = R.RuntimeProfile.default(support.make_pack(Path(t)))
         removed = prof.apply(env)
         self.assertEqual(removed, ["YSKN_SOMETHING_ELSE"])
-        self.assertEqual(env["YSKN_Q35_PMAX"], "1024")
+        self.assertEqual(env["YSKN_Q35_PMAX"], "2048")
         self.assertEqual(env["PATH"], "/bin")
 
     def test_override_must_be_engine_setting(self):

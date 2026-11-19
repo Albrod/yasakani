@@ -700,7 +700,7 @@ template <int KB, bool VPK> static void pk_vsp_go(const Q35AtxPkArgs& U, cudaStr
   else if (M <= 8) launch_k(q35_atxpk_vsp_kernel<KB, true, VPK, 3, 4>, dim3((M + 7) / 8, sp, Q35_KVH), dim3(384), pkt_smem<KB, true, VPK>(), st, U);
   else launch_k(q35_atxpk_vsp_kernel<KB, true, VPK, 6, 2>, dim3((M + 15) / 16, sp, Q35_KVH), dim3(384), pkt_smem<KB, true, VPK>(), st, U);
 }
-void launch_q35_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs& P, cudaStream_t st) {
+static bool pk_dispatch(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs& P, cudaStream_t st, bool head_first) {
   static bool attr = false;
   if (!attr) {
     cudaError_t e = cudaSuccess;
@@ -725,21 +725,37 @@ void launch_q35_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs&
     if (P.kb != 4) throw std::runtime_error("launch_q35_atx_pk: the non-VSP kernel (variant 1, V-only packing) supports kb = 4 only");
     const dim3 grid((A.M + 15) / 16, A.splits, Q35_KVH);
     if (pk_ns_env() == 3) pk_launch<3>(U, grid, st); else pk_launch<2>(U, grid, st);
-    return;
+    return false;
   }
   if (var == 2 || (var == 3 && A.M <= pk3_mmax_env())) {                                                                          
     if (P.kb == 4) { if (P.vp) pk3_launch<4, true>(U, st); else pk3_launch<4, false>(U, st); }
     else           { if (P.vp) pk3_launch<5, true>(U, st); else pk3_launch<5, false>(U, st); }
-    return;
+    return false;
   }
   if (var == 3) {                                                                                                                 
+    if (head_first && A.M == 64 && !wk && A.splits == 42 && (A.splits_short == 0 || A.splits_short == 31) &&
+        P.kb == 5 && P.kp && !pk3_qk8_env() && !YSKN_PF_WARP_BOUNDS && YSKN_PF_QUERY_TILE == 16) {
+      const dim3 grid(4, A.splits, Q35_KVH), block(384);
+      if (P.vp) launch_k(q35_atxpk4_kernel<5,true,6,2,false,false,false,true>, grid, block, pk4_smem<5,true,false>(), st, U);
+      else launch_k(q35_atxpk4_kernel<5,false,6,2,false,false,false,true>, grid, block, pk4_smem<5,false,false>(), st, U);
+      static thread_local bool reported = false;
+      if (!reported) { fprintf(stderr, "[prefill head-first partials] rows=64 splits=42\n"); reported = true; }
+      return true;
+    }
     if (A.M <= 2) throw std::runtime_error("launch_q35_atx_pk: v4 needs M > 2 (set YSKN_ATX_PK3_MMAX >= 2)");
     if (P.kb == 4) { if (P.vp) pk4_launch<4, true>(U, st); else pk4_launch<4, false>(U, st); }
     else           { if (P.vp) pk4_launch<5, true>(U, st); else pk4_launch<5, false>(U, st); }
-    return;
+    return false;
   }
   if (P.kb == 4) { if (P.vp) pk_vsp_go<4, true>(U, st); else pk_vsp_go<4, false>(U, st); }
   else           { if (P.vp) pk_vsp_go<5, true>(U, st); else pk_vsp_go<5, false>(U, st); }
+  return false;
+}
+void launch_q35_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs& P, cudaStream_t st) {
+  pk_dispatch(A, wk, P, st, false);
+}
+bool launch_q35_prefill_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs& P, cudaStream_t st) {
+  return pk_dispatch(A, wk, P, st, true);
 }
 #endif
 }  

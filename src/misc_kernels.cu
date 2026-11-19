@@ -87,6 +87,40 @@ __global__ void argmax_stage1(ArgmaxArgs A) { pdl_wait(); pdl_trigger();
     if (o > sv[threadIdx.x] || (o == sv[threadIdx.x] && oi < si[threadIdx.x])) { sv[threadIdx.x] = o; si[threadIdx.x] = oi; } } __syncthreads(); }
   if (threadIdx.x == 0) { A.d_tok_out[blockIdx.y] = si[0]; if (A.adv_pos) { *A.adv_pos += 1; if (A.adv_greedy) *A.adv_tok = si[0]; } }
 }
+// Sampling selects the emitted token itself. Produce the exact same logits while
+// clearing each integer accumulator once, without a second vocabulary reduction.
+__global__ void prompt_logits_kernel(ArgmaxArgs A) { pdl_wait(); pdl_trigger();
+  const int row = A.row + blockIdx.y;
+  float norm = 0.f;
+  if ((threadIdx.x & 31) == 0) {
+    const float* sum = A.rr + (size_t)row * A.xsm_stride;
+    for (int i = 0; i < A.xsm_nb; ++i) norm = __fadd_rn(norm, sum[i]);
+    norm = rsqrtf(__fadd_rn(__fdiv_rn(norm, A.xsm_n), A.xsm_eps));
+  }
+  norm = __shfl_sync(0xffffffffu, norm, 0);
+  const float scale = A.us[row];
+  float* logits = A.logits + (size_t)blockIdx.y * A.V;
+  for (int v = blockIdx.x * blockDim.x + threadIdx.x; v < A.V; v += gridDim.x * blockDim.x) {
+    const long long sum = xsum_combine(A.part, A.nw, A.M, A.V, row, v);
+    logits[v] = __fmul_rn(__fmul_rn(xsum_y(sum, scale), norm), A.tau[v]);
+  }
+}
+void launch_prompt_logits(const ArgmaxArgs& A, cudaStream_t st) {
+  launch_k(prompt_logits_kernel, dim3(128, A.rows), dim3(256), 0, st, A);
+}
+__global__ void prompt_head_rows_kernel(PromptHeadRows A) {
+  pdl_wait(); pdl_trigger();
+  const int dst = blockIdx.x, src = A.rows[dst], tid = threadIdx.x;
+  const int vecs = A.hidden / 16, groups = A.hidden / 512;
+  const auto* input = reinterpret_cast<const uint4*>(A.input) + (size_t)src * vecs;
+  auto* output = reinterpret_cast<uint4*>(A.compact_input) + (size_t)dst * vecs;
+  for (int i = tid; i < vecs; i += blockDim.x) output[i] = input[i];
+  if (tid < groups) A.compact_scales[dst * groups + tid] = A.scales[src * groups + tid];
+  if (tid < A.norm_stride) A.compact_norms[dst * A.norm_stride + tid] = A.norms[src * A.norm_stride + tid];
+}
+void launch_prompt_head_rows(const PromptHeadRows& A, cudaStream_t st) {
+  launch_k(prompt_head_rows_kernel, dim3(A.count), dim3(128), 0, st, A);
+}
 __global__ void argmax_stage2(ArgmaxArgs A) { pdl_wait(); pdl_trigger();
   __shared__ float sv[256]; __shared__ int si[256]; const int r = blockIdx.x;
   sv[threadIdx.x] = A.blk_val[r * 256 + threadIdx.x]; si[threadIdx.x] = A.blk_idx[r * 256 + threadIdx.x]; __syncthreads();
