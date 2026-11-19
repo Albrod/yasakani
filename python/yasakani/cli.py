@@ -211,6 +211,7 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1):
     # below to look for the multi-stream entries): CUDA reads CUDA_VISIBLE_DEVICES only once.
     device = _visible_gpu(det, args.device)
     n, lib, plan = int(parallel or 1), None, None
+    reserve = gpus.prefill_reserve_mib(prefill, det)     # --prefill new on a card under 30,000 MiB: room for its extra memory
     if n >= 2:                                   # several requests at once, if the engine library has the entries
         lib = NativeLib(args.dll)
         if not lib.supports_parallel:
@@ -218,15 +219,16 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1):
                  "a time" % n)
             n = 1
     if n >= 2:
-        plan = gpus.plan_parallel(pack, det, n) if args.max_ctx is None else gpus.plan_given_parallel(pack, det, args.max_ctx, n)
+        plan = (gpus.plan_parallel(pack, det, n, reserve) if args.max_ctx is None
+                else gpus.plan_given_parallel(pack, det, args.max_ctx, n, reserve))
         if plan.parallel < 2:                    # the free memory is not known
             for line in plan.notes:
                 _say(line)
             n, plan = 1, None
     if plan is None and args.max_ctx is None:    # 0.1.3: a context that fits the free GPU memory (unchanged on the RTX 5090)
-        plan = gpus.plan_context(pack, det)
+        plan = gpus.plan_context(pack, det, reserve)
     elif plan is None:                           # a given context is used as it is; the draft model's output head only where it fits
-        plan = gpus.plan_given_context(pack, det, args.max_ctx)
+        plan = gpus.plan_given_context(pack, det, args.max_ctx, reserve)
     gpus.use_prefill(plan, prefill, det)
     gpus.use_edit_copy(plan, edit_copy)
     args.parallel_planned, args.context_plan = n, plan

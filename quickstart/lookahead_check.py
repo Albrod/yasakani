@@ -136,7 +136,8 @@ def engine_plan(pack, gpus, say):
     note = gpus.untested_note(det)
     if note:
         say(note)
-    plan = gpus.plan_context(pack, det)
+    reserve = gpus.prefill_reserve_mib(gpus.prefill_mode_of(None), det) if hasattr(gpus, "prefill_reserve_mib") else 0
+    plan = gpus.plan_context(pack, det, reserve) if reserve else gpus.plan_context(pack, det)
     if hasattr(gpus, "use_prefill") and hasattr(gpus, "prefill_mode_of"):
         gpus.use_prefill(plan, gpus.prefill_mode_of(None), det)
     if hasattr(gpus, "use_edit_copy") and hasattr(gpus, "edit_copy_of"):

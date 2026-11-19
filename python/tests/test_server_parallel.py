@@ -1178,6 +1178,16 @@ class ParallelPlanTests(unittest.TestCase):
         no_head = self.info(max_ctx=plan.max_ctx, draft_head=False, kv_bytes_per_position=25500)
         self.assertEqual(G.check_parallel(pack, plan, no_head, 4), (4, None))          # the head left out leaves room
         self.assertEqual(G.check_parallel(pack, plan, self.info(max_ctx=plan.max_ctx, kv_bytes_per_position=25500), 4)[0], 3)
+        # --prefill new on a card under 30,000 MiB: the reserve of the plan is not given to the slots
+        det = self.det(24564, 500)
+        plain, kept = G.plan_parallel(pack, det, 2), G.plan_parallel(pack, det, 2, G.NEW_PREFILL_RESERVE_MIB)
+        self.assertEqual((plain.reserve_mib, kept.reserve_mib), (0, G.NEW_PREFILL_RESERVE_MIB))
+        big = self.info(max_ctx=kept.max_ctx, kv_bytes_per_position=26000)       # the engine's KV a little larger than the planner's
+        self.assertEqual(G.check_parallel(pack, plain, self.info(max_ctx=kept.max_ctx, kv_bytes_per_position=26000), 2), (2, None))
+        n, note = G.check_parallel(pack, kept, big, 2)
+        self.assertEqual(n, 1)
+        self.assertIn("(besides 1800 MiB kept for the new prompt reading)", note)
+        self.assertEqual(G.check_parallel(pack, kept, self.info(max_ctx=kept.max_ctx), 2), (2, None))
 
 
 class CliOptionTests(unittest.TestCase):

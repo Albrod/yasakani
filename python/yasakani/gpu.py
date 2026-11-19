@@ -43,6 +43,13 @@ SMALL_CARD_ENV = {"YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"}
 PREFILL_MODES = ("auto", "new", "old")
 PREFILL_MODE_ENV = "YASAKANI_PREFILL"
 OLD_PREFILL_ENV = dict(SMALL_CARD_ENV, YSKN_Q35_PF_V2="0")
+NEW_PREFILL_AREA_MIB = 579            # the work area the new prompt reading makes at the sizes of SMALL_CARD_ENV, at the first long
+                                      # prompt, and keeps until the model is closed (the engine reports 607,322,112 B; measured on an
+                                      # RTX 5090 shown as a 24 GB and a 16 GB card: +569 and +607 MiB at the peak)
+NEW_PREFILL_SPARE_MIB = 1024          # the engine makes that area only with this much to spare, else it reads prompts as 0.1.7 did
+NEW_PREFILL_CUDA_GAP_MIB = 566        # CUDA reported this much less free memory than nvidia-smi on the PC of the measurements (the
+                                      # RTX 5090, Windows 11); the engine asks CUDA, the planners ask nvidia-smi
+NEW_PREFILL_RESERVE_MIB = 1800        # what the planners leave free for it: area + spare + gap - MARGIN_MIB, and about 100 MiB of room
 # --edit-copy (or YASAKANI_EDIT_COPY): on | off, passed to the engine as YSKN_EDIT_COPY=1 / 0.  EDIT_COPY_DEFAULT is the default when
 # neither is given; changing it is all it takes to change the default.
 EDIT_COPY_MODES = ("on", "off")
@@ -329,6 +336,7 @@ class ContextPlan:
     prefill: str = ""                     # the prompt reading use_prefill chose: "new" or "old" ("" = not chosen yet)
     prefill_line: str = ""                # the one line on that choice, printed at start
     edit_copy: str = ""                   # use_edit_copy: "on" or "off" ("" = not chosen yet)
+    reserve_mib: int = 0                  # GPU memory left free besides the context (prefill_reserve_mib; 0 = none)
 
 
 def _small_card_env(plan: "ContextPlan", g) -> None:
@@ -381,6 +389,33 @@ def prefill_choice(mode: str, g) -> Tuple[str, Dict[str, str], str]:
     why = "%s, new only from %d MiB" % (card, FULL_CONTEXT_MIN_TOTAL_MIB) if total is not None else card
     return "old", dict(OLD_PREFILL_ENV), ("prompt reading: as in 0.1.7 (setting auto: %s; --prefill new or %s=new to try it)"
                                           % (why, PREFILL_MODE_ENV))
+
+
+def prefill_reserve_mib(mode: str, g) -> int:
+    """GPU memory the planners leave free for the prompt reading that ``mode`` gives on the card ``g``: NEW_PREFILL_RESERVE_MIB for
+    the new reading on a card under FULL_CONTEXT_MIN_TOTAL_MIB or of unknown memory (only --prefill new gives that), else 0."""
+    reading, env, _ = prefill_choice(mode, g)
+    return NEW_PREFILL_RESERVE_MIB if reading == "new" and env else 0
+
+
+NO_ROOM_NOTE = ("note: --prefill new: keeping %d MiB free for the work area of the new prompt reading would cost more than half of the "
+                "context, so the context is chosen without it; the engine reads prompts as 0.1.7 did when it finds no room")
+
+
+def _reserve_note(plan: "ContextPlan", reserve_mib: int, chosen: bool) -> None:
+    plan.reserve_mib = int(reserve_mib)
+    if not reserve_mib:
+        return
+    if chosen:
+        plan.notes.append("note: --prefill new: the context is chosen with %d MiB more left free (the new prompt reading keeps a work "
+                          "area of about %d MiB from the first long prompt on; the engine makes it only with %d MiB to spare, and "
+                          "reads prompts as 0.1.7 did when it finds less)" % (reserve_mib, NEW_PREFILL_AREA_MIB, NEW_PREFILL_SPARE_MIB))
+    else:
+        plan.notes.append("note: --prefill new: the new prompt reading needs about %d MiB free in nvidia-smi after the model is loaded "
+                          "(a work area of about %d MiB, made only with %d MiB to spare); with less, prompts are read as in 0.1.7.  "
+                          "The context you gave is used as it is"
+                          % (NEW_PREFILL_AREA_MIB + NEW_PREFILL_SPARE_MIB + NEW_PREFILL_CUDA_GAP_MIB, NEW_PREFILL_AREA_MIB,
+                             NEW_PREFILL_SPARE_MIB))
 
 
 def use_prefill(plan: "ContextPlan", mode: str, g=None) -> "ContextPlan":
@@ -461,9 +496,10 @@ def _which_gpu(det: Detected, sizes: Sequence[int], model_max: int) -> str:
     return s + ".  "
 
 
-def plan_context(pack, det: Detected) -> ContextPlan:
+def plan_context(pack, det: Detected, reserve_mib: int = 0) -> ContextPlan:
     """The context for ``pack`` on the detected GPU.  Unchanged (None) on cards with FULL_CONTEXT_MIN_TOTAL_MIB or more, and when
-    nvidia-smi gave no answer.  Raises YasakaniError when not even MIN_CONTEXT tokens fit."""
+    nvidia-smi gave no answer.  Raises YasakaniError when not even MIN_CONTEXT tokens fit.  ``reserve_mib`` (prefill_reserve_mib) is
+    taken off the free memory before the context is chosen."""
     plan = ContextPlan()
     g = det.worst()
     _small_card_env(plan, g)
@@ -476,7 +512,14 @@ def plan_context(pack, det: Detected) -> ContextPlan:
         return plan
     plan.free_mib = g.free_mib
     sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
-    n, head_off = choose(g.free_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx)
+    n, head_off = choose(g.free_mib - reserve_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx)
+    if reserve_mib:                              # not at the cost of more than half of the context: then the plan of the other
+        plain = choose(g.free_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx)          # readings, and the engine decides
+        if n < MIN_CONTEXT or 2 * n < plain[0]:
+            n, head_off = plain
+            if n >= MIN_CONTEXT:
+                plan.notes.append(NO_ROOM_NOTE % reserve_mib)
+            reserve_mib = 0
     if len(det.candidates) > 1:
         plan.notes.append("note: this PC has %d GPUs and CUDA's device %d cannot be matched with nvidia-smi's list, so the context is "
                           "chosen for the smallest of them (set CUDA_DEVICE_ORDER=PCI_BUS_ID to match them)" % (len(det.candidates), det.device))
@@ -494,10 +537,11 @@ def plan_context(pack, det: Detected) -> ContextPlan:
         plan.max_ctx = n
         plan.notes.append("context: %d tokens, chosen from the free GPU memory (%d of %d MiB free); --max-ctx sets it yourself"
                           % (n, g.free_mib, g.total_mib))
+    _reserve_note(plan, reserve_mib, True)
     return plan
 
 
-def plan_given_context(pack, det: Detected, max_ctx: int) -> ContextPlan:
+def plan_given_context(pack, det: Detected, max_ctx: int, reserve_mib: int = 0) -> ContextPlan:
     """The plan for a context given with --max-ctx.  The context stays as given (it is tried even where the rule says it does not fit),
     but on a card with less than FULL_CONTEXT_MIN_TOTAL_MIB the draft model's output head is left out when it does not fit beside that
     context.  Without this the head is always loaded: the package names it in YSKN_BDR_SHEAD, and the engine loads a named head without
@@ -509,7 +553,8 @@ def plan_given_context(pack, det: Detected, max_ctx: int) -> ContextPlan:
         return plan
     plan.free_mib = g.free_mib
     sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
-    if fit_tokens(g.free_mib, sum(sizes), overhead_mib(sizes[0])) < plan.max_ctx:
+    _reserve_note(plan, reserve_mib, False)
+    if fit_tokens(g.free_mib - reserve_mib, sum(sizes), overhead_mib(sizes[0])) < plan.max_ctx:
         plan.env["YSKN_BDR_SHEAD"] = "0"
         plan.notes.append("note: the output head of the draft model (%s, %.1f GiB) is not loaded: it does not fit beside %d tokens of "
                           "context in the free GPU memory (%d of %d MiB free); each pass takes %s longer (measured on the RTX 5090)"
@@ -545,7 +590,7 @@ def choose_parallel(free_mib: float, weights_bytes: int, draft_bytes: int, head_
     return with_head, False
 
 
-def plan_parallel(pack, det: Detected, n: int) -> ContextPlan:
+def plan_parallel(pack, det: Detected, n: int, reserve_mib: int = 0) -> ContextPlan:
     """The context for ``n`` requests at once (serve --parallel n): the carrier and every stream slot take the same context, the
     longest that fits the free GPU memory, a multiple of CONTEXT_STEP and at most the model's own; on every card (the RTX 5090
     included, where the model's own context does not fit n + 1 times).  The draft model's output head is left out by the rule of
@@ -562,10 +607,18 @@ def plan_parallel(pack, det: Detected, n: int) -> ContextPlan:
         return plan
     plan.free_mib = g.free_mib
     sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
-    ctx, head_off = choose_parallel(g.free_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx, n)
+    free = g.free_mib - reserve_mib
+    ctx, head_off = choose_parallel(free, sizes[0], sizes[1], sizes[2], pack.max_ctx, n)
+    if reserve_mib:                              # not at the cost of more than half of the context (as plan_context)
+        plain = choose_parallel(g.free_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx, n)
+        if ctx < MIN_CONTEXT or 2 * ctx < plain[0]:
+            ctx, head_off = plain
+            if ctx >= MIN_CONTEXT:
+                plan.notes.append(NO_ROOM_NOTE % reserve_mib)
+            free, reserve_mib = g.free_mib, 0
     if ctx < MIN_CONTEXT:
         fits = [m for m in range(n - 1, 1, -1)
-                if choose_parallel(g.free_mib, sizes[0], sizes[1], sizes[2], pack.max_ctx, m)[0] >= MIN_CONTEXT]
+                if choose_parallel(free, sizes[0], sizes[1], sizes[2], pack.max_ctx, m)[0] >= MIN_CONTEXT]
         raise YasakaniError(
             "--parallel %d does not fit in the free GPU memory (%d of %d MiB free): every request needs a context of at least %d tokens "
             "of its own.  %s" % (n, g.free_mib, g.total_mib, MIN_CONTEXT, ("--parallel %d fits." % fits[0]) if fits
@@ -578,10 +631,11 @@ def plan_parallel(pack, det: Detected, n: int) -> ContextPlan:
     plan.max_ctx = ctx
     plan.notes.append("context: %d tokens for each of %d requests at once, chosen from the free GPU memory (%d of %d MiB free); "
                       "--max-ctx sets it yourself" % (ctx, n, g.free_mib, g.total_mib))
+    _reserve_note(plan, reserve_mib, True)
     return plan
 
 
-def plan_given_parallel(pack, det: Detected, max_ctx: int, n: int) -> ContextPlan:
+def plan_given_parallel(pack, det: Detected, max_ctx: int, n: int, reserve_mib: int = 0) -> ContextPlan:
     """The plan for ``n`` requests at once with a context given by --max-ctx: the context stays as given (as for one request, it is
     tried even where the rule says it does not fit, with a warning); the draft model's output head is left out when the contexts fit
     only without it.  Unchanged when nvidia-smi gave no answer."""
@@ -593,9 +647,11 @@ def plan_given_parallel(pack, det: Detected, max_ctx: int, n: int) -> ContextPla
     plan.free_mib = g.free_mib
     sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
     over = overhead_mib(sizes[0])
-    if parallel_fit(g.free_mib, sum(sizes), over, n) >= plan.max_ctx:
+    _reserve_note(plan, reserve_mib, False)
+    free = g.free_mib - reserve_mib
+    if parallel_fit(free, sum(sizes), over, n) >= plan.max_ctx:
         return plan
-    if parallel_fit(g.free_mib, sizes[0] + sizes[1], over, n) >= plan.max_ctx:
+    if parallel_fit(free, sizes[0] + sizes[1], over, n) >= plan.max_ctx:
         plan.env["YSKN_BDR_SHEAD"] = "0"
         plan.notes.append("note: the output head of the draft model (%s, %.1f GiB) is not loaded: it does not fit beside %d requests "
                           "with %d tokens of context each in the free GPU memory (%d of %d MiB free); each pass takes %s longer "
@@ -632,13 +688,15 @@ def check_parallel(pack, plan: Optional[ContextPlan], info, n: int) -> Tuple[int
     w = pack.weights.stat().st_size
     files = w + pack.draft.stat().st_size + (pack.draft_head.stat().st_size if info.draft_head else 0)
     m = n
-    while m >= 2 and parallel_need_mib(files, w, info.max_ctx, m, info.kv_bytes_per_position, info.slot_bytes) > plan.free_mib:
+    room = plan.free_mib - plan.reserve_mib      # --prefill new on a card under FULL_CONTEXT_MIN_TOTAL_MIB keeps its reserve
+    kept = " (besides %d MiB kept for the new prompt reading)" % plan.reserve_mib if plan.reserve_mib else ""
+    while m >= 2 and parallel_need_mib(files, w, info.max_ctx, m, info.kv_bytes_per_position, info.slot_bytes) > room:
         m -= 1
     if m == n:
         return n, None
     need = parallel_need_mib(files, w, info.max_ctx, n, info.kv_bytes_per_position, info.slot_bytes)
     if m >= 2:
-        return m, ("note: by the engine's own numbers %d requests with %d tokens of context each need about %d MiB and %d MiB are free; "
-                   "serving %d at a time" % (n, info.max_ctx, need, plan.free_mib, m))
-    return 1, ("note: by the engine's own numbers %d requests with %d tokens of context each need about %d MiB and %d MiB are free, and "
-               "not even 2 fit; serving one request at a time" % (n, info.max_ctx, need, plan.free_mib))
+        return m, ("note: by the engine's own numbers %d requests with %d tokens of context each need about %d MiB and %d MiB are free%s; "
+                   "serving %d at a time" % (n, info.max_ctx, need, room, kept, m))
+    return 1, ("note: by the engine's own numbers %d requests with %d tokens of context each need about %d MiB and %d MiB are free%s, and "
+               "not even 2 fit; serving one request at a time" % (n, info.max_ctx, need, room, kept))

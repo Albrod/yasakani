@@ -576,6 +576,96 @@ class PrefillModeTests(unittest.TestCase):
         self.assertEqual([prof.env[k] for k in ("YSKN_Q35_PF_V2", "YSKN_Q35_PMAX", "YSKN_Q35_LAYER_ROWS")], ["0", "1024", "4096"])
 
 
+class PrefillReserveTests(unittest.TestCase):
+    """--prefill new on a card under 30,000 MiB: the planners leave NEW_PREFILL_RESERVE_MIB free.  The new reading keeps a work area
+    (NEW_PREFILL_AREA_MIB at the sizes of SMALL_CARD_ENV; measured +569 / +607 MiB at the peak on an RTX 5090 shown as a 24 GB / 16 GB
+    card), the engine makes it only with NEW_PREFILL_SPARE_MIB to spare, and CUDA reported NEW_PREFILL_CUDA_GAP_MIB less free memory
+    than nvidia-smi.  Not at the cost of more than half of the context.  Every other choice plans as before."""
+
+    R = 1800
+    CHOSEN = ("note: --prefill new: the context is chosen with 1800 MiB more left free (the new prompt reading keeps a work area of about "
+              "579 MiB from the first long prompt on; the engine makes it only with 1024 MiB to spare, and reads prompts as 0.1.7 did "
+              "when it finds less)")
+    NO_ROOM = ("note: --prefill new: keeping 1800 MiB free for the work area of the new prompt reading would cost more than half of the "
+               "context, so the context is chosen without it; the engine reads prompts as 0.1.7 did when it finds no room")
+
+    def test_numbers(self):
+        self.assertEqual((G.NEW_PREFILL_RESERVE_MIB, G.NEW_PREFILL_AREA_MIB, G.NEW_PREFILL_SPARE_MIB, G.NEW_PREFILL_CUDA_GAP_MIB),
+                         (self.R, 579, 1024, 566))
+        # after the load the planner's margin and the reserve are free in nvidia-smi: enough for the area (607,322,112 B and the
+        # driver's rounding of its 17 allocations, about 34 MiB) with the engine's spare, as CUDA counts the free memory
+        self.assertGreaterEqual(G.MARGIN_MIB + G.NEW_PREFILL_RESERVE_MIB,
+                                607322112 / G.MIB + 34 + G.NEW_PREFILL_SPARE_MIB + G.NEW_PREFILL_CUDA_GAP_MIB + 64)
+
+    def test_reserve(self):
+        for name, cc, total, want in (("NVIDIA GeForce RTX 5090", "12.0", 32607, 0), ("NVIDIA RTX A6000", "8.6", 49140, 0),
+                                      ("NVIDIA GeForce RTX 4090", "8.9", 24564, self.R), ("NVIDIA GeForce RTX 3090", "8.6", 24576, self.R),
+                                      ("NVIDIA GeForce RTX 5060 Ti", "12.0", 16311, self.R)):
+            det = det_of(smi_line(0, name, cc, total, 500))
+            self.assertEqual([G.prefill_reserve_mib(m, det) for m in ("auto", "old", "new")], [0, 0, want], name)
+        self.assertEqual([G.prefill_reserve_mib(m, None) for m in ("auto", "old", "new")], [0, 0, self.R])
+        self.assertEqual([G.prefill_reserve_mib(m, G.Detected()) for m in ("auto", "old", "new")], [0, 0, self.R])
+        plan = G.plan_context(FakePack(FASTEST), G.Detected(), self.R)          # unknown memory: nothing is planned, no note
+        self.assertEqual((plan.max_ctx, plan.notes, plan.reserve_mib), (None, [], 0))
+
+    def test_24_gb(self):
+        for sizes, used, ctx_old, ctx_new in ((QUALITY, 500, None, 229376), (QUALITY, 1000, None, 212992), (FASTEST, 500, None, None),
+                                              (FASTEST, 4000, None, 180224)):
+            det = det_of(smi_line(0, "NVIDIA GeForce RTX 4090", "8.9", 24564, used))
+            old, new = G.plan_context(FakePack(sizes), det), G.plan_context(FakePack(sizes), det, self.R)
+            self.assertEqual((old.max_ctx, new.max_ctx, old.reserve_mib, new.reserve_mib), (ctx_old, ctx_new, 0, self.R), used)
+            self.assertEqual((new.env, new.notes[-1], len(new.notes)), (G.SMALL_CARD_ENV, self.CHOSEN, 1 if ctx_new is None else 2), used)
+            # what nvidia-smi shows free after the load: room for the area with the engine's spare, as CUDA counts it
+            ctx = ctx_new or 262144
+            after_load = sum(sizes) / G.MIB + G.overhead_mib(sizes[0]) + ctx * G.KV_BYTES_PER_TOKEN / G.MIB
+            self.assertGreaterEqual(24564 - used - after_load,
+                                    G.NEW_PREFILL_AREA_MIB + 34 + G.NEW_PREFILL_SPARE_MIB + G.NEW_PREFILL_CUDA_GAP_MIB, used)
+
+    def test_not_for_more_than_half_of_the_context(self):
+        for name, total, used, sizes, ctx in (("NVIDIA GeForce RTX 4080", 16384, 500, FASTEST, 98304),
+                                              ("NVIDIA GeForce RTX 5060 Ti", 16311, 900, FASTEST, 81920),
+                                              ("NVIDIA GeForce RTX 4080", 16384, 1800, FASTEST, 32768),
+                                              ("NVIDIA GeForce RTX 4090", 24564, 4000, QUALITY, 163840)):
+            det = det_of(smi_line(0, name, "8.9", total, used))
+            old, new = G.plan_context(FakePack(sizes), det), G.plan_context(FakePack(sizes), det, self.R)
+            self.assertEqual((old.max_ctx, new.max_ctx, new.reserve_mib, new.env), (ctx, ctx, 0, old.env), (name, used))
+            self.assertEqual(new.notes, [self.NO_ROOM] + old.notes, (name, used))
+        det = det_of(smi_line(0, "NVIDIA GeForce RTX 4080", "8.9", 16384, 3000))     # does not fit at all: the same error as without it
+        errors = []
+        for r in (0, self.R):
+            with self.assertRaises(YasakaniError) as cm:
+                G.plan_context(FakePack(FASTEST), det, r)
+            errors.append(str(cm.exception))
+        self.assertEqual(errors[0], errors[1])
+        self.assertIn("13384 of 16384 MiB free", errors[0])
+
+    def test_given_context_stays(self):
+        det = det_of(smi_line(0, "NVIDIA GeForce RTX 4080", "8.9", 16384, 500))
+        p = G.plan_given_context(FakePack(FASTEST), det, 98304, self.R)
+        self.assertEqual((p.max_ctx, p.reserve_mib, p.env.get("YSKN_BDR_SHEAD")), (98304, self.R, "0"))
+        self.assertEqual(p.notes[0], "note: --prefill new: the new prompt reading needs about 2169 MiB free in nvidia-smi after the model "
+                                     "is loaded (a work area of about 579 MiB, made only with 1024 MiB to spare); with less, prompts are "
+                                     "read as in 0.1.7.  The context you gave is used as it is")
+        q = G.plan_given_context(FakePack(FASTEST), det, 98304)
+        self.assertEqual((q.max_ctx, q.reserve_mib), (98304, 0))
+        self.assertFalse(any("--prefill new" in n for n in q.notes))
+
+    def test_parallel(self):
+        det = det_of(smi_line(0, "NVIDIA GeForce RTX 4090", "8.9", 24564, 500))
+        for n, ctx_old, ctx_new, head_off in ((2, 131072, 98304, False), (4, 65536, 65536, True)):
+            a, b = G.plan_parallel(FakePack(FASTEST), det, n), G.plan_parallel(FakePack(FASTEST), det, n, self.R)
+            self.assertEqual((a.max_ctx, b.max_ctx, a.reserve_mib, b.reserve_mib), (ctx_old, ctx_new, 0, self.R), n)
+            self.assertEqual(("YSKN_BDR_SHEAD" in a.env, "YSKN_BDR_SHEAD" in b.env), (False, head_off), n)
+            self.assertEqual(b.notes[-1], self.CHOSEN, n)
+        g = G.plan_given_parallel(FakePack(FASTEST), det, 32768, 2, self.R)
+        self.assertEqual((g.max_ctx, g.reserve_mib), (32768, self.R))
+        self.assertTrue(g.notes[0].endswith("The context you gave is used as it is"))
+        det = det_of(smi_line(0, "NVIDIA GeForce RTX 4080", "8.9", 16384, 500))      # 2 requests fit, but not with the reserve
+        a, b = G.plan_parallel(FakePack(FASTEST), det, 2), G.plan_parallel(FakePack(FASTEST), det, 2, self.R)
+        self.assertEqual((a.max_ctx, b.max_ctx, b.reserve_mib), (16384, 16384, 0))
+        self.assertEqual(b.notes[0], self.NO_ROOM)
+
+
 class EditCopyTests(unittest.TestCase):
     """--edit-copy / YASAKANI_EDIT_COPY: on | off, passed through the plan as YSKN_EDIT_COPY=1 / 0; EDIT_COPY_DEFAULT when neither is
     given.  The same on every card and with every prompt reading."""
@@ -784,6 +874,21 @@ class CompareScriptTests(unittest.TestCase):
         self.assertIn("edit copy: on", said)
         with self.assertRaises(YasakaniError):
             self.plan("24 GB", environ={"YASAKANI_PREFILL": "fast", "YASAKANI_EDIT_COPY": ""})
+
+    def test_prefill_new_keeps_room(self):
+        """YASAKANI_PREFILL=new on a 24 GB card: the context of gpu.prefill_reserve_mib and its line; a 16 GB card stays as it is."""
+        det = det_of(self.CARDS["24 GB"])
+        auto = G.plan_context(FakePack(FASTEST), det)
+        want = G.plan_context(FakePack(FASTEST), det, G.prefill_reserve_mib("new", det))
+        self.assertEqual((auto.max_ctx, want.max_ctx, want.reserve_mib), (None, 180224, G.NEW_PREFILL_RESERVE_MIB))
+        max_ctx, env, said = self.plan("24 GB", environ={"YASAKANI_PREFILL": "new"})
+        self.assertEqual(max_ctx, 180224)
+        self.assertNotIn("YSKN_Q35_PF_V2", env)
+        self.assertTrue(any(line.startswith("note: --prefill new: the context is chosen with 1800 MiB more left free") for line in said))
+        self.assertEqual(self.plan("24 GB")[0], None)                                     # auto: as before
+        max_ctx, env, said = self.plan("16 GB", environ={"YASAKANI_PREFILL": "new"})      # not for more than half of the context
+        self.assertEqual(max_ctx, 81920)
+        self.assertTrue(any(line.startswith("note: --prefill new: keeping 1800 MiB free") for line in said))
 
     def test_older_package(self):
         """A package without use_prefill / use_edit_copy (before this release): the plan as it is, no error, no extra line."""
@@ -1134,6 +1239,39 @@ class OpenStackTests(unittest.TestCase):
             self.assertTrue(args.gpu_detected.untested)
         finally:
             eng.close()
+
+    def test_prefill_new_keeps_room(self):
+        """--prefill new on a 24 GB card: _open_stack plans with gpu.prefill_reserve_mib (the plan keeps the reserve, the engine opens
+        with the plan's context); auto plans without it."""
+        from yasakani import cli
+        folder = support.make_real_folder("reserve")
+        self.addCleanup(shutil.rmtree, folder.parent, True)
+        with open(folder / "bdraft2_k8.shead", "wb") as f:
+            f.truncate(FASTEST[2])
+        saved = {k: v for k, v in os.environ.items() if k.startswith("YSKN_") or k == "YASAKANI_PREFILL"}
+
+        def restore():
+            for k in [k for k in os.environ if k.startswith("YSKN_") or k == "YASAKANI_PREFILL"]:
+                del os.environ[k]
+            os.environ.update(saved)
+        self.addCleanup(restore)
+        os.environ.pop("YASAKANI_PREFILL", None)
+        base = ["chat", "--model-dir", str(folder), "--dll", str(support.stub_path())]
+        got = {}
+        for mode in ("auto", "new"):
+            gpus = G.parse(smi_line(0, "NVIDIA GeForce RTX 4090", "8.9", 24564, 4000))
+            args = cli.build_parser().parse_args(base + ["--prefill", mode])
+            with mock.patch.object(G, "query", return_value=gpus):
+                pack, eng, fmt, runner = cli._open_stack(args, warm=False)
+            try:
+                det = G.detect(0, environ={}, gpus=gpus)
+                want = G.plan_context(pack, det, G.prefill_reserve_mib(mode, det))
+                got[mode] = args.context_plan.reserve_mib
+                self.assertEqual(eng.max_ctx, want.max_ctx or pack.max_ctx, mode)
+                self.assertEqual((args.context_plan.reserve_mib, args.context_plan.max_ctx), (want.reserve_mib, want.max_ctx), mode)
+            finally:
+                eng.close()
+        self.assertEqual(got, {"auto": 0, "new": G.NEW_PREFILL_RESERVE_MIB})
 
     def test_prefill_old_reaches_the_engine(self):
         """--prefill old and YASAKANI_PREFILL=old set YSKN_Q35_PF_V2=0 for the engine; auto leaves the default."""
