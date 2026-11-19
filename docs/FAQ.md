@@ -29,6 +29,9 @@ with thinking on, the fastest run of each task is used, chosen from 5 runs for Y
 [MEASUREMENTS.md](MEASUREMENTS.md). [`bench/`](../bench/) has what you need to check or repeat the comparison, and `yasakani bench` measures
 your own PC.
 
+0.2.0 reads prompts faster on the RTX 5090 ([below](#prompt-reading-020)). That does not change these tables, because they do not include
+the time to read the prompt.
+
 ## Will I see the same speed?
 
 Not exactly. The speed depends on what you ask: predictable text (code, structured output) is written faster than free-form prose, because the
@@ -50,7 +53,9 @@ the thinking columns of the README tables are not what it reproduces. `--runs 2`
 result. For each task it prints the tokens, the seconds, tok/s, the tokens per pass of the main
 model, the number of wide copy passes, and whether the answer is the expected one. The first lines give the package version, the SHA-256 of
 `yskn.dll`, the GPU (name, compute capability, driver), the model file and whether wide copy passes are used, so a pasted result says what
-it was measured with.
+it was measured with. Since 0.2.0 the lines at start also say which prompt reading is used, and `edit copy: on` when the
+[edit copy](#edit-copy-020) is on. It is on by default; the speed tables of the README were measured before it existed, so
+`yasakani bench --edit --edit-copy off` is the run to compare with them.
 
 The wide copy passes (since 0.1.4: a pass that copies the input checks up to 64 tokens) are used where the check on the card opened them
 (since 0.1.7 on RTX 30, 40 and 50 cards; see [below](#wide-copy-passes-per-gpu)); we measured them on the RTX 5090 only. Speed here is (tokens - 1) / the engine's
@@ -80,6 +85,13 @@ We still do not promise bit-identical text in every condition; the details are i
 The copying of 0.1.4 was checked against decoding one token per pass: 255 of 255 generations with copying (28 of them with wide passes of
 up to 64 rows) gave the same tokens ([TECHNOLOGY.md](TECHNOLOGY.md), chapter 7).
 
+The new prompt reading of 0.2.0 was compared with 0.1.7 on the RTX 5090, with both models. In 46 cases (prompts of 256 to 65,536 tokens,
+589,088 positions) the predictions, the 8 most likely candidates with their scores and the state after the prompt were the same; this
+comparison used a test build of the 0.2.0 engine. The released engine library was compared through the chat's own path: 22 cases (first
+reads of 256 to 65,536 tokens, prompts changed in the middle, thinking on), 4 runs each, gave the same tokens and the same state every
+time. 35 conversations per model, one request at a time, gave the same tokens as 0.1.7, with the edit copy off and with it on. The [edit copy](#edit-copy-020) of 0.2.0 only
+proposes tokens; the model still checks every one of them, so the output does not change.
+
 ## Which GPUs, which systems?
 
 We test on **Windows 11 and the RTX 5090** (32 GB). Since 0.1.3 the engine is also built to run on other NVIDIA RTX 30, 40 and 50 series cards with
@@ -88,7 +100,8 @@ RTX 4060 Ti 16GB, RTX 4070 Ti SUPER, RTX 4080, RTX 4080 SUPER, RTX 5060 Ti 16GB,
 not optimized for them and we have not tested it on them, so neither its speed nor its operation is guaranteed; they are slower than the
 RTX 5090. The quickstart says so and goes on. Since 0.1.4, however, its self-check compares the card's predictions with those of the
 RTX 5090, and the quickstart stops when they differ by more than small differences in the computation, or when the card's passes of
-different widths do not agree.
+different widths do not agree. The faster prompt reading of 0.2.0 is used by default only on cards with 30,000 MiB or more (the RTX
+5090); the other cards read prompts exactly as 0.1.7 did ([below](#prompt-reading-smaller-cards)).
 Results from these cards are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 AMD GPUs, Macs, cards with less than 16 GB and cards older than the RTX 30 series are not supported. On Linux the engine can be built from source (a community contribution, [#3](https://github.com/yasakani-dev/yasakani/pull/3), checked on
 WSL2 / Ubuntu 24.04 with an RTX 5090); a prebuilt Linux release with a launcher is one of the campaign's goals. Testing and tuning on the 24 GB and 16 GB RTX cards first, then AMD and Mac - that is what the
@@ -119,7 +132,8 @@ prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 the
 ([v0.1.7-test1](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.7-test1)) let owners of other cards try them.
 
 * **The check.** At the first start of `chat`, `serve`, `bench` or `selfcheck`, after the model is loaded, the package checks the card
-  once. Passes of 17 to 64 tokens must give the same predictions as passes of 16, bit for bit. If not, no wide pass is used and
+  once. Passes of 17 to 64 tokens must give the same predictions as passes of 16, bit for bit (since 0.2.0 also passes of 64 tokens
+  after position 4,096; 463 positions in all). If not, no wide pass is used and
   `yasakani selfcheck` fails: please report it in GitHub Issues. On RTX 30 / 40 cards a width (32, 48 or 64 tokens) is then used only if
   its copy steps take at most 0.8 × width / 16 times a 16-token step on this card (32: 1.60, 48: 2.40, 64: 3.20), measured while the GPU
   is idle. RTX 50 cards start with every width, as in 0.1.6, and the check leaves out a width only when every round is over that limit.
@@ -134,7 +148,8 @@ prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 the
   `%LOCALAPPDATA%\yasakani`). After an update the check runs once more, because the engine library and the package change. It also runs
   again after 30 days, with `--wide-recheck`, or when during generation the engine went back from wide passes in at least 10 of every 100
   (counted over at least 128 in one run of the program). During generation the engine goes back to 16-token passes when the wide ones
-  turn out slower (it checks this every 4 wide passes).
+  turn out slower (it checks this every 4 wide passes). The check of 0.2.0 is a new version of it, so a result kept by 0.1.7 is
+  measured again once ([below](#first-start-020)).
 * **Settings.** `--wide off` (or `YASAKANI_WIDE=off`) turns the wide passes off; `--wide force` uses every width without the check, to
   compare. Since 0.1.7 `--wide on` is the same as the default.
 * **Several requests.** With `serve --parallel N`, a request that runs alone uses the widths the check opened. Passes shared by several
@@ -155,6 +170,49 @@ prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 the
   cards. Please paste it into a GitHub issue (the reports so far are in [#24](https://github.com/yasakani-dev/yasakani/issues/24)). It
   contains no UUID, path, user or computer name. Details: [python/README.md](../python/README.md#wide-copy-passes-per-gpu).
 
+<a name="edit-copy-020"></a>
+
+## What is the edit copy?
+
+New in 0.2.0. Some edits make the same replacement again and again: a key renamed in every JSONL line, a column renamed in every SQL
+view. In the copy passes the engine then proposes the replacement the model has already written at earlier places, instead of the
+unchanged input. The model still checks every proposed token, so the output does not change; only such edits get faster. An edit that
+changes one place, and text that is not an edit, are not faster. The edit copy works where one request is generated at a time; the shared
+passes of several requests in `serve --parallel N` do not use it.
+
+It is on by default. `--edit-copy off` (or `YASAKANI_EDIT_COPY=off`) turns it off, `--edit-copy on` turns it on; it works with `chat`,
+`serve`, `bench` and `selfcheck`. When it is on, `edit copy: on` is printed at start, and `yasakani info` shows the setting. A wrong value
+of `YASAKANI_EDIT_COPY` stops before the model is loaded.
+
+Measured on one RTX 5090, context 32,768, temperature 1.0, thinking off, one request at a time, 2 runs with the edit copy off and 2 with
+it on, measured in turn (tok/s, mean of the 2 runs, off → on; the tokens and the state were the same in all 4 runs of every task):
+
+| Task | Quality model | Fastest model |
+|---|---|---|
+| JSONL: a key renamed in every line (80 lines) | 1,151.4 → 2,039.8 (1.77×) | 1,244.9 → 2,009.3 (1.61×) |
+| SQL: a column renamed in every view (50 views) | 1,168.5 → 2,101.0 (1.80×) | 1,262.7 → 2,025.2 (1.60×) |
+| Code edit (`bench --edit`) | 2,040.1 → 2,209.0 (1.08×) | 2,048.1 → 2,163.7 (1.06×) |
+| JSONL edit (`bench --edit`) | 2,292.2 → 2,309.3 (1.01×) | 2,284.5 → 2,286.6 (1.00×) |
+| Long JSONL edit (`bench --edit`) | 2,168.7 → 2,186.9 (1.01×) | 2,165.2 → 2,162.3 (1.00×) |
+
+The two rename tasks are not part of `yasakani bench --edit`, and their prompts are not in this release. In each the request is to return
+the whole file with the new name; the first 1,024 tokens of the answer are timed. Without the edit copy the copy passes cannot be used on
+them, because every line differs from the input; with it the model needed 25 to 27 passes instead of 66 to 68 for the 1,024 tokens.
+
+On the 15 tasks of the speed tables (thinking off, temperature 1.0, one request at a time, the sum of all tasks, one uncounted pass and
+then 3 runs per version) 0.2.0 with the edit copy on was +0.37 % (quality model) and +0.45 % (fastest model) against 0.1.7, with the
+same tokens: the edit copy does not speed up these tasks beyond noise. We measured it on the RTX 5090 only. Details:
+[MEASUREMENTS.md](MEASUREMENTS.md#measurements-020).
+
+<a name="first-start-020"></a>
+
+## The first start after the update to 0.2.0 takes longer. Why?
+
+At the first start the package checks the wide copy passes on the card ([above](#wide-copy-passes-per-gpu)). It does that after every
+update, and 0.2.0 also checks passes of 64 tokens after position 4,096, so a result kept by 0.1.7 is measured again once. On the RTX
+5090 the first start of 0.2.0 printed `model ready in 28 s` (quality model) and `model ready in 27 s` (fastest model); the first start
+of 0.1.7 in the same measurement printed 27 s and 26 s (one start per version). Later starts use the kept result.
+
 ## How much memory and disk does it need?
 
 One model folder is a download of about 13 GB (fastest model) or 15 GB (quality model); keep 20 GB free. The context length goes up to 262,144
@@ -162,7 +220,8 @@ tokens. With the fastest model and that full context reserved, the engine takes 
 in FP16); this is the amount reserved at start, not the peak of the whole setup. 32 GB of system RAM is recommended.
 
 Together with the helper model that speeds up generation, the GPU memory in use at the full 262,144-token context was about 19.1 GiB for the
-fastest model and about 21.2 GiB for the quality model (about 14.3 GiB and 16.4 GiB with `--max-ctx 32768`; November 11, 2026).
+fastest model and about 21.2 GiB for the quality model (about 14.3 GiB and 16.4 GiB with `--max-ctx 32768`; November 11, 2026, before
+0.2.0). On the RTX 5090, 0.2.0 uses more ([below](#prompt-reading-memory)).
 
 On a GPU with less than 32 GB, the context is chosen from the free GPU memory each time the model starts (at most 262,144 tokens;
 `--max-ctx` sets it yourself). On 16 GB cards only the fastest model fits. The rule is in
@@ -199,6 +258,110 @@ is read from the start after an unrelated request, when thinking is switched on 
 tokens changes part-way. `usage.prompt_tokens_details.cached_tokens` shows how many tokens were reused; the details are in
 [MEASUREMENTS.md](MEASUREMENTS.md).
 
+Since 0.2.0, with the new prompt reading ([below](#prompt-reading-020)), more states are saved inside a long prompt the first time it is
+read (prompts of 32,768 tokens and more in our measurements). When a known prompt then changes in the middle, it is read again from the last saved state before the change, not from the start.
+0.1.7 read such a prompt from the start.
+
+<a name="prompt-reading-020"></a>
+
+## Prompt reading in 0.2.0
+
+### How fast is reading a prompt in 0.2.0?
+
+On the RTX 5090, about 1.04 to 1.25 times as fast as 0.1.7, more for longer prompts. 0.2.0 reads the prompt layer by layer in larger
+pieces, computes the output layer only where it is needed, and saves more states inside a long prompt (32,768 tokens and more in our measurements). With the quality model it read
+an 8,192-token prompt at 5,153 input tokens per second (0.1.7: 4,248) and a 32,768-token prompt at 4,647 (0.1.7: 3,774).
+
+Time to read a prompt the first time (nothing reused). One RTX 5090, default settings, context 69,632, one request at a time, thinking
+off unless the row says on, median of 2 runs per side:
+
+| Prompt (tokens) | Quality model: 0.1.7 → 0.2.0 (input tok/s) | Time | Ratio | Fastest model: 0.1.7 → 0.2.0 (input tok/s) | Ratio |
+|---|---|---|---|---|---|
+| 256 | 2,728 → 2,846 | 93.8 → 89.9 ms | 1.04 | 2,906 → 3,020 | 1.04 |
+| 2,048 | 4,398 → 5,007 | 465.6 → 409.1 ms | 1.14 | 4,434 → 4,959 | 1.12 |
+| 8,192 | 4,248 → 5,153 | 1.929 → 1.590 s | 1.21 | 4,259 → 5,102 | 1.20 |
+| 32,768 | 3,774 → 4,647 | 8.683 → 7.051 s | 1.23 | 3,774 → 4,601 | 1.22 |
+| 65,536 | 3,288 → 4,081 | 19.93 → 16.06 s | 1.24 | 3,277 → 4,051 | 1.24 |
+| 8,192, thinking on | 4,223 → 5,128 | 1.940 → 1.597 s | 1.21 | 4,210 → 5,101 | 1.21 |
+| 32,768, thinking on | 3,763 → 4,703 | 8.707 → 6.968 s | 1.25 | 3,744 → 4,660 | 1.24 |
+
+A known 32,768-token prompt changed at 25, 50 or 75% of its length and read again (same conditions):
+
+| Change at | Quality model: 0.1.7 → 0.2.0 | Ratio | Tokens not read again | Fastest model: 0.1.7 → 0.2.0 | Ratio |
+|---|---|---|---|---|---|
+| 25% | 8.701 → 5.776 s | 1.51 | 6,144 | 8.725 → 5.840 s | 1.49 |
+| 50% | 8.702 → 4.238 s | 2.05 | 14,336 | 8.696 → 4.260 s | 2.04 |
+| 75% | 8.707 → 2.070 s | 4.21 | 24,576 | 8.732 → 2.074 s | 4.21 |
+
+The answers are the same as with 0.1.7 ([above](#are-the-answers-the-same-as-the-original-models)). The speed of writing the answer
+does not change: "speed" in the tables of the README is still the speed of writing the answer, without the time to read the prompt. On
+the 15 tasks of the speed tables (thinking off, temperature 1.0, one request at a time, the sum of all tasks, one uncounted pass and then
+3 runs per version) 0.2.0 with its default settings was +0.37% (quality model) and +0.45% (fastest model) against 0.1.7, with the same
+tokens. With the [edit copy](#edit-copy-020) off it wrote at 622.4 tok/s against 621.5 for 0.1.7 with the quality model (+0.15%) and
+716.8 against 718.3 with the fastest model (-0.21%). The details are in [MEASUREMENTS.md](MEASUREMENTS.md#measurements-020).
+
+### What do the lines `prompt reading: ...` at start mean? What do `--prefill` and `YASAKANI_PREFILL` do?
+
+At start one line says which prompt reading is used and why, for example:
+
+```
+prompt reading: new (setting auto: 32607 MiB card)
+prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; --prefill new or YASAKANI_PREFILL=new to try it)
+```
+
+`--prefill` (on `chat`, `serve`, `bench` and `selfcheck`) or the environment variable `YASAKANI_PREFILL` chooses it:
+
+* `auto` (the default): the new reading on a card with 30,000 MiB or more, else the reading of 0.1.7. A card whose memory nvidia-smi
+  cannot tell also reads as 0.1.7 did.
+* `new`: the new reading on any card. Under 30,000 MiB this is experimental ([below](#prompt-reading-smaller-cards)).
+* `old`: the reading of 0.1.7 on any card, including its passes of 64 tokens. On the RTX 5090, `--prefill old` gave the tokens, the
+  states, the number of saved states and the GPU memory of 0.1.7.
+
+A wrong value of `YASAKANI_PREFILL` stops before the model is loaded. `yasakani info` shows the setting and what it chooses on each GPU,
+and `yasakani report` includes the line.
+
+<a name="prompt-reading-smaller-cards"></a>
+
+### I have an RTX 30 / 40 card or a 16 GB card. What changes for me?
+
+By default nothing changes in prompt reading: cards with less than 30,000 MiB read prompts exactly as 0.1.7 did. We checked this on the
+RTX 5090 shown to the package as a 24,564 MiB card (quality model, context 262,144) and as a 16,384 MiB card (fastest model, context
+98,304) with a 32,768-token prompt (one run each): the peak GPU memory was within 9 MiB of 0.1.7, the output was the same, and the prompt
+took 9.04 s (24,564 MiB) and 9.05 s (16,384 MiB) against 9.00 s and 9.02 s with 0.1.7. An earlier run also found the same tokens, state
+and number of saved states. The
+[edit copy](#edit-copy-020) is used on every card; we measured it on the RTX 5090 only.
+
+`--prefill new` (or `YASAKANI_PREFILL=new`) on such a card is experimental:
+
+* The package keeps the prompt sizes of 0.1.7 and chooses the context with 1,800 MiB more left free; one line says so. When that would
+  cost more than half of the context (on 16 GB cards), it does not leave the room, says so, and the engine decides by its own check. A
+  context you give with `--max-ctx` is used as it is, and a note says how much free memory the new reading needs.
+* The engine makes the work area of the new reading (about 579 MiB at these sizes) only when the GPU has that much free plus 1 GiB.
+  Otherwise it prints `[q35_layer] capacity fallback; no context reduction` once and, until the model is closed, reads prompts pass by
+  pass without the work area (the other changes of 0.2.0 stay on, and the output is the same). This is not an error.
+* We set up the RTX 5090 to look like a smaller card in both ways: the package saw the smaller memory, and another process held GPU
+  memory so that only the free memory of that card was left. A 32,768-token prompt, one run each, the same output as 0.1.7 every time:
+  * As a 24 GB card (24,564 MiB, quality model) the package chose a context of 229,376 instead of 262,144, and the engine made its work
+    area and read the prompt in 7.56 s (0.1.7: 9.00 s). With 700 MiB less free it found no room and read the prompt without the work area.
+  * As a 16 GB card (16,384 MiB, fastest model) keeping the room would have cost more than half of the context, so the context stayed
+    98,304. The engine found no room and read the prompt without the work area. So at the automatic context a 16 GB card does not use the new
+    reading; a smaller `--max-ctx` leaves room for it (not measured).
+* It has never run on a real RTX 30 or 40 card, or on a real 16 GB or 24 GB card. How much free memory the driver reports differs between
+  PCs, so we cannot say that it works on a given card. Results go in [GitHub issues](https://github.com/yasakani-dev/yasakani/issues).
+
+<a name="prompt-reading-memory"></a>
+
+### Why does 0.2.0 use more GPU memory on the RTX 5090?
+
+The new prompt reading needs a work area. The engine makes it at the first long prompt and keeps it until the model is closed. On the
+RTX 5090 with the default settings the peak GPU memory was 1,385 to 1,388 MiB higher than with 0.1.7 for the quality model, and 1,476
+to 1,479 MiB higher for the fastest model (the peak while reading prompts of 8,192, 32,768 and 65,536 tokens at a context of 69,632).
+After the model is loaded and before the first long prompt the difference is about 570 MiB. With the quality model at the full context of
+262,144, the peak was 23,595 MiB against 22,218 MiB with 0.1.7 (above the level before the start, one run each). Details:
+[MEASUREMENTS.md](MEASUREMENTS.md#measurements-020). The engine makes the area only when the GPU has enough free memory (the area plus 1 GiB);
+otherwise it prints `[q35_layer] capacity fallback; no context reduction` once and reads prompts without the work area. `--prefill old` (or
+`YASAKANI_PREFILL=old`) gives back the reading and the GPU memory of 0.1.7.
+
 ## How do I connect another app?
 
 Any app that can talk to an OpenAI-compatible server: set the address to `http://127.0.0.1:8765/v1` and the model name to `qwen3.8-27b` (any
@@ -216,7 +379,7 @@ API key will do). If it does not connect:
 
 ## Several requests at once (experimental)
 
-All numbers in this section were measured on one RTX 5090 (32 GB) with a development build of 0.1.7, November 17 and 18, 2026. Full conditions: [MEASUREMENTS.md](MEASUREMENTS.md#several-requests-at-once-experimental).
+All numbers in this section were measured on one RTX 5090 (32 GB) with a development build of 0.1.7, November 17 and 18, 2026, except where 0.2.0 is named. Full conditions: [MEASUREMENTS.md](MEASUREMENTS.md#several-requests-at-once-experimental).
 
 ### How do I turn it on?
 
@@ -317,6 +480,13 @@ Tested on the RTX 5090 only, with both models:
 * One at a time (`--parallel 1`), with a development build that has the same GPU code as 0.1.7: the same tokens as 0.1.5 on 35 prompts per model, and within 1% of its speed on 15 tasks (thinking off).
 * Several at once: about 35,000 requests compared with the same conversation sent alone. None differed. This includes requests that join and leave mid-run, contexts up to 229,376 tokens, tool calls, images, cancellation and engine failures.
 * A 60-minute run with 10,178 mixed requests (text, tools and images, fastest model, N = 8): no difference, nothing stuck, and memory did not keep growing.
+* With 0.2.0 (fastest model, edit copy off): requests that join and leave (`--parallel 4` and `8`, 123 requests), cancellation (21
+  requests) and engine failures (10): every compared request gave the same output as the same conversation sent alone. A 30-minute run
+  with mixed requests (text, tools and images, N = 8): 5,573 requests, 4,364 the same as the conversation sent alone, 1,185 read another
+  way with the same output, 24 not sent, none different; none stuck; the server's GPU memory grew by 6.0 MiB. These runs were made with
+  the [edit copy](#edit-copy-020) off. The shared passes of several requests do not use it, but a request that runs alone on the server
+  (also with `--parallel N`, and every request with images) does. The edit copy only proposes tokens, so the outputs are expected to be
+  the same with it on; this was not measured.
 
 Not tested:
 
@@ -324,11 +494,15 @@ Not tested:
 * Speed with the quality model, and with thinking on.
 * Linux with `--parallel`.
 * Two GPUs.
+* The new prompt reading of 0.2.0 when `--parallel N` chooses the contexts itself. The contexts then take the free GPU memory, and the
+  engine may find no room for the work area of the new reading and read prompts without it. With a `--max-ctx` that leaves room
+  (`--parallel 4 --max-ctx 16384` on the RTX 5090) it used the new reading.
 
 Known limits:
 
 * The 16-row pass is shared, so each request is slower than alone.
-* Reading a prompt pauses all others. Reading 66,416 tokens takes about 20 seconds.
+* Reading a prompt pauses all others. Reading 66,416 tokens took about 20 seconds (the development build of 0.1.7; 0.2.0 reads
+  prompts faster on the RTX 5090, [above](#prompt-reading-020)).
 * The next turn after tool calls must come within the kept time (1 second for a short conversation). Later, it reads the conversation again. The answer is the same.
 * The wait limit counts only waiting caused by kept places and next turns. A next turn that runs alone (because no place is free) is not stopped for a new request, so a new request can wait longer than the limit.
 * Over long runs the GPU memory of the whole card rose by up to 71 MiB. In a 30-minute run with a development build the server's own GPU memory did not change.
@@ -348,7 +522,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.1.7, the quickstart (`START.cmd`) can update itself. From v0.1.6 or older, download the 0.1.7 quickstart ZIP by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 it offers 0.2.0. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.2.0.zip`) by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, when the menu opens, the quickstart first prints that it asks github.com, then sends one HTTPS request:
   `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest`, with the User-Agent `yasakani-quickstart` and nothing else about

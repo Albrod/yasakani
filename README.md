@@ -6,7 +6,7 @@ English · [日本語](README.ja.md)
 
 YASAKANI is an engine that runs the Qwen3.8-27B language model on a Windows PC with one NVIDIA RTX GPU. The developer has tested it on the RTX 5090 only. After setup you can chat and edit code offline. You can also connect your own development tools through its OpenAI-compatible API.
 
-**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.7/yasakani-quickstart-0.1.7.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.1.7/fast_live_uncut.mp4)
+**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.0/yasakani-quickstart-0.2.0.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.0/fast_live_uncut.mp4)
 
 <a name="two-models"></a>
 <a name="what-you-need"></a>
@@ -28,6 +28,8 @@ For everyday use, choose the **quality model**. Its predictions are the closest 
 
 All speed numbers in this repository were measured on the RTX 5090. Other cards are slower. We do not guarantee their speed or that they work. The edit numbers are high because one pass of the model checks many tokens copied from the input (wide copy passes, up to 64 tokens per pass). Since 0.1.7 the engine uses them on RTX 30, 40 and 50 cards after a check on the card at the first start: a width is used only if it gives the same predictions as 16-token passes, bit for bit, and is faster on that card. Normal prose is not faster; the gain is on answers that copy the input, such as edits.
 
+**Prompt reading (new in 0.2.0):** on the RTX 5090 the engine reads prompts faster, with the same answers ([What 0.2.0 changed](#what-020-changed)). By default only cards with 30,000 MiB of memory or more use the new reading. Smaller cards read prompts exactly as 0.1.7 did. `--prefill new` tries the new reading on a smaller card. This is experimental: on the RTX 5090 set up as a 24 GB card it used the new reading, but we have not run it on a real card under 30,000 MiB ([smaller cards](docs/FAQ.md#prompt-reading-smaller-cards)).
+
 **Wide copy passes on other cards:** users reported the 0.1.7 test build in [#24](https://github.com/yasakani-dev/yasakani/issues/24). On an RTX 4090 (Windows 10) the check opened all three widths, and the three edit tasks ran 1.85 to 1.99 times as fast as with wide passes off (770.0 → 1,420.9, 822.5 → 1,634.9 and 793.2 → 1,545.6 tok/s), with the same output. On an RTX 5060 Ti only the 64-token width opened (215.1 → 279.4, 226.9 → 300.4 and 218.8 → 280.6 tok/s), with the same output. These are the reporters' numbers. No RTX 30 card has been reported yet, and we have run the code for RTX 30 / 40 only on the RTX 5090. [How the check works](docs/FAQ.md#wide-copy-passes-per-gpu)
 
 Contributors have tested a Linux build from source. AMD and Mac are future targets. [GPU list and requirements](docs/FAQ.md#which-gpus-which-systems) · [Build on Linux](BUILDING.md#linux-building-from-source)
@@ -38,19 +40,31 @@ Contributors have tested a Linux build from source. AMD and Mac are future targe
 
 You need 64-bit Windows 11, Python 3.10 or later, NVIDIA driver 580 or later, the Visual C++ 2015–2022 x64 runtime, and 20 GB of free disk space.
 
-1. Extract the v0.1.7 Windows quickstart ZIP to a path with only English letters and digits, such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.7)
+1. Extract the v0.2.0 Windows quickstart ZIP to a path with only English letters and digits, such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.2.0)
 2. Open **`START.cmd`** and choose a model. On the first run it downloads the engine and model files, checks them, and runs a GPU self-check.
 3. In the menu, choose browser chat or terminal chat, then type your first prompt. To use YASAKANI from another app, start the server and set the app's API address to `http://127.0.0.1:8765/v1`.
 
 In terminal chat, type `/effort medium` to make the model think for a shorter time, or `/think off` to turn thinking off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
 
-**Updates.** Since 0.1.7, the quickstart can update itself (from v0.1.6 or older, download the 0.1.7 quickstart ZIP by hand once). Once a day, when the menu opens, it asks GitHub whether there is a newer release and says so first. If there is one, it shows the old and new version and asks before it changes anything; the browser chat shows the same offer with an **Update** button. You can also choose “check for a new version” in the menu, run `START.cmd --action update`, or type `yasakani update`. The models stay; the engine and the Python package are installed again. `START.cmd --action rollback` goes back to the version before. To turn the daily check off: `START.cmd --no-update-check`. [What the check sends, and how the files are checked](docs/FAQ.md#how-does-the-update-work)
+**Updates.** Since 0.1.7, the quickstart can update itself (from v0.1.6 or older, download the 0.2.0 quickstart ZIP by hand once). Once a day, when the menu opens, it asks GitHub whether there is a newer release and says so first. If there is one, it shows the old and new version and asks before it changes anything; the browser chat shows the same offer with an **Update** button. You can also choose “check for a new version” in the menu, run `START.cmd --action update`, or type `yasakani update`. The models stay; the engine and the Python package are installed again. `START.cmd --action rollback` goes back to the version before. To turn the daily check off: `START.cmd --no-update-check`. [What the check sends, and how the files are checked](docs/FAQ.md#how-does-the-update-work)
 
 <a name="speed"></a>
 
 ## Speed and quality
 
 The fastest model was faster than each of the eight other engines in all seven categories. All engines ran on the same PC with one stock RTX 5090 (600 W) and generated one request at a time. With thinking off we compare means that leave out repetition loops and similar failures. With thinking on we compare the best run per task. The big gaps are in our own three tasks. Two are edits whose answers mostly copy the input, and one is a long, very regular JSONL output. On these, with thinking off, the fastest model is 1.8 to 4.6 times as fast as the next engine (code edit: 2,025 tok/s with v0.1.4 on November 15, against 441 tok/s for MegaCapybara 1.39 Tiny on November 3). On the 12 published prompts it is 1.1 to 1.5 times as fast as the next engine. Three of those 12 (CUDA code, TypeScript code, the English mystery story) are left out of the comparison. On them the fastest model's answer fell into a repetition loop or made a tool call that was not asked for.
+
+<a name="what-020-changed"></a>
+
+**What 0.2.0 changed** (RTX 5090, one request at a time, against the released 0.1.7):
+
+* **Reading a prompt is faster.** The quality model read a prompt of 8,192 tokens at 5,153 input tokens/s (0.1.7: 4,248, 1.21×) and one of 32,768 tokens at 4,647 (0.1.7: 3,774, 1.23×). The fastest model: 5,102 (4,259) and 4,601 (3,774). This is the first read, with nothing reused; thinking off, median of 2 runs per version, context 69,632. With thinking on, the quality model was 1.21× and 1.25× as fast at these two lengths. [Details](docs/FAQ.md#prompt-reading-020)
+* **A known long prompt changed in the middle is read again from the last saved state before the change.** 0.1.7 read it from the start. A prompt of 32,768 tokens changed at 25, 50 or 75 % of its length was read again 1.51, 2.05 and 4.21 times as fast with the quality model (fastest model: 1.49, 2.04 and 4.21 times; same conditions).
+* **The answers are the same.** In our checks both models gave the same tokens as 0.1.7. Generation itself is not faster: on the 15 tasks of the speed tables (thinking off, sum of all tasks, 3 runs per version, edit copy on as by default) the quality model was +0.37 % and the fastest model +0.45 % against 0.1.7. The edit copy does not speed up these tasks beyond noise.
+* **It needs more GPU memory.** The engine keeps a work area from the first long prompt on: at the peak 1,385 to 1,388 MiB more than 0.1.7 with the quality model, 1,476 to 1,479 MiB with the fastest model. When the GPU does not have that room, the engine prints `[q35_layer] capacity fallback; no context reduction` once and reads prompts pass by pass without the work area (the other changes of 0.2.0 stay on; same answers). By default (`--prefill auto`) the new reading is used only on cards with 30,000 MiB or more; smaller cards read prompts exactly as 0.1.7 did.
+* **Edit copy (new, on by default).** When an edit makes the same short replacement again and again, such as a key or a column renamed in every line, the look-ahead puts that replacement into its drafts once the model has written it at two places. The model still checks every drafted token, so the answer does not change. Renaming a key in every line of a JSONL file (80 lines), quality model: 1,151.4 → 2,039.8 tok/s (1.77×); renaming a column in every view of an SQL file (50 views): 1,168.5 → 2,101.0 tok/s (1.80×). Fastest model: 1.61× and 1.60×. Context 32,768, temperature 1.0, thinking off, the first 1,024 tokens of the answer, mean of 2 runs with the edit copy off and 2 with it on, measured in turn. These two tasks are not part of `yasakani bench --edit`, and their prompts are not in this release. The edit copy works where one request is generated at a time; the shared passes of several requests in `serve --parallel N` do not use it. [Details](docs/FAQ.md#edit-copy-020)
+
+Both are settings of `chat`, `serve`, `bench` and `selfcheck`: `--prefill auto|new|old` (or `YASAKANI_PREFILL`) and `--edit-copy on|off` (or `YASAKANI_EDIT_COPY`). One line at start says which prompt reading is used and why. [The options](python/README.md#prompt-reading-and-edit-copy) · [Measurements](docs/MEASUREMENTS.md#measurements-020)
 
 <a name="what-014-changed"></a>
 
@@ -112,7 +126,7 @@ The quality model picks the same most likely next token as the original BF16 mod
 
 <a name="long-contexts"></a>
 
-With room reserved for the maximum context of 262,144 tokens, GPU memory use was about 21.2 GiB with the quality model and 19.1 GiB with the fastest model. This includes the helper model. We measured long-context quality up to 128K tokens. [KV5 measurements](docs/MEASUREMENTS.md#kv5-the-compressed-key-value-cache-with-the-fastest-model)
+With room reserved for the maximum context of 262,144 tokens, GPU memory use was about 21.2 GiB with the quality model and 19.1 GiB with the fastest model. This includes the helper model. The work area of the new prompt reading of 0.2.0 comes on top ([above](#what-020-changed)). We measured long-context quality up to 128K tokens. [KV5 measurements](docs/MEASUREMENTS.md#kv5-the-compressed-key-value-cache-with-the-fastest-model)
 
 <a name="several-requests-at-once"></a>
 
@@ -134,6 +148,7 @@ Limits:
 * Edits get slower. On the code edit and the JSONL edit, 2 to 16 requests at once were 0.42 to 0.59 times as fast as the same requests sent one by one. The 12 published prompts were 1.1 to 6.6 times as fast with 16 at once (fastest model, thinking off).
 * While a prompt is read, or a request with images runs, all other requests pause. Reading 16,533 tokens takes about 4.1 seconds.
 * Contexts get shorter. With the quality model and N = 4, each request had 114,688 tokens on the RTX 5090.
+* The new prompt reading of 0.2.0: with a given `--max-ctx` that leaves room (`--parallel 4 --max-ctx 16384` on the RTX 5090) the engine used it. When `--parallel N` chooses the contexts itself, they take the free GPU memory, and the engine may find no room and read prompts without the work area. We have not measured this.
 * Without a `seed`, a request's result depends on the order in which requests arrive.
 
 [Questions and measurements](docs/FAQ.md#several-requests-at-once-experimental)

@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.1.7`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)).
+Status: version `0.2.0`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)).
 
 ## What you need
 
@@ -132,10 +132,12 @@ when a kept result fits. The package passes the setting to the engine as `YSKN_W
 driver mode of the GPU and whether a display is attached to it (nvidia-smi `display_attached`):
 
 1. *Correctness.* The engine reads about 2,400 tokens of a fixed text (the prompt and answer of the code edit task) in passes of 17, 31,
-   32, 33, 47, 48, 63 and 64 rows and again in passes of 16 over the same positions. The most likely ids and the NLL must be the same bit
-   for bit, else no width is used, passes of 17 to 64 rows go back to the 16-row sums (`set_opt 31`, on RTX 50 too) and `yasakani
+   32, 33, 47, 48, 63 and 64 rows and again in passes of 16 over the same positions. Since 0.2.0 it then reads about 4,200 tokens of the
+   same text and compares two passes of 64 rows that cross and follow position 4,096 in the same way (463 positions in all). The most
+   likely ids and the NLL must be the same bit for bit, else no width is used, passes of 17 to 64 rows go back to the 16-row sums (`set_opt 31`, on RTX 50 too) and `yasakani
    selfcheck` fails ("mismatch"; please report it). The text is read in pieces of at most 1,023 tokens: one read of 1,024 tokens or more
-   would make the engine set up a work area of about 580 MiB for long prompt reads and keep it, which generation does not need.
+   would make the engine set up the work area of long prompt reads and keep it (about 580 MiB at the sizes of 0.1.7, more with the new
+   prompt reading of 0.2.0), which generation does not need.
 2. *Time.* At 4,096 tokens of context it times copy cycles as the generation runs them (the pass, the commit of all its rows, the
    drafter reading them; `yskn_time_cycle`): 16 rows and W rows in turn, about 0.6 s each, 3 rounds greedy and one round sampled. The
    time of a width is the median of the means of pairs of cycles. W is used when it takes at most 0.8 × W / 16 times 16 rows (32: 1.60,
@@ -146,7 +148,7 @@ driver mode of the GPU and whether a display is attached to it (nvidia-smi `disp
    load alone decides). If the GPU is busy or nvidia-smi does not answer for it, nothing is measured or kept: RTX 50 then uses every width
    (as 0.1.6), RTX 30 / 40 none.
 
-The result is kept in `wide_check.json` (in `YASAKANI_CACHE_DIR`, else `%LOCALAPPDATA%\yasakani` on Windows, `$XDG_CACHE_HOME/yasakani` or
+The check of 0.2.0 is version 3 of it: a result kept by 0.1.7 is measured again once. The result is kept in `wide_check.json` (in `YASAKANI_CACHE_DIR`, else `%LOCALAPPDATA%\yasakani` on Windows, `$XDG_CACHE_HOME/yasakani` or
 `~/.cache/yasakani`) for 30 days; the file holds no path and only a hash of the GPU's UUID. If during generation the engine goes back
 from wide passes in at least 10 of every 100 of them, counted over at least 128 wide passes in one process, the next start checks again
 (a few back-offs, for example where copies end, do not reach that rate; the rule is in docs/TECHNOLOGY.md 5.4). On RTX 30 / 40, when less than 128 MiB of GPU memory is free after the graphs of the
@@ -165,6 +167,97 @@ console when it loads; that line is not in the report, but leave it out when you
 From Python: `Engine(pack, wide="on")`, then `engine.warmup(...)` with `wide_ids=yasakani.widecheck.check_ids(fmt)` (as `ChatRunner.warmup`
 does); `engine.wide_result` says what was decided and `engine.wide_state()` what the engine has open. With an engine library older than the
 0.1.7 test build (0.1.6 or older) nothing changes (and `--wide on` or `--wide force` says that it has no effect).
+
+## Prompt reading and edit copy
+
+0.2.0 adds two settings to `chat`, `serve`, `bench` and `selfcheck`. The command line wins over the environment variable. A wrong value in
+the variable stops the command before the model is loaded (`YASAKANI_PREFILL / --prefill must be one of auto, new, old, not 'x'`, and
+the same for `YASAKANI_EDIT_COPY / --edit-copy`). `yasakani info` prints both settings and, for each GPU, what the prompt reading setting
+chooses there; `yasakani report` names both in its table (it follows the two variables).
+
+| `--prefill` / `YASAKANI_PREFILL` | prompt reading |
+|---|---|
+| `auto` (default) | the new reading on a card with 30,000 MiB or more (nvidia-smi's total); on a smaller card, or when nvidia-smi cannot tell the memory, the reading of 0.1.7 |
+| `new` | the new reading on any card; under 30,000 MiB (or of unknown memory) with the pass sizes of 0.1.7. Experimental there: never run on a real card under 30,000 MiB |
+| `old` | the reading of 0.1.7 on any card, also the passes of 64 tokens as in 0.1.7 |
+
+**The new prompt reading** computes the first read of a prompt layer by layer in larger pieces, computes the output layer only where it
+is needed, and, for prompts of 8,192 tokens or more, puts saved states that are still free into the long stretches between the others
+(within the 8 saved states of a conversation), so that a known prompt changed in the middle is read again from the last saved state
+before the change. The answers do not change. On the RTX 5090 it read prompts of 8,192 and 32,768 tokens 1.21 and 1.23 times as fast as
+0.1.7 (quality model, thinking off, the first read with nothing reused, median of 2 runs; the tables are in
+[docs/MEASUREMENTS.md](https://github.com/yasakani-dev/yasakani/blob/main/docs/MEASUREMENTS.md#measurements-020)). It needs a work area on the GPU, which the engine makes at the
+first long prompt and keeps until the model is closed: on the RTX 5090 the peak GPU memory was 1,385 to 1,388 MiB (quality model) and
+1,476 to 1,479 MiB (fastest model) above 0.1.7. The engine makes the area only when the GPU has the area and 1 GiB more free (it tries smaller sizes of the area first).
+When it does not find that much, it prints once, on stderr:
+
+```
+[q35_layer] capacity fallback; no context reduction
+```
+
+This is not an error: the context stays as it is, and until the model is closed the engine reads prompts pass by pass without the work
+area. The other changes of 0.2.0 stay on, and the output is the same.
+
+**The line at start** says which reading is used and why, for example:
+
+```
+prompt reading: new (setting auto: 32607 MiB card)
+prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; --prefill new or YASAKANI_PREFILL=new to try it)
+prompt reading: as in 0.1.7 (setting auto: card memory not known; --prefill new or YASAKANI_PREFILL=new to try it)
+prompt reading: as in 0.1.7 (setting old)
+prompt reading: new (setting new)
+prompt reading: new (setting new; 24564 MiB card, so prompt sizes of 0.1.7)
+```
+
+When CUDA's numbering cannot be matched with nvidia-smi's, the card is given as `smallest of N GPUs: ... MiB`.
+
+**Cards under 30,000 MiB.** On such a card the package keeps the pass sizes of 0.1.7 with every setting (`YSKN_Q35_PMAX` 1024,
+`YSKN_Q35_LAYER_ROWS` 4096), because the memory rule of the context ([below](#gpus-other-than-the-rtx-5090)) was measured with them. With
+`auto` the reading is that of 0.1.7: on the RTX 5090 shown to the package as a 24,564 MiB and a 16,384 MiB card, a prompt of 32,768 tokens
+gave the same output as 0.1.7, with the peak GPU memory within 9 MiB of it (an earlier run also found the same ids, state and saved
+states). With `--prefill new` the work area takes about
+579 MiB, and the package leaves room for it when it chooses the context itself:
+
+```
+note: --prefill new: the context is chosen with 1800 MiB more left free (the new prompt reading keeps a work area of about 579 MiB from the first long prompt on; the engine makes it only with 1024 MiB to spare, and reads prompts without it when it finds less)
+```
+
+If keeping that room would cost more than half of the context (on 16 GB cards), the context is chosen without it, and the engine decides
+by its own check:
+
+```
+note: --prefill new: keeping 1800 MiB free for the work area of the new prompt reading would cost more than half of the context, so the context is chosen without it; the engine reads prompts without that work area when it finds no room
+```
+
+With `--max-ctx` the context is used as given, and the line says how much must be free:
+
+```
+note: --prefill new: the new prompt reading needs about 2169 MiB free in nvidia-smi after the model is loaded (a work area of about 579 MiB, made only with 1024 MiB to spare); with less, prompts are read without that work area.  The context you gave is used as it is
+```
+
+With `serve --parallel N` the same room is left free, and the line that lowers N says `(besides 1800 MiB kept for the new prompt
+reading)`. With `--parallel N` and no `--max-ctx`, on any card, the contexts take the free GPU memory, so the engine may find no room for
+the work area and read prompts without it; this has not been measured.
+
+What `--prefill new` did on the RTX 5090 set up to look like a smaller card in both ways (what the package sees, and only the free GPU
+memory of that card left because another process held the rest), a prompt of 32,768 tokens, one run each, the same output as 0.1.7 every
+time: as a 24 GB card (24,564 MiB, quality model) the package chose a context of 229,376 instead of 262,144, the engine made its work
+area and read the prompt in 7.56 s (0.1.7: 9.00 s); with 700 MiB less free it found no room, printed the fallback line and read without
+the work area. As a 16 GB card (16,384 MiB, fastest model) keeping the room would have cost more than half of the context, so the context stayed
+98,304, and the engine found no room and read without the work area. So at the automatic context a 16 GB card does not use the new reading; a
+smaller `--max-ctx` leaves room for it (not measured). No real card under 30,000 MiB has been measured, and how much free memory the
+driver reports differs between PCs.
+
+**Edit copy** (`--edit-copy on|off`, `YASAKANI_EDIT_COPY`, default `on`). When an answer copies the input with the same short replacement
+again and again (a key or a column renamed in every line), the drafts of the copy passes put in that replacement once the model has
+written it at two places. Every drafted token is still checked by the model, so the output does not change. It works where one request is
+generated at a time; the shared passes of several requests in `serve --parallel N` do not use it. With `on` the commands print
+the line `edit copy: on` at start. The package passes the setting to the engine as `YSKN_EDIT_COPY` (1 or 0). On the RTX 5090 it made a key
+renamed in every line of a JSONL file 1.77 times and a column renamed in every view of an SQL file 1.80 times as fast (quality model,
+thinking off, mean of 2 runs; [the measurements](https://github.com/yasakani-dev/yasakani/blob/main/docs/FAQ.md#edit-copy-020)).
+
+The quickstart's "compare" script (`lookahead_check.py`) and `tools/quality/score_yasakani.py` use the same prompt reading and edit copy
+as `yasakani chat` on GPU 0 (they follow `YASAKANI_PREFILL` and `YASAKANI_EDIT_COPY`) and print the same line at start.
 
 ## GPUs other than the RTX 5090
 
@@ -274,7 +367,8 @@ print(r.choices[0].message.tool_calls)
   and no other request comes in between): the engine keeps up to 8 saved states along the prompt of one conversation in pinned host memory
   (about 1.5 GiB of RAM). The prompt is read from the start after an unrelated request, when thinking is
   switched on or off, after a request with an image, when the tools differ (a named function in `tool_choice`, above), and when a prompt under 8,192 tokens
-  differs part-way.
+  differs part-way. Since 0.2.0 the new prompt reading also keeps saved states inside the first read of a long prompt (where there is room: at least 4,096 tokens from the other saved states),
+  so that a known prompt changed in the middle is read again from the last saved state before the change ([above](#prompt-reading-and-edit-copy)).
 * Next to `usage`, the answer carries `timings` in the layout of the llama.cpp server (contributed in [#8](https://github.com/yasakani-dev/yasakani/pull/8)): `cache_n`, `prompt_n`,
   `prompt_ms`, `prompt_per_token_ms`, `prompt_per_second`, `predicted_n`, `predicted_ms`, `predicted_per_token_ms`, `predicted_per_second`,
   and `draft_n` / `draft_n_accepted` (the tokens the look-ahead proposed and those the model confirmed; only when it proposed any). A stream
@@ -500,6 +594,11 @@ means running an engine configuration that the self-check and the published numb
 `YSKN_SNAP_SPARSE` 65536, `YSKN_SNAP_MIN` 8192) and two look-ahead settings to `DEFAULT_SPEC`: `copy_rows` (64: copy passes of up to 64 rows,
 used where the check on the card opened them; up to 0.1.6 on compute capability 12.x only) and `copy_index` (1: the copy index with the cursor). `copy_rows=16, copy_index=0` is the look-ahead of 0.1.3. These values are the current defaults; they
 have not been tuned. An older package that does not set `YSKN_SNAP_SLOTS` gets one saved state, as with 0.1.3.
+
+0.2.0 raises `YSKN_Q35_PMAX` from 1024 to 2048 and `YSKN_Q35_LAYER_ROWS` from 4096 to 8192 (the sizes of the new prompt reading), and
+the commands add the settings of [Prompt reading and edit copy](#prompt-reading-and-edit-copy): on cards under 30,000 MiB the sizes of
+0.1.7, with the reading of 0.1.7 also `YSKN_Q35_PF_V2=0`, and `YSKN_EDIT_COPY`. A value of these that you set in your shell is not used
+and is named in the note on ignored settings.
 
 ## Troubleshooting
 
