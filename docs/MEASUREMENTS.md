@@ -595,7 +595,7 @@ In a 30-minute run with build B the whole GPU rose by 71 MiB. The use without th
 <a name="measurements-020"></a>
 ## 0.2.0: faster prompt reading and the edit copy (added for 0.2.0)
 
-Measured on November 19, 2026 on the RTX 5090 (32 GB) of the other measurements, Windows 11, with the released models (quality model
+Measured on November 19 and 20, 2026 on the RTX 5090 (32 GB) of the other measurements, Windows 11, with the released models (quality model
 12.37 GB, fastest model 10.31 GB), one request at a time unless said. The comparison side is the released 0.1.7. How the new prompt
 reading and the edit copy work: [TECHNOLOGY.md](TECHNOLOGY.md), 5.5 and chapter 8.
 
@@ -604,10 +604,11 @@ reading and the edit copy work: [TECHNOLOGY.md](TECHNOLOGY.md), 5.5 and chapter 
 * Engine library: the `yskn.dll` of 0.2.0, SHA-256 starting `3e06622b` (the source of 0.1.7 plus the new prompt reading and the edit
   copy, with code for RTX 30, 40 and 50 as in 0.1.7; [BUILDING.md](../BUILDING.md)). The comparison: the `yskn.dll` of 0.1.7 (SHA-256
   starting `2d64c3b4`) with the 0.1.7 Python package.
-* Python package: the checks on the GPU used the 0.2.0 library with a package that differed from the 0.2.0 package only in its version
-  strings (0.1.7 instead of 0.2.0) and, for some checks, in an earlier form of the rule that leaves memory free for
-  `--prefill new` on cards under 30,000 MiB. That rule acts only with `--prefill new` on such cards. The runs in "Cards under
-  30,000 MiB" below used the released rule.
+* Python package: the checks on the GPU used the 0.2.0 library with a package that differed from the 0.2.0 package in its version
+  strings (0.1.7 instead of 0.2.0). For some checks it also had the edit copy off by default (in those, the runs with the edit copy
+  on turned it on with `--edit-copy on` or `YASAKANI_EDIT_COPY=on`), an earlier wording of the lines it prints for `--prefill new`,
+  and an earlier form of the rule that leaves memory free for `--prefill new` on cards under 30,000 MiB. That rule acts only with
+  `--prefill new` on such cards. The runs in "Cards under 30,000 MiB" below used the released rule.
 * Default settings (`--prefill auto`, which is the new reading on the RTX 5090) unless said. Whether the edit copy was on or off is
   named where it matters.
 * Input tok/s = prompt tokens / the time to read the prompt.
