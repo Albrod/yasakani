@@ -8,13 +8,13 @@ Windows 11 と NVIDIA の RTX 1 枚のパソコンで、YASAKANI をすぐに試
 使い方
   1. この zip を、C:\yasakani のような英数字だけの場所に展開します。
   2. START.cmd をダブルクリックします。
-  3. 画面の質問に番号で答えます（モデルは「品質モデル」か「最速モデル」）。
+  3. 画面の質問に番号で答えます（モデルは「品質モデル」「最速モデル」「最高品質モデル」のどれか）。
 
 START.cmd がすること
   - このパソコンの確認（Python 3.10 以上、GPU、NVIDIA のドライバー、空き容量）
   - エンジンの zip を公開ページからダウンロードして、SHA-256 を確かめる
   - このフォルダーの中に Python の環境を作って、パッケージを入れる
-  - モデル（約 13〜15 GB）を Hugging Face からダウンロードする
+  - モデル（約 13〜18 GB）を Hugging Face からダウンロードする
   - 点検（yasakani info・verify・selfcheck）
   - 速さを測る／先読みあり・なしを比べる／ブラウザーでチャットする／黒い画面でチャットする／サーバーを起動する、から選ぶ
 
@@ -24,7 +24,7 @@ START.cmd がすること
   - NVIDIA のドライバーは 580 以上が要ります（エンジンが CUDA 13 で作ってあるため）。古いときは、ダウンロードの前に
     止まって案内します（https://www.nvidia.com/ja-jp/drivers/）。
   - GPU：確かめたのは RTX 5090 だけです。0.1.3 から、RTX 30・40・50 シリーズで GPU のメモリが 16 GB 以上のカードでも
-    動くように作ってあります。ただし最適化も動作の確認もしていません。24 GB 未満のカードでは最速モデルだけを使い、文脈の長さは空きメモリから
+    動くように作ってあります。ただし最適化も動作の確認もしていません。24 GB 未満のカードでは最速モデルだけを使い（品質モデルと最高品質モデルは入りません）、文脈の長さは空きメモリから
     決めます。AMD・Intel の GPU と Mac には対応していません。
   - 「先読みあり・なしを比べる」（lookahead_check.py）は、同じ 4 つの課題を、先読みなしと出荷時の設定で書かせます。
     1 回の計算の時間、1 回で確定したトークン数、速さ、書かれた文章が同じかどうかを表示します。
@@ -49,13 +49,13 @@ A starter for trying YASAKANI on a Windows 11 computer with one NVIDIA RTX card 
 How to use
   1. Unpack this zip to a plain path such as C:\yasakani
   2. Double-click START.cmd
-  3. Answer the questions with a number (the model is the "quality model" or the "fastest model").
+  3. Answer the questions with a number (the model is the "quality model", the "fastest model" or the "max-quality model").
 
 What START.cmd does
   - checks this computer (Python 3.10 or newer, the GPU, the NVIDIA driver, free disk space)
   - downloads the engine zip from the release page and checks its SHA-256
   - makes a Python environment inside this folder and installs the package
-  - downloads the model (about 13 to 15 GB) from Hugging Face
+  - downloads the model (about 13 to 18 GB) from Hugging Face
   - runs the checks (yasakani info, verify, selfcheck)
   - lets you measure the speed, compare look-ahead on and off, chat in your browser or in the terminal, or start the server
 

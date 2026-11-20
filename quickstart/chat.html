@@ -142,7 +142,7 @@ const CSV = 'name,age,city\nSato,34,Tokyo\nSuzuki,28,Osaka\nTakahashi,41,Nagoya\
 const TEXT = {
   ja: {
     title: 'YASAKANI チャット', me: 'あなた', ai: 'YASAKANI',
-    m_speed: '最速モデル', m_quality: '品質モデル', m_custom: 'モデル', ctx: '文脈 {n} トークンまで',
+    m_speed: '最速モデル', m_quality: '品質モデル', m_max: '最高品質モデル', m_custom: 'モデル', ctx: '文脈 {n} トークンまで',
     loading: 'モデルを読み込んでいます…', gone: 'サーバーに届きません',
     ph: 'メッセージを書く（Enter で送る、Shift+Enter で改行）', send: '送る', stop: '止める',
     think: '考えてから答える', fresh: '新しい会話', local: 'このパソコンの中だけで動いています。会話はどこにも送られません。',
@@ -163,7 +163,7 @@ const TEXT = {
   },
   en: {
     title: 'YASAKANI chat', me: 'You', ai: 'YASAKANI',
-    m_speed: 'fastest model', m_quality: 'quality model', m_custom: 'model', ctx: 'context up to {n} tokens',
+    m_speed: 'fastest model', m_quality: 'quality model', m_max: 'max-quality model', m_custom: 'model', ctx: 'context up to {n} tokens',
     loading: 'Loading the model…', gone: 'The server cannot be reached',
     ph: 'Write a message (Enter sends, Shift+Enter starts a new line)', send: 'Send', stop: 'Stop',
     think: 'Think before answering', fresh: 'New conversation', local: 'Runs on this computer only. The conversation is not sent anywhere.',
@@ -213,7 +213,7 @@ function setButton() {
   b.disabled = !busy && (!ready || !$('box').value.trim());
 }
 function showModel(h) {
-  const name = t('m_' + (cfg.model in { speed: 1, quality: 1 } ? cfg.model : 'custom'));
+  const name = t('m_' + (cfg.model in { speed: 1, quality: 1, max: 1 } ? cfg.model : 'custom'));
   if (!h) { $('model').textContent = L.gone; return; }
   if (h.status !== 'ok') { $('model').textContent = name + '　' + L.loading; return; }
   $('model').textContent = name + '　' + (h.model || '') + (h.max_context_tokens ? '　' + t('ctx', { n: fmt(h.max_context_tokens) }) : '');

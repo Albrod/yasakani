@@ -3,7 +3,7 @@
 
 Double-click START.cmd.  This script then
   1. checks this computer (Windows, Python, GPU, NVIDIA driver, free disk space) before anything is downloaded,
-  2. lets you pick one of the two models (on a GPU with less than 24 GB only the fastest model fits),
+  2. lets you pick one of the three models (on a GPU with less than 24 GB only the fastest model fits),
   3. downloads the engine zip from the release page and checks its SHA-256,
   4. makes a private Python environment in this folder and installs the package,
   5. downloads the model folder from Hugging Face,
@@ -66,6 +66,7 @@ PAGE_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-i
 MODELS = {
     "quality": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-quality", "need_gb": 16},
     "speed": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-speed", "need_gb": 14},
+    "max": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-max-quality", "need_gb": 20},
 }
 
 # ---- GPUs (0.1.3).  The engine is built for compute capability 8.6, 8.9 and 12.x (RTX 30, 40 and 50 series) and tested on the
@@ -73,14 +74,15 @@ MODELS = {
 # repeated here only to tell the context before anything is downloaded (python/tests/test_gpu.py checks that the two agree).
 GPU_FIELDS = ("index", "uuid", "name", "compute_cap", "memory.total", "memory.used", "driver_version")
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the models fit on (fastest model only)
-QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
+QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality and the max-quality model need this much
 FULL_CONTEXT_MIN_TOTAL_MIB = 30000    # cards with this much memory keep the full context (the RTX 5090)
 KV_BYTES_PER_TOKEN, CONTEXT_STEP, MIN_CONTEXT, HEAD_OFF_BELOW, MARGIN_MIB, FULL_CONTEXT = 22400, 16384, 16384, 65536, 512, 262144
 MODEL_BYTES = {   # weights, draft model, its output head (the published files)
     "quality": (12365242368, 1164969472, 1411010584),
     "speed": (10311344128, 1164969472, 1411010584),
+    "max": (15723962368, 1164969472, 1411010584),
 }
-OVERHEAD_MIB = {"quality": 2300, "speed": 2100}
+OVERHEAD_MIB = {"quality": 2300, "speed": 2100, "max": 2300}
 
 # ---- the NVIDIA driver (0.1.4).  yskn.dll carries the CUDA 13.2 runtime (linked in, there is no separate runtime DLL).  Under CUDA minor
 # version compatibility a program built with any CUDA 13.x toolkit runs on a driver of the R580 branch or newer, which reports CUDA 13.0
@@ -185,12 +187,12 @@ T = {
         "en": "The driver looks older than 580 ({d}), but --skip-driver-check was given, so going on. The engine will most likely not start.",
     },
     "speed_only": {
-        "ja": "GPU のメモリが 24 GB 未満なので、使えるのは最速モデルだけです（品質モデルは入りません）。",
-        "en": "The GPU has less than 24 GB, so only the fastest model can be used (the quality model does not fit).",
+        "ja": "GPU のメモリが 24 GB 未満なので、使えるのは最速モデルだけです（品質モデルと最高品質モデルは入りません）。",
+        "en": "The GPU has less than 24 GB, so only the fastest model can be used (the quality and max-quality models do not fit).",
     },
     "quality_no": {
-        "ja": "品質モデルには GPU のメモリが 24 GB 以上要ります。--model speed で最速モデルを選んでください。",
-        "en": "The quality model needs a GPU with 24 GB or more. Choose the fastest model with --model speed.",
+        "ja": "品質モデルと最高品質モデルには GPU のメモリが 24 GB 以上要ります。--model speed で最速モデルを選んでください。",
+        "en": "The quality and max-quality models need a GPU with 24 GB or more. Choose the fastest model with --model speed.",
     },
     "ctx_auto": {
         "ja": "文脈の長さは、起動のたびに GPU の空きメモリから決めます（いまの空きで {n} トークン。最大 262,144）。",
@@ -215,18 +217,22 @@ T = {
         "en": "Not enough free disk space. Free about {n} GB and try again.",
     },
     "pick": {
-        "ja": "どちらのモデルを使いますか？\n"
+        "ja": "どのモデルを使いますか？\n"
               "  1) 品質モデル〈おすすめ〉  元のモデルに近い。ファイル 12.4 GB\n"
               "  2) 最速モデル            いちばん速い。ファイル 10.3 GB\n"
+              "  3) 最高品質モデル        元のモデルにいちばん近い。ファイル 15.7 GB。生成は品質モデルの約 0.8〜0.9 倍の速さ\n"
               "番号を入れて Enter [{d}]: ",
         "en": "Which model?\n"
-              "  1) quality model (recommended)  closest to the original. 12.4 GB file\n"
+              "  1) quality model (recommended)  close to the original. 12.4 GB file\n"
               "  2) fastest model                the fastest. 10.3 GB file\n"
+              "  3) max-quality model            the closest to the original. 15.7 GB file; writes at about 0.8 to 0.9 times\n"
+              "                                  the speed of the quality model\n"
               "Type the number and press Enter [{d}]: ",
     },
     "picked": {"ja": "モデル: {m}", "en": "Model: {m}"},
     "m_quality": {"ja": "品質モデル", "en": "quality model"},
     "m_speed": {"ja": "最速モデル", "en": "fastest model"},
+    "m_max": {"ja": "最高品質モデル", "en": "max-quality model"},
     "checks_done": {"ja": "点検は済んでいます（飛ばします）。", "en": "The checks were done before (skipped)."},
     "engine_have": {"ja": "エンジンは準備済みです。", "en": "The engine is already in place."},
     "engine_local": {"ja": "このフォルダーにある {z} を使います。", "en": "Using {z} from this folder."},
@@ -1351,7 +1357,7 @@ def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="YASAKANI quickstart")
-    ap.add_argument("--model", choices=sorted(MODELS), help="skip the question: quality or speed")
+    ap.add_argument("--model", choices=sorted(MODELS), help="skip the question: quality, speed or max")
     ap.add_argument("--model-dir", help="use this model folder instead of downloading one")
     ap.add_argument("--engine-zip", help="use this engine zip instead of downloading it (its SHA-256 is still checked)")
     ap.add_argument("--home", help="where to keep everything (default: the folder of this file)")
@@ -1489,7 +1495,7 @@ def main(argv=None):
     ok = st.setdefault("models_ok", {})
     model = a.model
     if not quality_fits and not a.model_dir:
-        if model == "quality":
+        if model in ("quality", "max"):
             ui.say("quality_no")
             return 2
         model = "speed"
@@ -1499,8 +1505,8 @@ def main(argv=None):
         if a.yes or a.model_dir or a.action != "menu":
             model = prev
         else:
-            d = "2" if prev == "speed" else "1"
-            model = "speed" if ask(ui.t("pick", d=d), d) == "2" else "quality"
+            d = {"speed": "2", "max": "3"}.get(prev, "1")
+            model = {"2": "speed", "3": "max"}.get(ask(ui.t("pick", d=d), d), "quality")
     ui.say("picked", m=ui.t("m_" + model))
     if gpu["total"] is not None and gpu["used"] is not None and gpu["total"] < FULL_CONTEXT_MIN_TOTAL_MIB and not a.model_dir:
         n_ctx, head_off = estimate_context(gpu["total"] - gpu["used"], model)
