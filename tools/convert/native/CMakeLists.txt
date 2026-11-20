@@ -14,6 +14,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 # The released models were converted on an RTX 5090 (compute capability 12.0).  Another architecture:
 #   -DYSKN_TRELLIS_CUDA_ARCHS=<number>   (the kernel needs 75,152 bytes of shared memory per block; not tested elsewhere)
+# K = 10 (5 bits per weight) needs less shared memory than K = 6 (about 66 KB per block).
 set(YSKN_TRELLIS_CUDA_ARCHS "120" CACHE STRING "CUDA architectures")
 set(CMAKE_CUDA_ARCHITECTURES ${YSKN_TRELLIS_CUDA_ARCHS})
 set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)

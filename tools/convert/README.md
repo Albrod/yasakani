@@ -50,6 +50,10 @@ on the same windows. The embedding table is rounded for plain squared error: a l
 Bit widths: a step of two weights stores K = 6 bits (3 bits per weight) or K = 8 bits (4 bits per weight). The fastest model has
 K = 6 everywhere in the body. The quality model has K = 8 for 288 matrices and K = 6 for 112 ([`data/bits_quality.json`](data/bits_quality.json)).
 Both have K = 8 for the output matrix and K = 6 for the embedding table. All numbers are constants at the top of `yskn_convert.py`.
+K = 10 (5 bits per weight, table `data/value_table_k10.bin`) is accepted for body matrices and the output matrix. The max-quality model has
+K = 10 for 288 body matrices and K = 8 for 112 ([`data/bits_max_quality.json`](data/bits_max_quality.json): the quality plan with 8 → 10 and 6 → 8),
+K = 10 for the output matrix and K = 8 for the embedding table: `convert --bits data/bits_max_quality.json --head-bits 10 --embedding-bits 8`,
+then `assemble --bits data/bits_max_quality.json`. The engine reads K = 10 for matrices only, so `--embedding-bits` takes 6 or 8.
 
 ## Steps
 

@@ -12,11 +12,16 @@ Two implementations of the same search, with the same result:
                     the kernel and the way to check it: `python yskn_convert.py selftest` compares the two.
 
 What is searched (docs/FORMAT.md, "From codes to values"): one sequence is 256 weights = 128 steps of 2 weights; a step stores
-a K-bit symbol v (K = 6 or 8); the 12-bit state is s_j = ((s_(j-1) >> K) | (v_j << (12 - K))) & 4095 with s = 0 before the first
+a K-bit symbol v (K = 6, 8 or 10); the 12-bit state is s_j = ((s_(j-1) >> K) | (v_j << (12 - K))) & 4095 with s = 0 before the first
 step, and the two weights of the step are table[s_j].  The search returns the symbols that minimise the sum over the steps of
 |t_j - table[s_j]|^2 (the Viterbi algorithm).  With feedback, the target t_j of a step is the input z_j minus the errors of the
 `taps` steps before it on the same path, each multiplied by a 2 x 2 matrix: the error feedback of a column-by-column rounding,
 carried inside the search.
+
+K = 10 (5 bits per weight): the class of a state has 2^10 = 1,024 predecessors, scanned by 32 threads.  The kernel then
+scans them interleaved (thread `slice` takes predecessors slice, slice + 32, slice + 64, ...) so that the 32 threads of a warp
+read 32 different shared-memory banks; for K = 6 and 8 every thread scans a contiguous range, as it always did.  The scan order
+only decides which of two exactly equal metrics wins.
 """
 import ctypes
 import os
@@ -75,7 +80,7 @@ class NativeSearch:
 def reference_search(z, feedback, table, K, taps):
     """The kernel of native/trellis_search.cu, operation by operation.  Same arguments and result as NativeSearch.__call__
     (any device).  The order of the additions and the way ties are broken follow the kernel, so the symbols are the same."""
-    assert z.dtype == torch.float32 and z.shape[1] == T and K in (6, 8)
+    assert z.dtype == torch.float32 and z.shape[1] == T and K in (6, 8, 10)
     if feedback is None:
         taps = 0
     B, dev = z.shape[0], z.device
@@ -88,7 +93,8 @@ def reference_search(z, feedback, table, K, taps):
     tab_new = table.reshape(npred, nlow, 2)                     # a new state is v * nlow + low  (low = its class)
     low_idx = torch.arange(nlow, device=dev)
     scan_idx = torch.arange(ppt, device=dev)
-    slice_base = (torch.arange(slices, device=dev) * ppt).view(1, 1, slices)
+    interleave = K > 8                                          # K = 10: thread `slice` scans q = i * slices + slice
+    slice_base = (torch.arange(slices, device=dev) * (1 if interleave else ppt)).view(1, 1, slices)
     state_idx = torch.arange(nstate, device=dev)
     big = torch.tensor(FLT_MAX, dtype=torch.float32, device=dev)
     M = torch.full((B, nstate), FLT_MAX, dtype=torch.float32, device=dev)
@@ -100,9 +106,14 @@ def reference_search(z, feedback, table, K, taps):
     fb = feedback.reshape(STEPS, taps, 4) if taps else None
     for j in range(STEPS):
         # the best predecessor of every class: the predecessors of class `low` are the states low * npred + q
-        v = M.view(B, nlow, slices, ppt)
+        if interleave:
+            v = M.view(B, nlow, ppt, slices).transpose(2, 3)                       # [.., slice, i] = predecessor i * slices + slice
+        else:
+            v = M.view(B, nlow, slices, ppt)                                       # [.., slice, i] = predecessor slice * ppt + i
         m = v.min(dim=3).values
         q = torch.where(v == m.unsqueeze(3), scan_idx, ppt).min(dim=3).values      # the first minimum inside a thread
+        if interleave:
+            q = q * slices
         q = torch.where(m < big, q + slice_base, 0)                                # nothing below FLT_MAX: q stays 0
         n = slices
         while n > 1:                                                               # threads merged in halves, the lower wins a tie

@@ -3,8 +3,8 @@
 //
 // trellis_search.cu - the code search of the converter (tools/convert), one CUDA kernel.
 //
-// One sequence is 256 weights = 128 steps of 2 weights (docs/FORMAT.md).  The stored symbol of a step has K bits (6 or 8) and
-// the 12-bit state is
+// One sequence is 256 weights = 128 steps of 2 weights (docs/FORMAT.md).  The stored symbol of a step has K bits (6, 8 or 10) and the
+// 12-bit state is
 //     s_j = ((s_(j-1) >> K) | (v_j << (12 - K))) & 4095,      s before the first step = 0,
 // and the two weights of step j are table[s_j] (times the row scale, which the caller has divided out of the targets).
 // The kernel finds, for every sequence, the symbols v_0 .. v_127 that minimise
@@ -24,6 +24,7 @@
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #if defined(_WIN32)
 #  define YSKN_TRELLIS_API __declspec(dllexport)
@@ -42,6 +43,11 @@ template <int K, int TAPS> struct Cfg {
   static constexpr int SL0 = NPRED / SPT;
   static constexpr int SLICES = SL0 > 32 ? 32 : (SL0 < 1 ? 1 : SL0);  // threads that share one class (inside one warp)
   static constexpr int PPT = NPRED / SLICES;                          // predecessors scanned by one thread
+  // K = 10 (5 bits per weight): the predecessor index runs to 1,023, so the backpointers need 16 bits, and the scan is interleaved
+  // (thread `slice` reads predecessors slice, slice + SLICES, ...) so that the 32 threads of a warp hit 32 different banks.
+  // K = 6 and 8 keep 8-bit backpointers and the contiguous scan, as compiled for the released models.
+  static constexpr bool INTERLEAVE = (K > 8);
+  using BP = std::conditional_t<(K > 8), uint16_t, uint8_t>;
   // shared memory of one block: the table, two metric arrays, best metric and target per class, the error rings, best symbol
   static constexpr size_t SMEM = (size_t)S * 8 + 2ull * S * 4 + (size_t)NLOW * 4 + 2ull * NLOW * 8
                                + (TAPS ? 2ull * NLOW * TAPS * 8 : 0) + (size_t)NLOW * 2 + 16;
@@ -60,8 +66,8 @@ __device__ __forceinline__ void reduce_best(const float* M, const float2* table,
   if (low >= C::NLOW) return;
   float m = FLT_MAX; int q = 0;
   #pragma unroll
-  for (int i = 0; i < C::PPT; ++i) {                                  // the predecessors of a class are contiguous
-    const int qq = slice * C::PPT + i;
+  for (int i = 0; i < C::PPT; ++i) {                                  // the predecessors of a class are contiguous (K = 10: interleaved)
+    const int qq = C::INTERLEAVE ? (i * C::SLICES + slice) : (slice * C::PPT + i);
     const float v = M[(low << K) | qq];
     if (v < m) { m = v; q = qq; }
   }
@@ -106,7 +112,8 @@ search_kernel(const float* __restrict__ zs, const float* __restrict__ feedback, 
   if constexpr (TAPS > 0) for (int i = tid; i < 2 * C::NLOW * TAPS; i += C::THREADS) err[i] = make_float2(0.f, 0.f);
   __syncthreads();
 
-  uint8_t* bp = bp_g + (size_t)b * STEPS * C::NLOW;
+  using BP = typename C::BP;
+  BP* bp = reinterpret_cast<BP*>(bp_g) + (size_t)b * STEPS * C::NLOW;
   int pp = 0;
   for (int j = 0; j < STEPS; ++j) {
     reduce_best<K, TAPS>(M + pp * C::S, table, tcur + pp * C::NLOW, err + pp * C::NLOW * TAPS, best, bq, err + (pp ^ 1) * C::NLOW * TAPS, j);
@@ -124,7 +131,7 @@ search_kernel(const float* __restrict__ zs, const float* __restrict__ feedback, 
         }
       }
       tcur[(pp ^ 1) * C::NLOW + tid] = t;
-      bp[(size_t)j * C::NLOW + tid] = (uint8_t)bq[tid];
+      bp[(size_t)j * C::NLOW + tid] = (BP)bq[tid];
     }
     __syncthreads();
     float* Mn = M + (pp ^ 1) * C::S;
@@ -163,7 +170,7 @@ int launch(const float* z, const float* feedback, const float2* table, uint16_t*
 extern "C" {
 
 // z: [count][256] fp32 targets (already divided by the row scale).  feedback: [128][taps][4] fp32, or NULL (then taps must be 0).
-// table: [4096][2] fp32.  symbols: [count][128] uint16.  scratch: yskn_trellis_scratch_bytes(K, count) bytes.  All device pointers.
+// table: [4096][2] fp32.  symbols: [count][128] uint16.  K: 6, 8 or 10; taps: 0 or 8.  scratch: yskn_trellis_scratch_bytes(K, count) bytes.  All device pointers.
 // Returns 0, a CUDA error code, or -1 for a combination of K and taps that is not compiled in.
 YSKN_TRELLIS_API int yskn_trellis_search(int K, int taps, const float* z, const float* feedback, const float* table,
                                          uint16_t* symbols, uint8_t* scratch, int count, void* cuda_stream) {
@@ -173,11 +180,13 @@ YSKN_TRELLIS_API int yskn_trellis_search(int K, int taps, const float* z, const 
   if (K == 8 && taps == 0) return launch<8, 0>(z, feedback, t2, symbols, scratch, count, st);
   if (K == 6 && taps == 8) return launch<6, 8>(z, feedback, t2, symbols, scratch, count, st);
   if (K == 8 && taps == 8) return launch<8, 8>(z, feedback, t2, symbols, scratch, count, st);
+  if (K == 10 && taps == 0) return launch<10, 0>(z, feedback, t2, symbols, scratch, count, st);
+  if (K == 10 && taps == 8) return launch<10, 8>(z, feedback, t2, symbols, scratch, count, st);
   return -1;
 }
 
-YSKN_TRELLIS_API size_t yskn_trellis_scratch_bytes(int K, int count) {
-  return (size_t)count * (size_t)STEPS * (size_t)(1u << (L - K));
+YSKN_TRELLIS_API size_t yskn_trellis_scratch_bytes(int K, int count) {     // the backpointers: 1 byte each, 2 for K > 8
+  return (size_t)count * (size_t)STEPS * (size_t)(1u << (L - K)) * (size_t)(K > 8 ? 2 : 1);
 }
 
 } // extern "C"

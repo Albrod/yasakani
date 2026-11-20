@@ -6,11 +6,12 @@
   python yskn_convert.py selftest
         no model needed: the search kernel against its PyTorch reference, one random matrix encoded, written and read back
 
-  python yskn_convert.py convert  --checkpoint DIR --work DIR [--bits both|6|8|FILE.json] [--parts body,embedding,head]
+  python yskn_convert.py convert  --checkpoint DIR --work DIR [--bits both|6|8|10|FILE.json] [--parts body,embedding,head]
+                                  [--head-bits 6|8|10] [--embedding-bits 6|8]
         the GPU part: statistics of the original model on the calibration windows, then the codes of every matrix
         (DIR of --checkpoint holds config.json, model.safetensors.index.json and the *.safetensors files)
 
-  python yskn_convert.py assemble --checkpoint DIR --work DIR --bits FILE.json|6|8 --out MODEL.yskn
+  python yskn_convert.py assemble --checkpoint DIR --work DIR --bits FILE.json|6|8|10 --out MODEL.yskn
                                   [--head-from OTHER.yskn] [--embedding-from OTHER.yskn]
         the CPU part: one .yskn file from the codes, with the chosen number of bits for every body matrix
 
@@ -27,6 +28,9 @@ In short, for every matrix W of the model:
      block is pushed onto the columns that follow (input side, H_in), the error of a row block onto the rows above (output
      side, H_out).
 The output matrix is rounded with the input side only, the embedding table with neither (plain squared error).
+K = 10 (5 bits per weight) is accepted for body matrices and the output matrix: its symbols are kept as uint16 (K = 6 and 8:
+uint8, as before) and its value table is data/value_table_k10.bin.  The engine reads K = 10 for matrices, not for the embedding.
+The max-quality model: --bits data/bits_max_quality.json --head-bits 10 --embedding-bits 8 (288 body matrices at K = 10, 112 at 8).
 
 Needs Python 3.10+, numpy, PyTorch with CUDA and transformers 5.5 (the model classes of Qwen3.8).  The released models were made
 with Python 3.14.4, numpy 2.4.4, torch 2.10.0+cu128, transformers 5.5.0 on one RTX 5090 (32 GB) with 93 GB of RAM; the work folder
@@ -468,7 +472,7 @@ def quad(D, HI, HO=None):
 
 
 def encode_body_matrix(Wr, hi0, hi1, ho1, search, table, K, m):
-    """One body matrix at K bits per step.  Returns symbols (uint8), scales (uint16 bits of the fp16) and the record."""
+    """One body matrix at K bits per step.  Returns symbols (uint8; uint16 for K > 8), scales (uint16 bits of the fp16) and the record."""
     stt = {}
     t1 = time.perf_counter()
     sym, s16, Q = encode_matrix(Wr, hi1, search, table, K=K, HO64=ho1, R=max(64, min(256, m // 8)), stats=stt)
@@ -489,13 +493,23 @@ def encode_body_matrix(Wr, hi0, hi1, ho1, search, table, K, m):
     sym = np.asarray(sym)
     assert sym.shape == (m, Wr.shape[1] // 2) and int(sym.max()) < (1 << K)
     del Q, D
-    return sym.astype(np.uint8), s16.cpu().numpy().astype(np.float16).view(np.uint16), r
+    return sym.astype(sym_dtype(K)), s16.cpu().numpy().astype(np.float16).view(np.uint16), r
 
 
 # ------------------------------------------------------------------------------------------------------------ data of the tool
+BODY_BITS = (6, 8, 10)   # 10: 5 bits per weight (the max-quality model); the quality and fastest models use 6 and 8
+HEAD_BITS = (6, 8, 10)   # the output matrix: 8 in the quality and fastest models (the default), 10 in the max-quality model
+EMBEDDING_BITS = (6, 8)  # the embedding table: 6 in the quality and fastest models (the default), 8 in the max-quality model
+
+
+def sym_dtype(K):
+    """How the symbols of K bits are kept in memory and in the work folder: uint8 up to K = 8, uint16 above."""
+    return np.uint8 if K <= 8 else np.uint16
+
+
 def load_tables():
     out = {}
-    for K in (6, 8):
+    for K in BODY_BITS:
         p = DATA / ("value_table_k%d.bin" % K)
         raw = np.fromfile(p, dtype="<u2")
         if raw.size != 2 << STATE_BITS:
@@ -505,15 +519,15 @@ def load_tables():
 
 
 def load_bits(spec, names):
-    """--bits: 6, 8, both, or a JSON file {tensor name: 6 or 8}.  Returns {name: [K, ...]}."""
-    if spec in ("6", "8"):
+    """--bits: 6, 8, 10, both (= 6 and 8), or a JSON file {tensor name: 6, 8 or 10}.  Returns {name: [K, ...]}."""
+    if spec in ("6", "8", "10"):
         return {n: [int(spec)] for n in names}
     if spec == "both":
         return {n: [6, 8] for n in names}
     m = json.loads(Path(spec).read_text(encoding="utf-8"))
     m = m.get("bits", m)
-    if set(m) != set(names) or not set(int(v) for v in m.values()) <= {6, 8}:
-        raise SystemExit("%s must name every body matrix with 6 or 8" % spec)
+    if set(m) != set(names) or not set(int(v) for v in m.values()) <= set(BODY_BITS):
+        raise SystemExit("%s must name every body matrix with 6, 8 or 10" % spec)
     return {n: [int(m[n])] for n in names}
 
 
@@ -724,9 +738,12 @@ def encode_layer(L, H, state, st, plan, search, table32, res, CODES):
 
 def convert_embedding(a, ckpt, log, search, tables, K=6, chunk=8192):
     """The embedding table: input rotation only, every sequence of 256 weights rounded for plain squared error (no statistic:
-    a lookup has no input to weigh), K = 6."""
+    a lookup has no input to weigh), K = 6 unless --embedding-bits says otherwise."""
     out = Path(a.work) / "codes" / "embed_tokens.npz"
     if out.exists():
+        have = int(np.load(out)["K"][0])
+        if have != K:
+            raise SystemExit("%s holds K = %d, not %d: use another work folder" % (out, have, K))
         log.say("[embedding] already encoded")
         return
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -736,7 +753,7 @@ def convert_embedding(a, ckpt, log, search, tables, K=6, chunk=8192):
     V, n = W.shape
     si = torch.from_numpy(sign_vectors(n, 0)[0]).cuda()
     table = torch.from_numpy(tables[K].view(np.float16).astype(np.float32).reshape(-1, 2)).cuda()
-    sym = np.empty((V, n // 2), np.uint8)
+    sym = np.empty((V, n // 2), sym_dtype(K))
     sc = np.empty(V, np.uint16)
     num = den = 0.0
     with torch.inference_mode():
@@ -750,7 +767,7 @@ def convert_embedding(a, ckpt, log, search, tables, K=6, chunk=8192):
             for b0 in range(0, n, T):
                 z = (wr[:, b0:b0 + T] * inv[:, None]).contiguous()
                 sb = search(z, None, table, K, 0)
-                sym[r0:r1, b0 // 2:b0 // 2 + STEPS] = sb.cpu().numpy().astype(np.uint8)
+                sym[r0:r1, b0 // 2:b0 // 2 + STEPS] = sb.cpu().numpy().astype(sym_dtype(K))
                 q[:, b0:b0 + T] = decode_block(sb.long(), table, s, K)
             sc[r0:r1] = s16.cpu().numpy().view(np.uint16)
             d = q - wr
@@ -765,9 +782,12 @@ def convert_embedding(a, ckpt, log, search, tables, K=6, chunk=8192):
 
 def convert_head(a, ckpt, log, search, tables, K=8, chunk=8192):
     """The output matrix: input rotation only (its rows are the vocabulary), rounded with the input side only; the statistic is
-    that of the output of the final norm on the calibration windows (saved by the body stage)."""
+    that of the output of the final norm on the calibration windows (saved by the body stage).  K = 8 unless --head-bits says otherwise."""
     out = Path(a.work) / "codes" / "lm_head.npz"
     if out.exists():
+        have = int(np.load(out)["K"][0])
+        if have != K:
+            raise SystemExit("%s holds K = %d, not %d: use another work folder" % (out, have, K))
         log.say("[head] already encoded")
         return
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -785,7 +805,7 @@ def convert_head(a, ckpt, log, search, tables, K=8, chunk=8192):
     Hd = rotate_stat(Hm, si).double()
     table = torch.from_numpy(tables[K].view(np.float16).astype(np.float32).reshape(-1, 2)).cuda()
     Cm, fbs = input_side(Hd, TAPS, DAMP_IN)
-    sym = np.empty((V, n // 2), np.uint8)
+    sym = np.empty((V, n // 2), sym_dtype(K))
     sc = np.empty(V, np.uint16)
     num = den = mse_n = mse_d = 0.0
     with torch.inference_mode():
@@ -794,7 +814,7 @@ def convert_head(a, ckpt, log, search, tables, K=8, chunk=8192):
             wr = fwht512_rows(W[r0:r1].float().cuda(), si)
             s16 = row_scale16_direct(wr)
             sb, q = encode_rows(wr, Cm, fbs, search, table, K, TAPS, s16)
-            sym[r0:r1] = sb.cpu().numpy().astype(np.uint8)
+            sym[r0:r1] = sb.cpu().numpy().astype(sym_dtype(K))
             sc[r0:r1] = s16.cpu().numpy().view(np.uint16)
             d = (q - wr).double()
             wd = wr.double()
@@ -826,11 +846,11 @@ def cmd_convert(a):
         if p not in ("body", "embedding", "head"):
             raise SystemExit("--parts: body, embedding, head")
     if "embedding" in parts:
-        convert_embedding(a, ckpt, log, search, tables)
+        convert_embedding(a, ckpt, log, search, tables, K=a.embedding_bits)
     if "body" in parts:
         convert_body(a, ckpt, log, search, tables)
     if "head" in parts:
-        convert_head(a, ckpt, log, search, tables)
+        convert_head(a, ckpt, log, search, tables, K=a.head_bits)
 
 
 # ------------------------------------------------------------------------------------------------------------------ the file
@@ -924,7 +944,7 @@ class Container:
                     scales=self.raw(t["scale_off"], rows * 2))
 
     def symbols(self, t, r0=0, r1=None):
-        """uint8 [rows, cols / 2]: the stored symbols of rows r0 .. r1 of a tensor"""
+        """uint8 [rows, cols / 2] (uint16 when bits > 8): the stored symbols of rows r0 .. r1 of a tensor"""
         rows, seqs, K = t.get("physical_rows", t["rows"]), t["cols"] // T, t["bits"]
         wps = 4 * K
         r1 = rows if r1 is None else r1
@@ -936,7 +956,10 @@ class Container:
             u = a.transpose(0, 2, 1, 3).reshape(seqs, rows, wps).transpose(1, 0, 2)[r0:r1]
         u = np.ascontiguousarray(u)
         bits = np.unpackbits(u.view(np.uint8).reshape(r1 - r0, seqs, wps * 4), axis=-1, bitorder="little")
-        return np.packbits(bits.reshape(-1, K), axis=-1, bitorder="little")[:, 0].reshape(r1 - r0, seqs * STEPS)
+        by = np.packbits(bits.reshape(-1, K), axis=-1, bitorder="little")
+        if K <= 8:
+            return by[:, 0].reshape(r1 - r0, seqs * STEPS)
+        return (by[:, 0].astype(np.uint16) | (by[:, 1].astype(np.uint16) << 8)).reshape(r1 - r0, seqs * STEPS)
 
 
 def model_entry(ckpt):
@@ -959,7 +982,7 @@ def cmd_assemble(a):
     cfg = ckpt.config
     names = body_names(ckpt)
     if a.bits == "both":
-        raise SystemExit("assemble needs one number of bits per matrix: --bits 6, 8 or a JSON file")
+        raise SystemExit("assemble needs one number of bits per matrix: --bits 6, 8, 10 or a JSON file")
     want = {n: ks[0] for n, ks in load_bits(a.bits, names).items()}
     tables = load_tables()
     rec = json.loads((work / "convert.json").read_text(encoding="utf-8"))
@@ -1052,7 +1075,7 @@ def cmd_assemble(a):
     vectors.append(dict(name="norm", off=w.section(v.contiguous().view(torch.int16).numpy()), n=int(v.numel()), dtype="bf16"))
     data_sha = w.finish(dict(model=model_entry(ckpt), tensors=tensors, vectors=vectors))
     partial.replace(out_path)
-    kc = {K: sum(1 for n in names if want[n] == K) for K in (6, 8)}
+    kc = {K: sum(1 for n in names if want[n] == K) for K in BODY_BITS if K <= 8 or K in want.values()}   # 10 only when used
     receipt = dict(file=out_path.name, bytes=out_path.stat().st_size, sha256=sha256_file(out_path), data_sha256=data_sha,
                    body_bits=kc, head="copied from " + Path(a.head_from).name if a.head_from else "converted",
                    embedding="copied from " + Path(a.embedding_from).name if a.embedding_from else "converted",
@@ -1142,8 +1165,15 @@ def cmd_selftest(a):
     print("device %s; native search library: %s" % (dev, lib if native else "not found (the PyTorch reference is used)"))
     gen = torch.Generator(device="cpu")
     gen.manual_seed(20261114)
+    kn = [6, 8]
+    if native:                                              # K = 10 only when the library has it compiled in
+        try:
+            native(torch.zeros((1, T), device=dev), None, table32[10], 10, 0)
+            kn.append(10)
+        except RuntimeError:
+            print("(the native search library has no K = 10: its kernel check is skipped)")
     if native:                                              # 1. the kernel against the reference
-        for K in (6, 8):
+        for K in kn:
             for taps in (0, TAPS):
                 z = torch.randn((48, T), generator=gen).to(dev).contiguous()
                 fb = None
@@ -1165,14 +1195,14 @@ def cmd_selftest(a):
     Wr = rotate_weight(W, si, so)
     hi, ho = rotate_stat(HI, si).double(), rotate_stat(HO, so).double()
     check("rotation: inverse(rotate(W)) = W", float((inverse_rotate(Wr, si, so) - W).abs().max()) < 1e-6)
-    for K in (6, 8):
+    for K in BODY_BITS:
         sym, s16, Q = encode_matrix(Wr, hi, search, table32[K], K=K, HO64=ho, R=128)
         sym0, s0, Q0 = encode_matrix(Wr, torch.eye(n, dtype=torch.float64, device=dev), search, table32[K], K=K, taps=0)
         e2, e0 = quad(Wr - Q, hi, ho) / quad(Wr, hi, ho), quad(Wr - Q0, hi, ho) / quad(Wr, hi, ho)
         check("K %d: two-sided rounding beats plain rounding in the weighted error" % K, e2 < e0, "(%.5f < %.5f)" % (e2, e0))
         tmp = Path(a.tmp or ".") / ("selftest_k%d.yskn" % K)
         w = Writer(tmp)
-        words = pack_warp(sym.astype(np.uint8), m, n, K).astype("<u4")
+        words = pack_warp(sym.astype(sym_dtype(K)), m, n, K).astype("<u4")
         t = dict(name="layers.0.test", role="body", rows=m, cols=n, physical_rows=m, l=STATE_BITS, d=2, t=T, bits=K, start="zero",
                  layout="warp", rot_in=rotation(n // 512, 0), rot_out=rotation(m // 512, n))
         t["stream_off"] = w.section(words)
@@ -1182,7 +1212,7 @@ def cmd_selftest(a):
         w.finish(dict(model=dict(arch="selftest"), tensors=[t], vectors=[]))
         c = Container(tmp)
         back = c.symbols(c.tensors["layers.0.test"])
-        check("K %d: symbols written to a file and read back" % K, np.array_equal(back, sym.astype(np.uint8)))
+        check("K %d: symbols written to a file and read back" % K, np.array_equal(back, sym.astype(sym_dtype(K))) and back.dtype == sym_dtype(K))
         try:                                                # the independent decoder of tools/, when it is next to this folder
             sys.path.insert(0, str(HERE.parent))
             import yskn_decode as YD
@@ -1211,7 +1241,9 @@ def main():
     p = sub.add_parser("convert")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--work", required=True)
-    p.add_argument("--bits", default="both", help="6, 8, both (default) or a JSON file {tensor name: 6 or 8}")
+    p.add_argument("--bits", default="both", help="6, 8, 10, both (default: 6 and 8) or a JSON file {tensor name: 6, 8 or 10}")
+    p.add_argument("--head-bits", type=int, default=8, choices=HEAD_BITS, help="K of the output matrix (default 8)")
+    p.add_argument("--embedding-bits", type=int, default=6, choices=EMBEDDING_BITS, help="K of the embedding table (default 6)")
     p.add_argument("--parts", default="embedding,body,head")
     p.add_argument("--calibration", default=str(DATA / "calibration_ids.npy"), help="int32 [windows, 2048] token ids")
     p.add_argument("--head-stat", help="another statistic for the output matrix (a saved [hidden, hidden] tensor)")
@@ -1221,7 +1253,7 @@ def main():
     p = sub.add_parser("assemble")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--work", required=True)
-    p.add_argument("--bits", required=True)
+    p.add_argument("--bits", required=True, help="6, 8, 10 or a JSON file {tensor name: 6, 8 or 10}")
     p.add_argument("--out", required=True)
     p.add_argument("--head-from", help="take the output matrix from this .yskn file instead of the converted one")
     p.add_argument("--embedding-from", help="take the embedding table from this .yskn file instead of the converted one")

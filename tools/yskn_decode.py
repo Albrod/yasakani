@@ -75,7 +75,7 @@ def checked(t):
     d.setdefault("physical_rows", d["rows"])
     d.setdefault("l", 12), d.setdefault("d", 2), d.setdefault("t", 256)
     d.setdefault("start", "zero"), d.setdefault("layout", "warp")
-    if d["l"] != STATE_BITS or d["d"] != 2 or d["t"] != SEQ_WEIGHTS or d["bits"] not in (4, 5, 6, 7, 8) or d["cols"] % 512:
+    if d["l"] != STATE_BITS or d["d"] != 2 or d["t"] != SEQ_WEIGHTS or d["bits"] not in (4, 5, 6, 7, 8, 10) or d["cols"] % 512:
         raise FormatError("%s: a tensor description this program does not read" % d["name"])
     if d["start"] != "zero":
         raise FormatError("%s: start = %r is not implemented here (the released models use \"zero\")" % (d["name"], d["start"]))
