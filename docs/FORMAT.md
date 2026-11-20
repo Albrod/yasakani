@@ -69,7 +69,7 @@ A list. Each entry describes one matrix with `rows` rows and `cols` columns (`y 
 | `l` | bits of the state; default 12. This document and the engine cover 12 only |
 | `d` | weights per step; default 2, the only value |
 | `t` | weights per sequence; default 256, the only value |
-| `bits` | bits per step: 6 (3 bits per weight) or 8 (4 bits per weight) in the released files; the reader takes 4 to 8 |
+| `bits` | bits per step: 6 (3 bits per weight) or 8 (4 bits per weight) in the quality and fastest models, 10 (5 bits per weight) in the max-quality model; the reader takes 4 to 8 and 10. Sections 4.1 to 4.3 define 10 the same way (a sequence is 40 words, a symbol may cross a word). The engine reads 10 for matrices (body and output), not for the embedding table |
 | `start` | `zero` (default), or `carry` (not used by the released files and not defined here) |
 | `layout` | how the code stream is ordered: `warp` (default) or `row` (section 4.3) |
 | `stream_off`, `stream_bytes` | the code stream |
