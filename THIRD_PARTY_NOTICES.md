@@ -9,7 +9,8 @@ only required, and which published work it builds on.
 
 * By the Qwen team, Alibaba Cloud. License: Apache License 2.0 - the `LICENSE` file of the model repository is the Apache License 2.0 text with "Copyright 2026 Alibaba Cloud" (it is shipped with the model files; on 2026-11-12 the model page listed this license and carried the same `LICENSE` file).
 * Original: <https://huggingface.co/Qwen/Qwen3.8-27B>
-* The files `qwen38_27b_quality.yskn` (quality model) and `qwen38_27b_speed.yskn` (fastest model) are **derived** from it: converted to the
+* The files `qwen38_27b_quality.yskn` (quality model), `qwen38_27b_speed.yskn` (fastest model) and `qwen38_27b_max_quality.yskn`
+  (max-quality model) are **derived** from it: converted to the
   YASAKANI file format and compressed (quantized). They are not the original weights. `tokenizer.json`, `tokenizer_config.json`,
   `chat_template.jinja`, `config.json` and `generation_config.json` are the original files, unchanged.
 
