@@ -228,7 +228,7 @@ fastest model and about 21.2 GiB for the quality model (about 14.3 GiB and 16.4 
 
 On a GPU with less than 32 GB, the context is chosen from the free GPU memory each time the model starts (at most 262,144 tokens;
 `--max-ctx` sets it yourself). On 16 GB cards only the fastest model fits. The max-quality model used 25,977 MiB after loading on the RTX 5090
-(quality model: 22,795 MiB); on a 24 GB card the package would choose a context of 163,840 tokens (a calculation, not checked on such a card). The rule is in
+(quality model: 22,795 MiB); on a 24 GB card the package would choose a context of 163,840 tokens when the desktop uses 500 MiB (196,608 with nothing else on the GPU; a calculation, not checked on such a card). The rule is in
 [python/README.md](../python/README.md#gpus-other-than-the-rtx-5090).
 
 ## It is much slower than the tables

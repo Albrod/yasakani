@@ -15,26 +15,27 @@ Status: version `0.2.0`. Text, and optionally still images (new in 0.1.2; on Lin
 | GPU | NVIDIA **RTX 5090** (tested), or since 0.1.3 another RTX 30, 40 or 50 series card with compute capability 8.6 or higher and 16 GB or more (not optimized or tested; [below](#gpus-other-than-the-rtx-5090)); NVIDIA driver 580 or newer (a driver for CUDA 13; tested with 616.92) |
 | OS | **Windows 11**, 64-bit (the only version tested), with the *Microsoft Visual C++ 2015-2022 x64 runtime* ([download](https://aka.ms/vs/17/release/vc_redist.x64.exe)) |
 | Python | 3.10 or newer |
-| Disk | about 15 GB for the quality model folder, about 13 GB for the fastest model folder |
+| Disk | about 15 GB for the quality model folder, about 13 GB for the fastest model folder, about 18 GB for the max-quality model folder |
 | Engine library | `yskn.dll` from the release page |
 
 You do **not** need the CUDA Toolkit, PyTorch, or a C++ compiler.
 
 ## Model folder
 
-YASAKANI publishes two model folders; you need one. Both hold the same files except for the weights:
+YASAKANI publishes three model folders; you need one. They hold the same files except for the weights:
 
 ```
-qwen38_27b_quality.yskn   the weights of the quality model (12.4 GB)   - or -
-qwen38_27b_speed.yskn     the weights of the fastest model (10.3 GB)
-bdraft2_k8.yskn           small draft model used to speed up generation (1.2 GB)
-bdraft2_k8.shead          its output table (1.4 GB)
-kvq_u5.bin                settings of the compressed key-value cache (17 KB)
-tokenizer.json            } from the Qwen3.8-27B repository, unchanged
-tokenizer_config.json     }
-chat_template.jinja       }
-yasakani.json             file list with SHA-256 checksums; it also names the weights file
-selfcheck.json            reference output for `yasakani selfcheck` (see below)
+qwen38_27b_quality.yskn       the weights of the quality model (12.4 GB)   - or -
+qwen38_27b_speed.yskn         the weights of the fastest model (10.3 GB)   - or -
+qwen38_27b_max_quality.yskn   the weights of the max-quality model (15.7 GB)
+bdraft2_k8.yskn               small draft model used to speed up generation (1.2 GB)
+bdraft2_k8.shead              its output table (1.4 GB)
+kvq_u5.bin                    settings of the compressed key-value cache (17 KB)
+tokenizer.json                } from the Qwen3.8-27B repository, unchanged
+tokenizer_config.json         }
+chat_template.jinja           }
+yasakani.json                 file list with SHA-256 checksums; it also names the weights file
+selfcheck.json                reference output for `yasakani selfcheck` (see below)
 ```
 
 ## Install
@@ -269,7 +270,7 @@ guaranteed. `yasakani info` shows what the package does on each GPU it finds. AM
 on a GPU with less than 30,000 MiB the package chooses the context before it opens the model:
 
 ```
-room    = free GPU memory (nvidia-smi: total - used) - the three model files - 2,100 MiB (fastest model) or 2,300 MiB (quality model) - 512 MiB
+room    = free GPU memory (nvidia-smi: total - used) - the three model files - 2,100 MiB (fastest model) or 2,300 MiB (quality and max-quality model) - 512 MiB
 context = room / 22,400 bytes per token, rounded down to a multiple of 16,384, at most the model's 262,144
 ```
 

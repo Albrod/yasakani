@@ -848,7 +848,7 @@ Reading a prompt and the edits run at about the speed of the quality model. Plai
   scores at the first position. The copies of the output matrix and of the embedding table also gave the same 200 sampled tokens with
   thinking on and the same tokens in the four bench tasks.
 * **The code for RTX 30 and 40 cards**, run on the RTX 5090 with test builds for compute capability 8.6 only and 8.9 only (not on an
-  RTX 30 or 40 card): the copies above gave the same tokens and scores as the quality model with both builds. The max-quality model ran
+  RTX 30 or 40 card): the copies of the body matrices and of the output matrix gave the same tokens and scores as the quality model with both builds (the copy of the embedding table was checked with the RTX 5090 code only). The max-quality model ran
   without errors, gave the same tokens with look-ahead on and off, and its passes of 64 rows agreed with passes of 16 rows; the check of
   the wide copy passes opened 32, 48 and 64 rows.
 * **Self-check.** `selfcheck.json` of the model folder was written with `yasakani selfcheck --write`; two checks against it passed
