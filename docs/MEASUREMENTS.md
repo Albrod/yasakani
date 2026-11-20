@@ -798,17 +798,24 @@ The method of [Quality on thinking text](#quality-on-thinking-text): the same 20
 |---|---|---|---|---|---|---|
 | YASAKANI quality model | 12.37 | KV5 (default) | 0.0126 | 0.0036 | 0.1035 | 95.35% |
 | YASAKANI max-quality model | 15.72 | KV5 (default) | 0.0040 | 0.0012 | 0.0310 | 97.40% |
+| llama.cpp, Unsloth UD-Q4_K_XL | 17.31* | FP16 | 0.0041 | 0.0011 | 0.0333 | 97.36% |
 | llama.cpp, Q4_K_M | 17.20* | FP16 | 0.0073 | 0.0021 | 0.0587 | 96.76% |
+| llama.cpp, Q3_K_L | 13.88* | FP16 | 0.0319 | 0.0091 | 0.2697 | 92.91% |
+| llama.cpp, Q3_K_M | 13.17* | FP16 | 0.0427 | 0.0126 | 0.3463 | 91.78% |
+| llama.cpp, Q3_K_S | 12.50* | FP16 | 0.0474 | 0.0140 | 0.3856 | 91.54% |
 
 * The max-quality model's KL is 0.003975, 0.32 times the quality model's 0.012591. The quality model, measured again in the same way
   on November 20, gave the value of November 14 to every digit.
-* The Q4_K_M row (a Q4_K_M GGUF file of Qwen3.8-27B) was measured on November 19, 2026 with llama.cpp and an FP16 KV cache. 17.20 GB*
-  is its main model; the whole file is 17.44 GB. The records of that run are not in the repository. KV5 raises the KL of the quality
+* The llama.cpp rows are GGUF files of Qwen3.8-27B, measured with llama.cpp b11700 and an FP16 KV cache: Q4_K_M on November 19, 2026,
+  the other four on November 20, 2026. Sizes marked * are the main model without the auxiliary layers; the whole files are 17.66 GB
+  (UD-Q4_K_XL), 17.44 GB (Q4_K_M), 14.12 GB (Q3_K_L), 13.40 GB (Q3_K_M) and 12.74 GB (Q3_K_S). In the same runs the Unsloth UD-IQ3_S
+  file gave the KL and top-1 agreement of its published record again. The records of these runs are not in the repository. KV5 raises the KL of the quality
   model by about 0.0004 against an FP16 cache ([above](#the-released-engine-added-november-14-2026)), so this condition does not favour
   the YASAKANI rows. Read the rows as whole configurations (weights, KV cache and arithmetic), as in the table above.
-* With these 20 windows the max-quality model has a lower KL than this Q4_K_M and a smaller file. Its top-1 agreement is 0.64 points
-  higher; we have not checked whether that gap holds beyond these 20 windows. To run as shipped, the max-quality model also needs the
-  draft model (2.58 GB).
+* With these 20 windows the max-quality model has a lower KL than Q4_K_M and a smaller file; its top-1 agreement is 0.64 points
+  higher. Against Unsloth UD-Q4_K_XL the KL and the top-1 agreement are about the same (0.0040 and 0.0041; 97.40% and 97.36%), and
+  the file is 1.58 GB smaller. We have not checked whether these gaps hold beyond these 20 windows. To run as shipped, the
+  max-quality model also needs the draft model (2.58 GB).
 * Thinking text only. We have not measured general text, Japanese or code this way, nor the rate of correct answers on tasks.
 
 ### Speed
