@@ -66,6 +66,8 @@ The fastest model was faster than each of the eight other engines in all seven c
 
 Both are settings of `chat`, `serve`, `bench` and `selfcheck`: `--prefill auto|new|old` (or `YASAKANI_PREFILL`) and `--edit-copy on|off` (or `YASAKANI_EDIT_COPY`). One line at start says which prompt reading is used and why. [The options](python/README.md#prompt-reading-and-edit-copy) · [Measurements](docs/MEASUREMENTS.md#measurements-020)
 
+**New model in 0.2.0: the max-quality model.** The same Qwen3.8-27B with one bit per weight more than the quality model in each part (15.72 GB). On 20 thinking texts it is closer to the original model than the quality model (KL 0.0040 against 0.0126, default KV5, RTX 5090), and it generates at about 0.8 to 0.9 times its speed. It needs a card with 24 GB or more and is tested on the RTX 5090 only. In the quickstart it is choice 3. [Details](#max-quality-model)
+
 <a name="what-014-changed"></a>
 
 **What 0.1.4 changed** (thinking off, 2 runs per task, measured one after the other against 0.1.2 on November 15, 2026; RTX 5090; tok/s):
@@ -126,7 +128,7 @@ The quality model picks the same most likely next token as the original BF16 mod
 
 <a name="max-quality-model"></a>
 
-**Max-quality model.** The same Qwen3.8-27B, converted with more bits: 5 and 4 bits per weight in the body, 5 bits in the output matrix, 4 bits in the embedding table (15.72 GB; one bit per weight more than the quality model in each part). Measured the same way with the default KV5 cache (RTX 5090, November 20, 2026), it picks the same most likely next token as the original model at **97.40%** of positions, with KL 0.0040. The quality model, measured the same way: 95.35% and 0.0126. Against the quality model on the same PC, reading a prompt and the three edit tasks ran at 0.97 to 1.00 times its speed. The four `yasakani bench` tasks ran at 0.92 times with thinking off (403.4 against 439.3 tok/s) and 0.81 times with thinking on (317.9 against 392.4 tok/s). It is tested on the RTX 5090 only. On a 24 GB card the package would choose a context of 163,840 tokens when the desktop uses 500 MiB (196,608 with nothing else on the GPU): that is a calculation, not checked on such a card. It does not fit on 16 GB cards. It needs a version of YASAKANI that reads 5-bit codes. [Measurements](docs/MEASUREMENTS.md#max-quality-model)
+**Max-quality model.** The same Qwen3.8-27B, converted with more bits: 5 and 4 bits per weight in the body, 5 bits in the output matrix, 4 bits in the embedding table (15.72 GB; one bit per weight more than the quality model in each part). Measured the same way with the default KV5 cache (RTX 5090, November 20, 2026), it picks the same most likely next token as the original model at **97.40%** of positions, with KL 0.0040. The quality model, measured the same way: 95.35% and 0.0126. Against the quality model on the same PC, reading a prompt and the three edit tasks ran at 0.97 to 1.00 times its speed. The four `yasakani bench` tasks ran at 0.92 times with thinking off (403.4 against 439.3 tok/s) and 0.81 times with thinking on (317.9 against 392.4 tok/s). It is tested on the RTX 5090 only. On a 24 GB card the package would choose a context of 163,840 tokens when the desktop uses 500 MiB (196,608 with nothing else on the GPU): that is a calculation, not checked on such a card. It does not fit on 16 GB cards. It needs YASAKANI 0.2.0 or newer; earlier versions stop with an error when they open its 5-bit codes. [Measurements](docs/MEASUREMENTS.md#max-quality-model)
 
 <a name="long-contexts"></a>
 

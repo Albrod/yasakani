@@ -601,8 +601,10 @@ reading and the edit copy work: [TECHNOLOGY.md](TECHNOLOGY.md), 5.5 and chapter 
 
 ### Builds and conditions
 
-* Engine library: the `yskn.dll` of 0.2.0, SHA-256 starting `3e06622b` (the source of 0.1.7 plus the new prompt reading and the edit
-  copy, with code for RTX 30, 40 and 50 as in 0.1.7; [BUILDING.md](../BUILDING.md)). The comparison: the `yskn.dll` of 0.1.7 (SHA-256
+* Engine library: the first build step of 0.2.0, SHA-256 starting `3e06622b` (the source of 0.1.7 plus the new prompt reading and the edit
+  copy, with code for RTX 30, 40 and 50 as in 0.1.7; [BUILDING.md](../BUILDING.md)). The released `yskn.dll` of 0.2.0 (SHA-256
+  starting `c995bb24`) adds the reader of 5-bit codes for the max-quality model; the GPU code of the first step is in it unchanged,
+  function by function. The comparison: the `yskn.dll` of 0.1.7 (SHA-256
   starting `2d64c3b4`) with the 0.1.7 Python package.
 * Python package: the checks on the GPU used the 0.2.0 library with a package that differed from the 0.2.0 package in its version
   strings (0.1.7 instead of 0.2.0). For some checks it also had the edit copy off by default (in those, the runs with the edit copy
@@ -773,11 +775,12 @@ measured.
 * The thinking-on speed table.
 
 <a name="max-quality-model"></a>
-## The max-quality model (added with the max-quality model)
+## 0.2.0: the max-quality model (added for 0.2.0)
 
 The max-quality model is the same Qwen3.8-27B as the quality model, converted with more bits. Measured on November 20, 2026 on the RTX
 5090 (32 GB) of the other measurements, Windows 11, one request at a time, with the default settings and the Python package of 0.2.0. The
-engine was a test build that reads 5-bit codes; its GPU code for them is the code of this release. How the codes work:
+engine was a test build that reads 5-bit codes; its GPU code for them is the code of the 0.2.0 library. The model needs YASAKANI 0.2.0
+or newer; earlier versions stop with an error when they open its 5-bit codes. How the codes work:
 [TECHNOLOGY.md](TECHNOLOGY.md), 3.1; the file format: [FORMAT.md](FORMAT.md).
 
 ### Files
@@ -858,6 +861,10 @@ Reading a prompt and the edits run at about the speed of the quality model. Plai
   RTX 30 or 40 card): the copies of the body matrices and of the output matrix gave the same tokens and scores as the quality model with both builds (the copy of the embedding table was checked with the RTX 5090 code only). The max-quality model ran
   without errors, gave the same tokens with look-ahead on and off, and its passes of 64 rows agreed with passes of 16 rows; the check of
   the wide copy passes opened 32, 48 and 64 rows.
+* **The released library.** With the `yskn.dll` of 0.2.0 (SHA-256 starting `c995bb24`), the copies of the output matrix and of the
+  body matrices again gave the same tokens as the quality model on the RTX 5090 (greedy 200 tokens with look-ahead on and off, 32
+  tokens after an 8,192-token prompt with both readings, the three edit tasks, the scores at the first position), and the max-quality
+  model ran without errors.
 * **Self-check.** `selfcheck.json` of the model folder was written with `yasakani selfcheck --write`; two checks against it passed
   (3 of 3, and the consistency check).
 * **Several requests at once** (`serve --parallel N`, experimental): 123 requests joining and leaving (`--parallel 4` and `8`, and

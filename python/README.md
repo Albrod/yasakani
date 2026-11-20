@@ -22,7 +22,8 @@ You do **not** need the CUDA Toolkit, PyTorch, or a C++ compiler.
 
 ## Model folder
 
-YASAKANI publishes three model folders; you need one. They hold the same files except for the weights:
+YASAKANI publishes three model folders; you need one (the max-quality model needs 0.2.0 or newer; earlier versions stop with an
+error when they open its 5-bit codes). They hold the same files except for the weights:
 
 ```
 qwen38_27b_quality.yskn       the weights of the quality model (12.4 GB)   - or -

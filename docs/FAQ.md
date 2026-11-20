@@ -12,7 +12,7 @@ not a general-purpose engine: one model, tuned on one card.
 
 There are three conversions of Qwen3.8-27B, and you need only one. The **quality model** (12.37 GB) stays close to the original model and is the
 one recommended for everyday use. The **fastest model** (10.31 GB) is smaller and writes faster in most kinds of task, and is a little further
-from the original model. The **max-quality model** (15.72 GB) is the closest to the original model; it needs a card with 24 GB or more, and it
+from the original model. The **max-quality model** (15.72 GB) is the closest to the original model; it needs YASAKANI 0.2.0 or newer and a card with 24 GB or more, and it
 generates at about 0.8 to 0.9 times the speed of the quality model (RTX 5090). The numbers are in the [README](../README.md) and in
 [MEASUREMENTS.md](MEASUREMENTS.md#max-quality-model).
 

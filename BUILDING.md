@@ -15,13 +15,17 @@ Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building 
 | Build tools | CMake (3.24 or newer is required) and Ninja |
 | Target | one DLL with machine code for compute capability 8.6 (`sm_86`, RTX 30 series), 8.9 (`sm_89`, RTX 40 series) and 12.0 (`sm_120`, RTX 50 series), plus PTX for `compute_120`. Tested on the RTX 5090 only |
 
-The `yskn.dll` on the release page is the build of 0.2.0 (SHA-256 `3e06622ba04d0286dac064b4b31b8908029b01103692d9421023a211ba9739e1`,
-63,142,400 bytes). It is the source of 0.1.7 plus the new prompt reading and the edit copy ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md),
+The `yskn.dll` on the release page is the build of 0.2.0 (SHA-256 `c995bb24c297ae823dfc92eaaf3357401083a9922abe2fdfeb56509c323fd052`,
+64,498,688 bytes). It was made in two steps. The first step (SHA-256 `3e06622b…39e1`, 63,142,400 bytes) is the source of 0.1.7 plus the
+new prompt reading and the edit copy ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md),
 5.5 and chapter 8): GPU code for long passes (among others `src/q35_g6.cu`, `src/q35_g6_whole.cuh`, `src/kvq_fast.cuh`,
 `src/kvq_vit2.cuh`, `src/q35_atxpk.cu`, `src/q35_atxpk4.cuh`, `src/q35_kernels.cu`, `src/misc_kernels.cu`) and host code
 (`src/engine35.cpp`, `src/specx.cpp`, `src/c_api.cpp`, `src/edit_copy.hpp`, `src/prefill_mode.hpp`). Like 0.1.7 it has machine code for
 the three GPU generations of the table above. It was built with the tool versions of the table, with the two commands below, by
-compiling the changed files again in the build folder of the earlier build and linking (about four minutes).
+compiling the changed files again in the build folder of the earlier build and linking (about four minutes). The second step added
+the reader of 5-bit codes for the max-quality model (`src/lnord.cu`, `src/pfa.cu`, `src/q35_g6.cu`, `src/q35_flow.cu`,
+`src/engine35.cpp`, `src/format.hpp`, `src/loader.cpp`), compiled the same way into a copy of the build folder of the first step. The
+GPU code of the first step is in it unchanged, function by function (514 functions for each of the three GPU generations).
 The 0.1.7 build (SHA-256 `2d64c3b42bb9e689449cdd7ccd7cd5f206f70615bcadb6c0640a16396386f468`) was
 the source of 0.1.6 plus the experimental code for several requests at once (`serve --parallel N`): two new GPU files for passes of several
 requests (`src/q35_atxpk_ms.cu`, `src/q35_sample_ms.cu`), kernels for several rows in other GPU files, and host code in `src/engine35.cpp`

@@ -517,7 +517,8 @@ and `src/specx.cpp`.
   take the free GPU memory, and the engine may find no room and read prompts without the work area; this has not been measured.
 * The edit copy (5.5) and the new prompt reading were measured on the RTX 5090 only.
 * The 5-bit codes of the max-quality model were run on the RTX 5090 only. Their code for RTX 30 and 40 cards was run on the RTX 5090
-  with test builds, not on those cards. The engine reads 5-bit codes in the matrices (body and output), not in the embedding table.
+  with test builds, not on those cards. Since 0.2.0 the engine reads 5-bit codes in the matrices (body and output), not in the embedding table; earlier versions stop with
+  an error when they open them.
   Generation with the max-quality model is about 0.8 to 0.9 times as fast as with the quality model
   ([MEASUREMENTS.md](MEASUREMENTS.md#max-quality-model)).
 * Without `serve --parallel N` one request is generated at a time. Since 0.1.7 `serve --parallel N` can generate several at once
