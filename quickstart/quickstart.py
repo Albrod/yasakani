@@ -409,6 +409,10 @@ T = {
         "ja": "起動ファイルを {o} に戻しますか？ [y/N]: ",
         "en": "Put the start files of {o} back? [y/N]: ",
     },
+    "rb_done_model": {
+        "ja": "起動ファイルを {o} に戻しました。{o} は{m}を使えません。START.cmd を起動して、モデルを選び直してください。",
+        "en": "The start files of {o} are back. Version {o} cannot use the {m}. Start START.cmd again and choose a model.",
+    },
     "rb_done": {
         "ja": "起動ファイルを {o} に戻しました。その版を起動します（エンジンとパッケージもその版のものに入れ直します）。",
         "en": "The start files of {o} are back. Starting that version (it installs its own engine and package again).",
@@ -965,6 +969,13 @@ def apply_rollback(ui, folder, st, save, yes, after_args):
     st.pop("update_backup", None)
     if b.get("from"):
         st["update_skip"] = b["from"]                 # the daily check does not offer that version again (the menu item still does)
+    m = st.get("model")
+    if isinstance(m, str) and ("\"m_%s\"" % m).encode("utf-8") not in files["quickstart.py"]:
+        # the launcher that came back has no such model (it would stop on the name): forget the choice and let the user start it
+        st.pop("model", None)
+        save()
+        ui.say("rb_done_model", o=b["version"], m=ui.t("m_" + m) if ("m_" + m) in T else m)
+        return 0
     save()
     ui.say("rb_done", o=b["version"])
     return run_quickstart(folder, after_args)

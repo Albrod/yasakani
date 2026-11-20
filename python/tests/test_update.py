@@ -293,6 +293,33 @@ class DownloadTests(Base):
             self.assertEqual(QS.apply_rollback(self.ui, str(d), self.st, self.save, True, []), 1)
         self.assertIn("no backup", out.getvalue())
 
+    def test_rollback_forgets_a_model_the_old_launcher_does_not_know(self):
+        for known in (False, True):
+            d = self.folder("qs_known" if known else "qs_unknown")
+            old_qs = b'T = {"m_quality": 1, "m_speed": 2' + (b', "m_max": 3' if known else b'') + b'}\n'
+            (d / "quickstart.py").write_bytes(old_qs)
+            self.st.clear()
+            self.gh.publish("9.9.9", files={"quickstart.py": b'QS_VERSION = "9.9.9"\n', "START.cmd": b"new start\r\n"})
+            rc, calls, out = self.run_update(d, self.fetch())
+            self.assertEqual(rc, 0, out)
+            self.st["model"] = "max"
+            calls = []
+            orig = QS.run_quickstart
+            QS.run_quickstart = lambda f, args: calls.append(list(args)) or 0
+            try:
+                with self.quiet() as out:
+                    rc = QS.apply_rollback(self.ui, str(d), self.st, self.save, True, ["--action", "none"])
+            finally:
+                QS.run_quickstart = orig
+            self.assertEqual(rc, 0)
+            self.assertEqual((d / "quickstart.py").read_bytes(), old_qs)
+            self.assertNotIn("update_backup", self.st)
+            if known:                                   # that launcher has the model: as before
+                self.assertEqual((self.st.get("model"), calls), ("max", [["--action", "none"]]))
+            else:                                       # it would stop on the name: the choice is forgotten, nothing is started
+                self.assertEqual((self.st.get("model"), calls), (None, []))
+                self.assertIn("choose a model", out.getvalue())
+
     def test_answer_no_changes_nothing(self):
         d = self.folder()
         self.gh.publish("9.9.9")
