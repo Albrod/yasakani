@@ -31,7 +31,9 @@ MIN_CONTEXT = 16384                   # below this the model is not opened
 HEAD_OFF_BELOW = 65536                # under this, the draft model's output head is left out to make room
 MARGIN_MIB = 512                      # the desktop's drift, CUDA graphs, image input (at most about 84 MiB), rounding
 OVERHEAD_MIB = {"fastest": 2100, "quality": 2300}    # GPU memory above the three model files (measured 2,090 and 2,291 MiB)
-QUALITY_WEIGHTS_MIB = 11000           # weights larger than this are counted with the overhead of the quality model
+QUALITY_WEIGHTS_MIB = 11000           # weights larger than this are counted with the overhead of the quality model (also the
+                                      # max-quality model: after load it used 3,182 MiB more than the quality model on the
+                                      # RTX 5090, and its weights file is 3,203 MiB larger)
 FULL_CONTEXT_MIN_TOTAL_MIB = 30000    # cards with this much memory keep the model's own context (as before 0.1.3)
 # Cards with less than FULL_CONTEXT_MIN_TOTAL_MIB keep the prompt-reading sizes of 0.1.7: OVERHEAD_MIB was measured with them.  The
 # larger defaults of runtime.py (2,048 rows per pass, 8,192 rows of layer work area) take about 0.6 to 0.7 GB more at load.
@@ -56,7 +58,7 @@ EDIT_COPY_MODES = ("on", "off")
 EDIT_COPY_ENV = "YASAKANI_EDIT_COPY"
 EDIT_COPY_DEFAULT = "on"
 MIN_TOTAL_MIB = 15000                 # "16 GB": the smallest cards the released models fit on (fastest model only)
-QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality model needs this much
+QUALITY_MIN_TOTAL_MIB = 23000         # "24 GB": the quality and the max-quality model need this much
 HEAD_SLOWER = "about 3%"              # each pass without the output head, measured on the RTX 5090
 # serve --parallel N (experimental): the carrier and every one of the N stream slots hold the KV of a whole context
 POSITION_TABLE_BYTES = 256            # the carrier's position table per token of context (the rest of KV_BYTES_PER_TOKEN is its KV)

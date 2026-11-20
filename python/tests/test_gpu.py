@@ -26,6 +26,7 @@ from yasakani._native import YasakaniError
 ROOT = Path(__file__).resolve().parent.parent
 FASTEST = (10311344128, 1164969472, 1411010584)       # the published files: weights, draft model, its output head
 QUALITY = (12365242368, 1164969472, 1411010584)
+MAXQ = (15723962368, 1164969472, 1411010584)
 
 # index, name, compute capability, memory.total (MiB) -> what the quickstart does, whether the quality model fits
 CARDS = [
@@ -751,11 +752,24 @@ class QuickstartTests(unittest.TestCase):
         for name, cc, total, qs, quality in CARDS:
             g = G.parse(smi_line(0, name, cc, total))[0]
             self.assertEqual(g.tested, self.qs.gpu_verdict(self.qs.parse_gpus(smi_line(0, name, cc, total))[0]) == "tested", name)
-        for model, sizes in (("speed", FASTEST), ("quality", QUALITY)):
+        for model, sizes in (("speed", FASTEST), ("quality", QUALITY), ("max", MAXQ)):
             self.assertEqual(self.qs.MODEL_BYTES[model], sizes)
             self.assertEqual(self.qs.OVERHEAD_MIB[model], G.overhead_mib(sizes[0]))
             for free in range(9000, 32001, 37):
                 self.assertEqual(self.qs.estimate_context(free, model), G.choose(free, *sizes, 262144), (model, free))
+
+    def test_max_model(self):
+        """The max-quality model: the full context on the RTX 5090, a shorter one on a 24 GB card, none on a 16 GB card."""
+        for free, want in ((32107, (262144, False)), (24064, (163840, False)), (24564, (196608, False)), (15884, (0, False)),
+                           (16384, (0, False))):
+            self.assertEqual(G.choose(free, *MAXQ, 262144), want, free)
+            self.assertEqual(self.qs.estimate_context(free, "max"), want, free)
+        self.assertEqual(G.overhead_mib(MAXQ[0]), 2300)
+        self.assertEqual(self.qs.MODELS["max"]["repo"], "yasakani-dev/Qwen3.8-27B-YASAKANI-max-quality")
+        self.assertEqual(set(self.qs.MODELS), set(self.qs.MODEL_BYTES))
+        self.assertEqual(set(self.qs.MODELS), set(self.qs.OVERHEAD_MIB))
+        for m in self.qs.MODELS:
+            self.assertIn("m_" + m, self.qs.T)
 
     def test_pick(self):
         qs = self.qs
