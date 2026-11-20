@@ -771,3 +771,94 @@ measured.
 * Linux: the engine library compiles and links (WSL, Ubuntu 24.04, CUDA 13.1, code for RTX 30, 40 and 50). Nothing was run on Linux.
 * A first installation with `START.cmd` from GitHub, which cannot run before the release.
 * The thinking-on speed table.
+
+<a name="max-quality-model"></a>
+## The max-quality model (added with the max-quality model)
+
+The max-quality model is the same Qwen3.8-27B as the quality model, converted with more bits. Measured on November 20, 2026 on the RTX
+5090 (32 GB) of the other measurements, Windows 11, one request at a time, with the default settings and the Python package of 0.2.0. The
+engine was a test build that reads 5-bit codes; its GPU code for them is the code of this release. How the codes work:
+[TECHNOLOGY.md](TECHNOLOGY.md), 3.1; the file format: [FORMAT.md](FORMAT.md).
+
+### Files
+
+| | quality model | max-quality model |
+|---|---|---|
+| the 400 matrices of the body | 288 at 4 bits, 112 at 3 bits per weight | 288 at 5 bits, 112 at 4 bits per weight ([`bits_max_quality.json`](../tools/convert/data/bits_max_quality.json)) |
+| input embedding table | 3 bits | 4 bits |
+| output matrix | 4 bits | 5 bits |
+| weights file | 12.37 GB | 15.72 GB (15,723,962,368 bytes) |
+| draft model and its output head | 2.58 GB | the same files |
+
+### Closeness to the original
+
+The method of [Quality on thinking text](#quality-on-thinking-text): the same 20 windows (20,460 positions) and the same BF16 reference.
+
+| Engine / model | File size, GB | KV cache | KL on thinking text↓ | KL, median | KL, 99th percentile | Top-1 agreement↑ |
+|---|---|---|---|---|---|---|
+| YASAKANI quality model | 12.37 | KV5 (default) | 0.0126 | 0.0036 | 0.1035 | 95.35% |
+| YASAKANI max-quality model | 15.72 | KV5 (default) | 0.0040 | 0.0012 | 0.0310 | 97.40% |
+| llama.cpp, Q4_K_M | 17.20* | FP16 | 0.0073 | 0.0021 | 0.0587 | 96.76% |
+
+* The max-quality model's KL is 0.003975, 0.32 times the quality model's 0.012591. The quality model, measured again in the same way
+  on November 20, gave the value of November 14 to every digit.
+* The Q4_K_M row (a Q4_K_M GGUF file of Qwen3.8-27B) was measured on November 19, 2026 with llama.cpp and an FP16 KV cache. 17.20 GB*
+  is its main model; the whole file is 17.44 GB. The records of that run are not in the repository. KV5 raises the KL of the quality
+  model by about 0.0004 against an FP16 cache ([above](#the-released-engine-added-november-14-2026)), so this condition does not favour
+  the YASAKANI rows. Read the rows as whole configurations (weights, KV cache and arithmetic), as in the table above.
+* With these 20 windows the max-quality model has a lower KL than this Q4_K_M and a smaller file. Its top-1 agreement is 0.64 points
+  higher; we have not checked whether that gap holds beyond these 20 windows. To run as shipped, the max-quality model also needs the
+  draft model (2.58 GB).
+* Thinking text only. We have not measured general text, Japanese or code this way, nor the rate of correct answers on tasks.
+
+### Speed
+
+Against the quality model, same PC, default settings, one request at a time, loaded twice in turn (quality, max-quality, quality,
+max-quality). `yasakani bench`: 512 tokens, greedy, the median of 6 runs per task (3 per load), and the mean of the 4 tasks. Edits
+(`yasakani bench --edit`): thinking off, the median of 6 runs. First read: nothing reused, the median of 4 runs.
+
+| Task | quality model | max-quality model | Ratio |
+|---|---|---|---|
+| bench, thinking off: mean of 4 tasks (tok/s) | 439.3 | 403.4 | 0.92 |
+| explanation / code / story / proof | 359.4 / 614.2 / 238.9 / 544.7 | 381.0 / 538.2 / 199.2 / 495.1 | 1.06 / 0.88 / 0.83 / 0.91 |
+| bench, thinking on: mean of 4 tasks (tok/s) | 392.4 | 317.9 | 0.81 |
+| explanation / code / story / proof | 374.9 / 474.8 / 247.7 / 472.2 | 344.8 / 335.1 / 239.7 / 352.1 | 0.92 / 0.71 / 0.97 / 0.75 |
+| code edit (tok/s) | 2,149.2 | 2,123.2 | 0.99 |
+| JSONL edit (tok/s) | 2,335.8 | 2,267.6 | 0.97 |
+| long JSONL edit (tok/s) | 2,157.5 | 2,102.7 | 0.97 |
+| first read of 8,192 tokens (input tok/s) | 5,174 | 5,118 | 0.99 |
+| first read of 32,768 tokens (input tok/s) | 4,739 | 4,719 | 1.00 |
+
+Reading a prompt and the edits run at about the speed of the quality model. Plain generation runs at about 0.8 to 0.9 times its speed.
+
+### GPU memory and context
+
+* GPU memory (nvidia-smi, first load): 25,977 MiB after loading (quality model: 22,795 MiB), at most 26,821 MiB while reading 32,768
+  tokens and generating 2,048 (quality model: 23,637 MiB). Context 262,144 on the RTX 5090 with both models.
+* 24 GB cards, by the package's own rule (`python/yasakani/gpu.py`) and not checked on such a card: a context of 163,840 tokens on a
+  24,564 MiB card with 500 MiB in use by the desktop, 196,608 with nothing else on the GPU. The quality model gets 262,144 by the same rule.
+* 16 GB cards: the max-quality model does not fit (it needs about 19,268 MiB with a context of 16,384). The quickstart offers it only on
+  cards with 24 GB or more.
+
+### Checks
+
+* **The 5-bit code paths.** We wrote copies of the quality model in which its matrices are stored in the 5-bit form (and its embedding
+  table in the 4-bit form) with the same values. On the RTX 5090 they gave the same tokens as the quality model: greedy 200 tokens with
+  look-ahead on and off, 32 tokens after an 8,192-token prompt (new reading and the reading of 0.1.7), the three edit tasks, and the
+  scores at the first position. The copies of the output matrix and of the embedding table also gave the same 200 sampled tokens with
+  thinking on and the same tokens in the four bench tasks.
+* **The code for RTX 30 and 40 cards**, run on the RTX 5090 with test builds for compute capability 8.6 only and 8.9 only (not on an
+  RTX 30 or 40 card): the copies above gave the same tokens and scores as the quality model with both builds. The max-quality model ran
+  without errors, gave the same tokens with look-ahead on and off, and its passes of 64 rows agreed with passes of 16 rows; the check of
+  the wide copy passes opened 32, 48 and 64 rows.
+* **Self-check.** `selfcheck.json` of the model folder was written with `yasakani selfcheck --write`; two checks against it passed
+  (3 of 3, and the consistency check).
+* **Several requests at once** (`serve --parallel N`, experimental): 123 requests joining and leaving (`--parallel 4` and `8`, and
+  without the draft model's output head), 21 cancelled and 10 with a fault made on purpose. 0 outputs differed from the same conversations sent alone, and
+  no request was left stuck. GPU memory at most 25.5 GB with `--parallel 4` and 29.2 GB with `--parallel 8`.
+
+### Not measured
+
+* Any card other than the RTX 5090, among them every 24 GB and 16 GB card.
+* The KL on general text, Japanese or code; the rate of correct answers on tasks.
+* The speed with several requests at once.

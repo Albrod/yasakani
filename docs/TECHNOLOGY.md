@@ -78,22 +78,22 @@ Qwen3.8-27B has 64 layers. Sixteen are ordinary attention layers; forty-eight ar
 
 The original weights (BF16, 53.8 GB) are stored as three things:
 
-* **codes**: 3 or 4 bits per weight,
+* **codes**: 3 or 4 bits per weight (also 5 in the max-quality model),
 * **small dictionaries**: tables that turn codes into values,
 * **one scale per row** of each matrix.
 
 The codes are **trellis codes**. Two weights make one step, and each step writes 6 bits (= 3 bits per weight) or 8 bits (= 4 bits per
-weight). The reader keeps a 12-bit state (4,096 values); at each step the new bits enter the state, and the state indexes a table that
+weight); the max-quality model also uses 10 bits (= 5 bits per weight). The reader keeps a 12-bit state (4,096 values); at each step the new bits enter the state, and the state indexes a table that
 gives the two values. Because earlier codes decide how the next values can be chosen, the error is smaller than with rounding each weight
 on its own at the same number of bits. Before rounding, the weights are rotated with a signed Hadamard transform over 512 elements, which
 makes their distribution bell-shaped.
 
-| | quality model | fastest model |
-|---|---|---|
-| the 400 matrices of the body | 288 matrices at 4 bits, 112 at 3 bits | all 400 at 3 bits |
-| input embedding table | 3-bit codes | 3-bit codes |
-| output matrix | 4 bits | 4 bits |
-| file | 12.37 GB | 10.31 GB |
+| | quality model | fastest model | max-quality model |
+|---|---|---|---|
+| the 400 matrices of the body | 288 matrices at 4 bits, 112 at 3 bits | all 400 at 3 bits | 288 matrices at 5 bits, 112 at 4 bits |
+| input embedding table | 3-bit codes | 3-bit codes | 4-bit codes |
+| output matrix | 4 bits | 4 bits | 5 bits |
+| file | 12.37 GB | 10.31 GB | 15.72 GB |
 
 The code that reads the format is in `src/format.hpp` and `src/loader.cpp`.
 
@@ -516,6 +516,10 @@ and `src/specx.cpp`.
   reading keeps a work area in GPU memory from the first long prompt on. When `serve --parallel N` chooses its contexts itself, they
   take the free GPU memory, and the engine may find no room and read prompts without the work area; this has not been measured.
 * The edit copy (5.5) and the new prompt reading were measured on the RTX 5090 only.
+* The 5-bit codes of the max-quality model were run on the RTX 5090 only. Their code for RTX 30 and 40 cards was run on the RTX 5090
+  with test builds, not on those cards. The engine reads 5-bit codes in the matrices (body and output), not in the embedding table.
+  Generation with the max-quality model is about 0.8 to 0.9 times as fast as with the quality model
+  ([MEASUREMENTS.md](MEASUREMENTS.md#max-quality-model)).
 * Without `serve --parallel N` one request is generated at a time. Since 0.1.7 `serve --parallel N` can generate several at once
   (experimental).
 * The numbers here come from one computer. They change with the task, the context length and what else is using the GPU.

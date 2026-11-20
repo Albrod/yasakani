@@ -10,9 +10,11 @@ not a general-purpose engine: one model, tuned on one card.
 
 ## Which model should I download?
 
-There are two conversions of Qwen3.8-27B, and you need only one. The **quality model** (12.37 GB) stays closest to the original model and is the
+There are three conversions of Qwen3.8-27B, and you need only one. The **quality model** (12.37 GB) stays close to the original model and is the
 one recommended for everyday use. The **fastest model** (10.31 GB) is smaller and writes faster in most kinds of task, and is a little further
-from the original model. The numbers for both are in the [README](../README.md).
+from the original model. The **max-quality model** (15.72 GB) is the closest to the original model; it needs a card with 24 GB or more, and it
+generates at about 0.8 to 0.9 times the speed of the quality model (RTX 5090). The numbers are in the [README](../README.md) and in
+[MEASUREMENTS.md](MEASUREMENTS.md#max-quality-model).
 
 ## How fast is it, and how was that measured?
 
@@ -73,7 +75,8 @@ are **not identical** to the original. On 20 thinking transcripts that were not 
 cache, measured November 8, 2026), the most likely next token is the same as the original BF16 model's **95.24%** of the time for the quality
 model and **93.01%** for the fastest model, and the KL divergence is 0.0122 and 0.0304. These numbers say how close the next-token predictions
 are; they are not the rate of correct answers on tasks, and they cover thinking text. On general web text an additional evaluation showed a KL
-divergence 3-10% larger for the quality model than for our earlier conversion of the same size.
+divergence 3-10% larger for the quality model than for our earlier conversion of the same size. The max-quality model (15.72 GB), measured the same
+way with the default KV5 cache on November 20, 2026, agrees at **97.40%** with KL 0.0040; the quality model gives 95.35% and 0.0126 with KV5.
 
 Does the speed-up itself change the answers? It is built not to: speculative decoding only keeps tokens that the main model agrees with.
 Up to 0.1.2, while other programs were using the GPU at the same time, a few repeated runs had the same tokens as the others up to one
@@ -95,7 +98,7 @@ proposes tokens; the model still checks every one of them, so the output does no
 ## Which GPUs, which systems?
 
 We test on **Windows 11 and the RTX 5090** (32 GB). Since 0.1.3 the engine is also built to run on other NVIDIA RTX 30, 40 and 50 series cards with
-compute capability 8.6 or higher and 16 GB or more: the RTX 3090, RTX 3090 Ti and RTX 4090 (24 GB; both models) and the
+compute capability 8.6 or higher and 16 GB or more: the RTX 3090, RTX 3090 Ti and RTX 4090 (24 GB; the quality and fastest models, and the max-quality model with a shorter context by calculation) and the
 RTX 4060 Ti 16GB, RTX 4070 Ti SUPER, RTX 4080, RTX 4080 SUPER, RTX 5060 Ti 16GB, RTX 5070 Ti, RTX 5080 (16 GB; the fastest model only, with a shorter context). The engine is
 not optimized for them and we have not tested it on them, so neither its speed nor its operation is guaranteed; they are slower than the
 RTX 5090. The quickstart says so and goes on. Since 0.1.4, however, its self-check compares the card's predictions with those of the
@@ -215,7 +218,7 @@ of 0.1.7 in the same measurement printed 27 s and 26 s (one start per version). 
 
 ## How much memory and disk does it need?
 
-One model folder is a download of about 13 GB (fastest model) or 15 GB (quality model); keep 20 GB free. The context length goes up to 262,144
+One model folder is a download of about 13 GB (fastest model), 15 GB (quality model) or 18 GB (max-quality model); keep 20 GB free. The context length goes up to 262,144
 tokens. With the fastest model and that full context reserved, the engine takes 16.78 GiB of VRAM (27.13 GiB if the key-value cache were kept
 in FP16); this is the amount reserved at start, not the peak of the whole setup. 32 GB of system RAM is recommended.
 
@@ -224,7 +227,8 @@ fastest model and about 21.2 GiB for the quality model (about 14.3 GiB and 16.4 
 0.2.0). On the RTX 5090, 0.2.0 uses more ([below](#prompt-reading-memory)).
 
 On a GPU with less than 32 GB, the context is chosen from the free GPU memory each time the model starts (at most 262,144 tokens;
-`--max-ctx` sets it yourself). On 16 GB cards only the fastest model fits. The rule is in
+`--max-ctx` sets it yourself). On 16 GB cards only the fastest model fits. The max-quality model used 25,977 MiB after loading on the RTX 5090
+(quality model: 22,795 MiB); on a 24 GB card the package would choose a context of 163,840 tokens (a calculation, not checked on such a card). The rule is in
 [python/README.md](../python/README.md#gpus-other-than-the-rtx-5090).
 
 ## It is much slower than the tables

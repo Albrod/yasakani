@@ -18,12 +18,12 @@ YASAKANI is an engine that runs the Qwen3.8-27B language model on a Windows PC w
 
 JSONL edit is our own task. The model gets 60 JSONL lines, changes one record and returns all the lines, so almost all of the answer is a copy of the input. tok/s means tokens generated per second. Thinking off means the model answers without first writing out its reasoning. Conditions: one RTX 5090, one request at a time, thinking off, v0.1.4 (November 15, 2026), mean of 2 runs, prompt reading excluded. Other GPUs are slower.
 
-For everyday use, choose the **quality model**. Its predictions are the closest to the original model. Choose the **fastest model** if you want a smaller file and higher speed in most tasks. [Quality model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) · [Fastest model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)
+For everyday use, choose the **quality model**. Its predictions are close to the original model. Choose the **fastest model** if you want a smaller file and higher speed in most tasks. The **max-quality model** (15.72 GB) is the closest to the original model of the three. It needs a card with 24 GB or more and generates at about 0.8 to 0.9 times the speed of the quality model ([details](#max-quality-model)). [Quality model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality) · [Fastest model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed) · [Max-quality model download](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-max-quality)
 
 | Your GPU | Model choice | Windows testing |
 |---|---|---|
-| RTX 5090 (32 GB) | Quality or fastest | Tested by the developer |
-| RTX 3090, 3090 Ti, or 4090 (24 GB) | Quality or fastest | Built for these cards; not tested or tuned by the developer |
+| RTX 5090 (32 GB) | Quality, fastest or max-quality | Tested by the developer |
+| RTX 3090, 3090 Ti, or 4090 (24 GB) | Quality, fastest or max-quality (max-quality with a shorter context, by calculation) | Built for these cards; not tested or tuned by the developer |
 | Listed RTX 40 and 50 series cards (16 GB) | Fastest, with context sized to free memory | Built for these cards; not tested or tuned by the developer |
 
 All speed numbers in this repository were measured on the RTX 5090. Other cards are slower. We do not guarantee their speed or that they work. The edit numbers are high because one pass of the model checks many tokens copied from the input (wide copy passes, up to 64 tokens per pass). Since 0.1.7 the engine uses them on RTX 30, 40 and 50 cards after a check on the card at the first start: a width is used only if it gives the same predictions as 16-token passes, bit for bit, and is faster on that card. Normal prose is not faster; the gain is on answers that copy the input, such as edits.
@@ -124,9 +124,13 @@ In the uncut November 8 recording, the fastest model edited a Python file and re
 
 The quality model picks the same most likely next token as the original BF16 model at **95.24%** of positions, and the fastest model at **93.01%**. The test used 20 thinking texts that were not used in the conversion (20,460 positions). KL divergence measures how far the predicted probabilities are from the original model's; lower is closer. It was 0.0122 for the quality model and 0.0304 for the fastest model. The similarly sized GSQ-RCO IQ3_S agreed at 93.64%. These numbers are from November 8, with a research build and an FP16 KV cache. Measured again on November 14 with the released engine (0.1.0 to 0.1.2) and its KV5 cache, the results were 95.35% (KL 0.0126) and 92.98% (KL 0.0309). This measures agreement with the original model on thinking text, not task accuracy. The models are not identical to the original. [Quality results for 13 configurations and methodology](docs/MEASUREMENTS.md#quality-on-thinking-text) · [Measure it yourself](tools/quality/)
 
+<a name="max-quality-model"></a>
+
+**Max-quality model.** The same Qwen3.8-27B, converted with more bits: 5 and 4 bits per weight in the body, 5 bits in the output matrix, 4 bits in the embedding table (15.72 GB; one bit per weight more than the quality model in each part). Measured the same way with the default KV5 cache (RTX 5090, November 20, 2026), it picks the same most likely next token as the original model at **97.40%** of positions, with KL 0.0040. The quality model, measured the same way: 95.35% and 0.0126. Against the quality model on the same PC, reading a prompt and the three edit tasks ran at 0.97 to 1.00 times its speed. The four `yasakani bench` tasks ran at 0.92 times with thinking off (403.4 against 439.3 tok/s) and 0.81 times with thinking on (317.9 against 392.4 tok/s). It is tested on the RTX 5090 only. On a 24 GB card the package would choose a context of 163,840 tokens: that is a calculation, not checked on such a card. It does not fit on 16 GB cards. It needs a version of YASAKANI that reads 5-bit codes. [Measurements](docs/MEASUREMENTS.md#max-quality-model)
+
 <a name="long-contexts"></a>
 
-With room reserved for the maximum context of 262,144 tokens, GPU memory use was about 21.2 GiB with the quality model and 19.1 GiB with the fastest model. This includes the helper model. The work area of the new prompt reading of 0.2.0 comes on top ([above](#what-020-changed)). We measured long-context quality up to 128K tokens. [KV5 measurements](docs/MEASUREMENTS.md#kv5-the-compressed-key-value-cache-with-the-fastest-model)
+With room reserved for the maximum context of 262,144 tokens, GPU memory use was about 21.2 GiB with the quality model and 19.1 GiB with the fastest model. This includes the helper model. The max-quality model used 25,977 MiB after loading with the 0.2.0 package (quality model: 22,795 MiB, same run). The work area of the new prompt reading of 0.2.0 comes on top ([above](#what-020-changed)). We measured long-context quality up to 128K tokens. [KV5 measurements](docs/MEASUREMENTS.md#kv5-the-compressed-key-value-cache-with-the-fastest-model)
 
 <a name="several-requests-at-once"></a>
 
