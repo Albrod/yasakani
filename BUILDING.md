@@ -68,7 +68,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The result is `build\yskn.dll` (about 63 MB; the CUDA runtime is linked statically, so no CUDA Toolkit is needed to run it). The recorded build of
+The result is `build\yskn.dll` (about 64 MB; the CUDA runtime is linked statically, so no CUDA Toolkit is needed to run it). The recorded build of
 the release took about four minutes and printed many compiler warnings; they are known.
 
 Pass the file to the tools with `--dll`:

@@ -398,8 +398,8 @@ the look-ahead. Three requests cut by the thinking budget and one whose thinking
 0.2.0 reads prompts in a new way (chapter 8) and adds the edit copy (5.5). Both were checked against the released 0.1.7 on the RTX 5090.
 At 589,088 positions (46 cases, both models, prompts of 256 to 65,536 tokens) the predictions, the top 8 candidates with their FP32
 scores, the first token, the committed state and the next 16 positions were the same. This comparison used a test build of the 0.2.0
-engine, because the released library does not export the entry it needs. Through the chat's own path the released library gave the same
-token ids and state hash as 0.1.7 in 22 cases (first reads, prompts changed in the middle, thinking on; 4 runs each), and 35
+engine, because the library of the first build step does not export the entry it needs. Through the chat's own path that library (SHA-256
+starting `3e06622b`; the released library adds only the reader of 5-bit codes, see [BUILDING.md](../BUILDING.md)) gave the same token ids and state hash as 0.1.7 in 22 cases (first reads, prompts changed in the middle, thinking on; 4 runs each), and 35
 conversations per model gave the same token ids, with the edit copy off and with it on. The code for RTX 30 and 40 cards was run on the RTX 5090 only, with test builds
 ([MEASUREMENTS.md](MEASUREMENTS.md#measurements-020)). The edit copy changes only the drafts: the main model checks every drafted token.
 

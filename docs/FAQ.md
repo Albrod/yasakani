@@ -513,7 +513,7 @@ Known limits:
 
 ## Can I use other models, for example Qwen4?
 
-Not in this release: it runs Qwen3.8-27B only. The program that made the two model files ([tools/convert/](../tools/convert/), added on
+Not in this release: it runs Qwen3.8-27B only. The conversion program ([tools/convert/](../tools/convert/), added on
 November 14, 2026) knows the layers of Qwen3.8-27B only, and the engine runs this model only, so another model needs changes in both.
 Whether other models can be supported is decided one by one, and nothing is promised.
 

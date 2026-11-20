@@ -606,7 +606,7 @@ reading and the edit copy work: [TECHNOLOGY.md](TECHNOLOGY.md), 5.5 and chapter 
   starting `c995bb24`) adds the reader of 5-bit codes for the max-quality model; the GPU code of the first step is in it unchanged,
   function by function. The comparison: the `yskn.dll` of 0.1.7 (SHA-256
   starting `2d64c3b4`) with the 0.1.7 Python package.
-* Python package: the checks on the GPU used the 0.2.0 library with a package that differed from the 0.2.0 package in its version
+* Python package: the checks on the GPU used the library of the first build step with a package that differed from the 0.2.0 package in its version
   strings (0.1.7 instead of 0.2.0). For some checks it also had the edit copy off by default (in those, the runs with the edit copy
   on turned it on through the package's `--edit-copy on` setting or with `YASAKANI_EDIT_COPY=on`), an earlier wording of the lines it
   prints for `--prefill new`, and an earlier form of the rule that leaves memory free for `--prefill new` on cards under 30,000 MiB.
@@ -620,9 +620,9 @@ reading and the edit copy work: [TECHNOLOGY.md](TECHNOLOGY.md), 5.5 and chapter 
 
 * **Every position.** 46 cases (both models, prompts of 256 to 65,536 tokens), 589,088 positions: the predictions, the top 8 candidates
   with their FP32 scores, the first token, the committed state and the 16 next positions were the same as with 0.1.7. This comparison
-  used a test build of the 0.2.0 engine: the released library does not export the entry it needs. The released library was compared
-  through the chat's own path (next point).
-* **The chat's own path, released library.** 22 cases (first reads of 256 to 65,536 tokens, the three changed prompts below, thinking on,
+  used a test build of the 0.2.0 engine: the library of the first build step does not export the entry it needs. That library was
+  compared through the chat's own path (next point).
+* **The chat's own path, library of the first build step (`3e06622b`).** 22 cases (first reads of 256 to 65,536 tokens, the three changed prompts below, thinking on,
   both models), 4 runs each: the token ids and the hash of the state were the same as with 0.1.7 in every run.
 * **Conversations.** 35 conversations per model, one request at a time, with the edit copy off and again with it on: the same token ids
   as 0.1.7, before and after the check of the wide copy passes on the card. With the edit copy off they were also the same as the

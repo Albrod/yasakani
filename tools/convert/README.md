@@ -1,6 +1,6 @@
 # The converter: from the original weights to a `.yskn` file
 
-日本語：元のモデル（Qwen3.8-27B の BF16 の重み）から `.yskn` ファイルを作るプログラムです。公開している2つのモデルの本体はこの方法で作りました。
+日本語：元のモデル（Qwen3.8-27B の BF16 の重み）から `.yskn` ファイルを作るプログラムです。公開している品質モデルと最速モデルの本体はこの方法で作りました。
 手元で変換し直して、公開ファイルと突き合わせられます。私たちが同じPCで変換し直した結果は下の「What we got」にあります。
 
 This folder holds the program that makes a YASAKANI model file (`.yskn`, defined in [docs/FORMAT.md](../../docs/FORMAT.md)) from
