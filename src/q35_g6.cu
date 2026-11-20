@@ -28,6 +28,11 @@ __device__ __forceinline__ void mt_mma(int* d, const unsigned* a, uint2 b) {
   asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
 }
+// K = 10 (5 bits per weight): the 12-bit table index at bit o of a lane-row stream of 10 words (= lno10_win of lnord.cu)
+__device__ __forceinline__ unsigned g6_win10(const unsigned* r, int o) {
+  const int wi = o >> 5, sh = o & 31;
+  return (sh <= 20 ? (r[wi] >> sh) : __funnelshift_r(r[wi], r[wi + 1], sh)) & 0xFFFu;
+}
 __device__ __forceinline__ void mt_cp_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
 __device__ __forceinline__ void mt_cp16s(unsigned saddr, const void* gmem_src) {  
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(saddr), "l"(gmem_src) : "memory");
@@ -54,6 +59,17 @@ template <int K> __global__ void __launch_bounds__(256) mt_predecode2_kernel(Ten
   unsigned q0 = tig ? (nbv & TM) : 0u, q1 = tig ? (nbv >> T) : 0u;
   auto pair_b = [&](unsigned p, unsigned q) -> unsigned {
     const unsigned W = q | (p << T); return unsigned(s_lut[W & 0xFFFu]) | (unsigned(s_lut[(W >> K) & 0xFFFu]) << 16); };
+  if constexpr (K == 10) {   // K = 10: window decode; the same s_t places as the loop below
+    const unsigned* r1 = w + K;
+    #pragma unroll
+    for (int m = 0; m < SS; ++m) {
+      const unsigned a0 = m ? g6_win10(w, 40 * m - 2) : (q0 | ((w[0] & 0x3FFu) << 2)), b0 = m ? g6_win10(r1, 40 * m - 2) : (q1 | ((r1[0] & 0x3FFu) << 2));
+      s_t[warp][gid][16 * tig + 2 * m] = unsigned(s_lut[a0]) | (unsigned(s_lut[g6_win10(w, 40 * m + 8)]) << 16);
+      s_t[warp][gid][16 * tig + 2 * m + 1] = unsigned(s_lut[g6_win10(w, 40 * m + 18)]) | (unsigned(s_lut[g6_win10(w, 40 * m + 28)]) << 16);
+      s_t[warp][gid + 8][16 * tig + 2 * m] = unsigned(s_lut[b0]) | (unsigned(s_lut[g6_win10(r1, 40 * m + 8)]) << 16);
+      s_t[warp][gid + 8][16 * tig + 2 * m + 1] = unsigned(s_lut[g6_win10(r1, 40 * m + 18)]) | (unsigned(s_lut[g6_win10(r1, 40 * m + 28)]) << 16);
+    }
+  } else {
   #pragma unroll
   for (int m = 0; m < SS; ++m) {
     const unsigned f0 = g6_field<K>(w, m), f1 = g6_field<K>(w + K, m);
@@ -61,6 +77,7 @@ template <int K> __global__ void __launch_bounds__(256) mt_predecode2_kernel(Ten
     s_t[warp][gid][16 * tig + 2 * m] = pair_b(p10, q0); s_t[warp][gid][16 * tig + 2 * m + 1] = pair_b(p20, p10 >> TS);
     s_t[warp][gid + 8][16 * tig + 2 * m] = pair_b(p11, q1); s_t[warp][gid + 8][16 * tig + 2 * m + 1] = pair_b(p21, p11 >> TS);
     q0 = p20 >> TS; q1 = p21 >> TS;
+  }
   }
   __syncwarp();
   uint4* const dst = w8 + ((size_t)tile * nblk + bi) * (SS * 32) + lane;
@@ -326,7 +343,9 @@ void q35_g6_decode(const TensorDev& t, uint4* dst, cudaStream_t st) {
   const int blocks = ((t.N / 16) * (t.Kc / 256) + 7) / 8;
   if (t.k_default == 6) mt_predecode2_kernel<6><<<blocks, 256, 0, st>>>(t, dst);
   else if (t.k_default == 8) mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst);
-  else mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
+  else if (t.k_default == 4) mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
+  else if (t.k_default == 10) mt_predecode2_kernel<10><<<blocks, 256, 0, st>>>(t, dst);
+  else throw std::runtime_error("q35_g6_decode: K must be 4, 6, 8 or 10");
 }
 bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t st) {
   if (!W.weights || P.M < 256 || !P.xsum || P.lo || P.fuse || P.draft || P.e_fuse || P.f_mode || P.xsm_part || P.n_seg < 1 || P.n_seg > 3)
@@ -341,7 +360,7 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
   Q.xsm_sst = P.xsm_sst; Q.xsm_nb = P.xsm_nb; Q.xsm_n = P.xsm_n; Q.pm = pm;
   for (int s = 0; s < P.n_seg; ++s) {
     const auto& t = P.seg[s].t;
-    if (!t.lno || !t.lut8 || t.tile_k || t.group_worker || t.Kc != Kc || t.N <= 0 || t.N % 16 || (t.k_default != 4 && t.k_default != 6 && t.k_default != 8))
+    if (!t.lno || !t.lut8 || t.tile_k || t.group_worker || t.Kc != Kc || t.N <= 0 || t.N % 16 || (t.k_default != 4 && t.k_default != 6 && t.k_default != 8 && t.k_default != 10))
       return false;
     auto& g = Q.seg[s]; g.t = t; g.y = P.seg[s].part; g.ldy = t.N; g.qx = P.qx; g.alpha = P.alpha; g.S = P.xsm_S;
     g.cta_begin = nt; g.ctas = (t.N + tile_cols - 1) / tile_cols; nt += g.ctas; pn |= t.N % tile_cols != 0;
@@ -369,7 +388,9 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
     uint4* dst = const_cast<uint4*>(Q.seg[s].w8);
     if (t.k_default == 6) mt_predecode2_kernel<6><<<blocks, 256, 0, st>>>(t, dst);
     else if (t.k_default == 8) mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst);
-    else mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
+    else if (t.k_default == 4) mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
+    else if (t.k_default == 10) mt_predecode2_kernel<10><<<blocks, 256, 0, st>>>(t, dst);
+    else throw std::runtime_error("q35_g6: K must be 4, 6, 8 or 10");
   }
   if (W.wide_ready && W.tile == 4 && P.M == 2048 && P.n_seg == 1 &&
       P.seg[0].t.N == 5120 && Kc == 17408) {

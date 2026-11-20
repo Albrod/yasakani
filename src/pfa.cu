@@ -71,6 +71,18 @@ template <int K> __device__ __forceinline__ unsigned pfa_field(const unsigned* w
 }
 
 
+// K = 10 (5 bits per weight): the 12-bit window decode of lnord.cu (lno10_win) for m-step m of a lane: b0 = row gi (pair 2m, 2m + 1), b1 = row gi + 8.
+// Indices at bits 40m-2+10j (j = 0..3) of each row's 10-word stream; m = 0, j = 0 takes the carry q (2 bits).  o is a constant after unrolling.
+__device__ __forceinline__ unsigned pfa10_win(const unsigned* r, int o) {
+  const int wi = o >> 5, sh = o & 31;
+  return (sh <= 20 ? (r[wi] >> sh) : __funnelshift_r(r[wi], r[wi + 1], sh)) & 0xFFFu;
+}
+__device__ __forceinline__ void pfa10_dec(const unsigned* w, int m, unsigned q0, unsigned q1, const uint16_t* lut, uint2& b0, uint2& b1) {
+  const unsigned* r1 = w + 10;
+  const unsigned a0 = m ? pfa10_win(w, 40 * m - 2) : (q0 | ((w[0] & 0x3FFu) << 2)), c0 = m ? pfa10_win(r1, 40 * m - 2) : (q1 | ((r1[0] & 0x3FFu) << 2));
+  b0 = make_uint2(unsigned(lut[a0]) | (unsigned(lut[pfa10_win(w, 40 * m + 8)]) << 16), unsigned(lut[pfa10_win(w, 40 * m + 18)]) | (unsigned(lut[pfa10_win(w, 40 * m + 28)]) << 16));
+  b1 = make_uint2(unsigned(lut[c0]) | (unsigned(lut[pfa10_win(r1, 40 * m + 8)]) << 16), unsigned(lut[pfa10_win(r1, 40 * m + 18)]) | (unsigned(lut[pfa10_win(r1, 40 * m + 28)]) << 16));
+}
 __device__ __forceinline__ float pfa_fold(bool first, float total, float p) { return first ? p : __fadd_rn(total, p); }
 __device__ __forceinline__ void pfa_mad_wide(long long& acc, int a, int b) {   
 #ifdef PFA_EMU
@@ -202,6 +214,22 @@ __global__ void __launch_bounds__(pfa_maxt<LB>(), pfa_minb<LB>()) pfa_kernel(Gem
         #pragma unroll
         for (int ms = 0; ms < SS; ++ms) {
           const int m = h * SS + ms;
+          if constexpr (K == 10) {   // K = 10: window decode, the same mma loop as below
+            uint2 b0, b1; pfa10_dec(w, m, q0, q1, s_lut, b0, b1);
+            #pragma unroll
+            for (int j = 0; j < NF; ++j) {
+              unsigned a[4];
+              if (XG) {
+                const uint2 xa = __ldg(reinterpret_cast<const uint2*>(xg + (size_t)(16 * j) * Kc + 8 * m));
+                const uint2 xc = __ldg(reinterpret_cast<const uint2*>(xg + (size_t)(16 * j + 8) * Kc + 8 * m));
+                a[0] = xa.x; a[1] = xc.x; a[2] = xa.y; a[3] = xc.y;
+              } else {
+                const uint4 v = s_x[XG ? 0 : sidx][XG ? 0 : ms][XG ? 0 : j][lane];
+                a[0] = v.x; a[1] = v.z; a[2] = v.y; a[3] = v.w;
+              }
+              pfa_mma(d[j][0], a, b0); pfa_mma(d[j][1], a, b1);
+            }
+          } else {
           const unsigned f0 = pfa_field<K>(w, m), f1 = pfa_field<K>(w + K, m);             
           const unsigned p10 = f0 & PM, p20 = f0 >> (2 * K), p11 = f1 & PM, p21 = f1 >> (2 * K);
           const uint2 b0 = make_uint2(pair_b(p10, q0), pair_b(p20, p10 >> TS));    
@@ -219,6 +247,7 @@ __global__ void __launch_bounds__(pfa_maxt<LB>(), pfa_minb<LB>()) pfa_kernel(Gem
               a[0] = v.x; a[1] = v.z; a[2] = v.y; a[3] = v.w;
             }
             pfa_mma(d[j][0], a, b0); pfa_mma(d[j][1], a, b1);
+          }
           }
         }
       }
@@ -419,6 +448,7 @@ __global__ void __launch_bounds__(pfa_maxt<LB>(), pfa_minb<LB>()) pfa_xw_kernel(
       if (h + 1 < NST) stage(sidx ^ 1, g, blk, h + 1); else if (more) stage(sidx ^ 1, g_next, blk ^ 1, 0);
       if (active) {
         auto dec = [&](int m, uint2& b0, uint2& b1) {
+          if constexpr (K == 10) { pfa10_dec(w, m, q0, q1, s_lut, b0, b1); return; }   // K = 10: window decode
           const unsigned f0 = pfa_field<K>(w, m), f1 = pfa_field<K>(w + K, m);
           const unsigned p10 = f0 & PM, p20 = f0 >> (2 * K), p11 = f1 & PM, p21 = f1 >> (2 * K);
           b0 = make_uint2(pair_b(p10, q0), pair_b(p20, p10 >> TS)); b1 = make_uint2(pair_b(p11, q1), pair_b(p21, p11 >> TS));
@@ -477,7 +507,7 @@ __global__ void __launch_bounds__(pfa_maxt<LB>(), pfa_minb<LB>()) pfa_xw_kernel(
 
 static int pfa_k(const GemvLaunch& P, bool xsm = false) {           
   if (P.draft || P.e_fuse || (P.xsum && !xsm) || P.M < 1 || P.n_seg < 1) return 0;
-  const int K = P.seg[0].t.k_default; if (K != 4 && K != 6 && K != 8) return 0;
+  const int K = P.seg[0].t.k_default; if (K != 4 && K != 6 && K != 8 && !(K == 10 && P.xsum)) return 0;   // K = 10 for exact sums only
   for (int s = 0; s < P.n_seg; ++s) { const TensorDev& t = P.seg[s].t;
     if (!t.lno || t.k_default != K || t.tile_k || t.group_worker || (t.N % 16) || (t.Kc % 512) || t.n_workers < 1 || t.n_workers > t.Kc / 512) return 0; }
   return K;
@@ -521,7 +551,9 @@ void launch_pfa_xw(const GemvLaunch& P, int wpc, cudaStream_t st) {
   switch (K) {
     case 4: if (w32) launch_pfa_xw_k<4, 1>(P, wpc, st); else launch_pfa_xw_k<4, 2>(P, wpc, st); break;
     case 6: if (w32) launch_pfa_xw_k<6, 1>(P, wpc, st); else launch_pfa_xw_k<6, 2>(P, wpc, st); break;
-    default: if (w32) launch_pfa_xw_k<8, 1>(P, wpc, st); else launch_pfa_xw_k<8, 2>(P, wpc, st); break;
+    case 8: if (w32) launch_pfa_xw_k<8, 1>(P, wpc, st); else launch_pfa_xw_k<8, 2>(P, wpc, st); break;
+    case 10: if (w32) launch_pfa_xw_k<10, 1>(P, wpc, st); else launch_pfa_xw_k<10, 2>(P, wpc, st); break;
+    default: throw std::runtime_error("launch_pfa_xw: K must be 4, 6, 8 or 10");
   }
 }
 void launch_pfa(const GemvLaunch& P, int mode, int wpc, cudaStream_t st) {
@@ -531,11 +563,14 @@ void launch_pfa(const GemvLaunch& P, int mode, int wpc, cudaStream_t st) {
     switch (K) {
       case 4: if (wpc <= 4) launch_pfa_t<4, 2, 1, false, 3, true>(P, wpc, st); else launch_pfa_t<4, 2, 1, false, 1, true>(P, wpc, st); break;
       case 6: if (wpc <= 4) launch_pfa_t<6, 2, 1, false, 3, true>(P, wpc, st); else launch_pfa_t<6, 2, 1, false, 1, true>(P, wpc, st); break;
-      default: launch_pfa_t<8, 2, 1, false, 3, true>(P, wpc, st); break;
+      case 8: launch_pfa_t<8, 2, 1, false, 3, true>(P, wpc, st); break;
+      case 10: launch_pfa_t<10, 2, 1, false, 3, true>(P, wpc, st); break;
+      default: throw std::runtime_error("launch_pfa: K must be 4, 6, 8 or 10");
     }
     return;
   }
   const int K = pfa_k(P); if (!K) throw std::runtime_error("launch_pfa: launch not eligible");
+  if (K != 4 && K != 6 && K != 8) throw std::runtime_error("launch_pfa: K = 10 needs an exact-sum launch");
 #define PFA_BY_K(LNF, FOLD, XG, LB) do { switch (K) { case 4: launch_pfa_t<4, LNF, FOLD, XG, LB>(P, wpc, st); break; \
     case 6: launch_pfa_t<6, LNF, FOLD, XG, LB>(P, wpc, st); break; default: launch_pfa_t<8, LNF, FOLD, XG, LB>(P, wpc, st); break; } } while (0)
   if (mode == 0) { if (wpc <= 0) wpc = 8; PFA_BY_K(1, 0, false, 0); }

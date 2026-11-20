@@ -53,7 +53,7 @@ struct Container {
       d.stream_bytes = t.at("stream_bytes").get<uint64_t>(); d.bias_off = t.value("bias_off", (uint64_t)0); d.proxy = t.value("proxy", 0.f);
       if (t.contains("rar") && !t.at("rar").is_null()) { const json& r = t.at("rar"); d.has_rar = true;
         d.rar = RarDesc{r.at("tile_rows").get<int>(), r.at("tiles").get<int>(), r.at("k_off").get<uint64_t>(), r.at("off_off").get<uint64_t>()}; }
-      if (d.d != 2 || d.T != 256 || d.L < 8 || d.L > 14 || d.bits < 4 || d.bits > 8 || (d.start != "zero" && d.start != "carry") || d.cols % 256)
+      if (d.d != 2 || d.T != 256 || d.L < 8 || d.L > 14 || d.bits < 4 || (d.bits > 8 && d.bits != 10) || (d.start != "zero" && d.start != "carry") || d.cols % 256)
         throw std::runtime_error("YSKN reader: unsupported/invalid tensor description: " + d.name);   
       tensors.push_back(d);
     }

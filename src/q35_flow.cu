@@ -272,6 +272,7 @@ __global__ void __launch_bounds__(64, MINB) q35_flow_mlp_kernel(Q35FlowMlpArgs A
 static int g_flow_grid = 0;
 
 static const FlowSched& flow_prep(Q35FlowMlpArgs& A) {
+  if (A.gu.seg[0].t.k_default > 8 || A.gu.seg[1].t.k_default > 8 || A.dn.seg[0].t.k_default > 8) throw std::runtime_error("flow: K = 10 is not supported");
   const int ctas_seg = A.gu.seg[0].t.N / 16 / FUW, ctas_dn = A.dn.seg[0].t.N / 16 / FUW;
   const int G_gu = A.gu.seg[0].t.Kc / 512, G_dn = A.dn.seg[0].t.Kc / 512;
   A.nwe_gu = std::min(A.gu.seg[0].t.n_workers, G_gu); A.nwe_dn = std::min(A.dn.seg[0].t.n_workers, G_dn);

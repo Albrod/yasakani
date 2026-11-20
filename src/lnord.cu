@@ -42,6 +42,11 @@ template <int K> __device__ __forceinline__ unsigned lno_field(const unsigned* w
   if (sh + FB > 32) v |= w[wi + 1] << (32 - sh);
   if constexpr (FB >= 32) return v; else return v & ((1u << FB) - 1u);
 }
+// K = 10 (5 bits per weight): the 12-bit table index at bit o of a lane-row stream of 10 words (o + 12 <= 320; o is a constant after unrolling)
+__device__ __forceinline__ unsigned lno10_win(const unsigned* r, int o) {
+  const int wi = o >> 5, sh = o & 31;
+  return (sh <= 20 ? (r[wi] >> sh) : __funnelshift_r(r[wi], r[wi + 1], sh)) & 0xFFFu;
+}
 __device__ __forceinline__ void lno_mma(int* d, const unsigned* a, uint2 b) {
   asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
@@ -83,7 +88,8 @@ void lnord_build(const uint4* frag, int N, int Kc, int K, uint4* out, cudaStream
     case 4: lnord_build_kernel<4><<<nb, 256, 0, st>>>(frag, N, Kc, out); break;
     case 6: lnord_build_kernel<6><<<nb, 256, 0, st>>>(frag, N, Kc, out); break;
     case 8: lnord_build_kernel<8><<<nb, 256, 0, st>>>(frag, N, Kc, out); break;
-    default: throw std::runtime_error("lnord_build: K must be 4, 6 or 8");
+    case 10: lnord_build_kernel<10><<<nb, 256, 0, st>>>(frag, N, Kc, out); break;
+    default: throw std::runtime_error("lnord_build: K must be 4, 6, 8 or 10");
   }
 }
 
@@ -300,11 +306,20 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
     unsigned q0 = tig ? (nbv & TM) : 0u, q1 = tig ? (nbv >> T) : 0u;   
     #pragma unroll
     for (int m = 0; m < 8; ++m) {
+      unsigned A[4];
+      if constexpr (K == 10) {   // K = 10: indices = 12-bit windows at 40m-2+10j (j = 0..3) of each row's stream; m = 0, j = 0 takes the carry
+        const unsigned* r1 = w + K;
+        const unsigned a0 = m ? lno10_win(w, 40 * m - 2) : (q0 | ((w[0] & 0x3FFu) << 2)), b0 = m ? lno10_win(r1, 40 * m - 2) : (q1 | ((r1[0] & 0x3FFu) << 2));
+        A[0] = unsigned(s_lut[a0]) | (unsigned(s_lut[lno10_win(w, 40 * m + 8)]) << 16);
+        A[2] = unsigned(s_lut[lno10_win(w, 40 * m + 18)]) | (unsigned(s_lut[lno10_win(w, 40 * m + 28)]) << 16);
+        A[1] = unsigned(s_lut[b0]) | (unsigned(s_lut[lno10_win(r1, 40 * m + 8)]) << 16);
+        A[3] = unsigned(s_lut[lno10_win(r1, 40 * m + 18)]) | (unsigned(s_lut[lno10_win(r1, 40 * m + 28)]) << 16);
+      } else {
       const unsigned f0 = lno_field<K>(w, m), f1 = lno_field<K>(w + K, m);   
       const unsigned p10 = f0 & PM, p20 = f0 >> (2 * K), p11 = f1 & PM, p21 = f1 >> (2 * K);
-      unsigned A[4];
       A[0] = pair_a(p10, q0); A[2] = pair_a(p20, p10 >> TS); A[1] = pair_a(p11, q1); A[3] = pair_a(p21, p11 >> TS);
       q0 = p20 >> TS; q1 = p21 >> TS;
+      }
       #pragma unroll
       for (int nb = 0; nb < NB; ++nb) {
         if ((m & 1) == 0) xb[nb] = xp[nb] ? __ldg(xp[nb] + (LO ? (m >> 1) * 32 : (m >> 1))) : make_uint4(0u, 0u, 0u, 0u);   
@@ -390,7 +405,10 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
 static int lnord_k(const GemvLaunch& P, bool xw = false) {          
   if (P.draft || P.e_fuse || P.M < 1 || P.M > 64 || (P.xsum && P.M > 16 && (!xw || P.M > 32 || P.xsm_part || P.lo)) || P.n_seg < 1) return 0;
   if (P.f_mode && (P.M != 1 || !P.xsum || P.xsm_part || P.n_seg != 1 || P.seg[0].t.N % 512 || P.seg[0].t.Kc / 512 > 64)) return 0;
-  const int K = P.seg[0].t.k_default; if (K != 4 && K != 6 && K != 8) return 0;
+  const int K = P.seg[0].t.k_default;
+  // K = 10 only for exact-sum passes with atomic partials: 1..16 rows (LO 1..8, FIN 1, else the 16-row shape)
+  // and the wide pass of 17..32 rows (xw, the 32-row shape); anything else is not eligible, and every caller then throws
+  if (K != 4 && K != 6 && K != 8 && !(K == 10 && P.xsum && !P.xsm_part && (P.M <= 16 || (xw && P.M <= 32 && !P.lo)))) return 0;
   for (int s = 0; s < P.n_seg; ++s) { const TensorDev& t = P.seg[s].t;
     if (!t.lno || t.k_default != K || t.tile_k || t.group_worker || (t.N % 16) || (t.Kc % 512)) return 0; }
   return K;
@@ -440,12 +458,34 @@ template <int K> static void launch_lno_m(const GemvLaunch& P, cudaStream_t st) 
   if (P.M <= 8 && cfg == 2) { launch_lno<K, 8, 4, 8>(P, st); return; }
   if (P.M <= 8) launch_lno<K, 8>(P, st); else if (P.M <= 16) launch_lno<K, 16>(P, st); else if (P.M <= 32) launch_lno<K, 32>(P, st); else launch_lno<K, 64>(P, st);
 }
+// The K = 10 shapes.  The integer sums do not depend on the shape.
+constexpr int LO10_MB2 = 6;                                          // blocks per SM of the 2..8-row LO shape (4 warps)
+template <int MT, int UWX, int MBX, bool LO, bool FIN> static void launch_lno10_t(const GemvLaunch& P0, cudaStream_t st) {
+  constexpr int uw = UWX ? UWX : lno_uw<MT>();
+  GemvLaunch P = P0; P.prew = lno_prew_env(); P.pre = lno_pre_env(); int ctas = 0;
+  for (int s = 0; s < P.n_seg; ++s) { P.seg[s].cta_begin = ctas; ctas += (P.seg[s].t.N / 16 + uw - 1) / uw; }
+  launch_k(lnord_kernel<10, MT, true, 1, 1, FIN, UWX, MBX, LO>, dim3(ctas, P.max_workers), dim3(uw * 32), 0, st, P);
+}
+static void launch_lno10(const GemvLaunch& P, cudaStream_t st) {
+  if (!P.xsum || P.xsm_part || P.M < 1 || P.M > 32) throw std::runtime_error("launch_lnord: K = 10 needs an exact-sum pass of 1..32 rows");
+  if (lno_look_env() > 1 || lno_nr_env() > 1) throw std::runtime_error("launch_lnord: K = 10 has no YSKN_LNO_LOOK / YSKN_LNO_XSMR shapes");
+  if (P.f_mode) { if (P.M != 1 || P.lo) throw std::runtime_error("launch_lnord: K = 10 FIN needs one row");
+    launch_lno10_t<8, 0, 0, false, true>(P, st); return; }
+  if (P.lo) { if (P.M > 8) throw std::runtime_error("launch_lnord: LO needs <= 8 rows");
+    const int cfg = P.lno_cfg >= 0 ? P.lno_cfg : lno_cfg_of(P.M);
+    if (cfg == 2) launch_lno10_t<8, 4, LO10_MB2, true, false>(P, st); else launch_lno10_t<8, 2, 11, true, false>(P, st);   // cfg 0 / 1: the 2-warp shape
+    return; }
+  if (P.M > 16) { launch_lno10_t<32, 0, 0, false, false>(P, st); return; }   // 17..32 rows: the wide pass (= lnord_kernel<K, 32, true, 1>)
+  launch_lno10_t<16, 0, 0, false, false>(P, st);                     // 1..16 rows without LO
+}
 void launch_lnord_xw(const GemvLaunch& P, cudaStream_t st) {
   if (!lnord_xw_eligible(P)) throw std::runtime_error("launch_lnord_xw: launch not eligible");
   switch (lnord_k(P, true)) {
     case 4: launch_lno_m<4>(P, st); break;
     case 6: launch_lno_m<6>(P, st); break;
-    default: launch_lno_m<8>(P, st); break;
+    case 8: launch_lno_m<8>(P, st); break;
+    case 10: launch_lno10(P, st); break;
+    default: throw std::runtime_error("launch_lnord_xw: K must be 4, 6, 8 or 10");
   }
 }
 void launch_lnord(const GemvLaunch& P, cudaStream_t st) {
@@ -453,6 +493,7 @@ void launch_lnord(const GemvLaunch& P, cudaStream_t st) {
     case 4: launch_lno_m<4>(P, st); break;
     case 6: launch_lno_m<6>(P, st); break;
     case 8: launch_lno_m<8>(P, st); break;
+    case 10: launch_lno10(P, st); break;
     default: throw std::runtime_error("launch_lnord: launch not eligible");
   }
 }

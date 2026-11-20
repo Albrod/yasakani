@@ -50,7 +50,7 @@ DevTensor Model::upload_linear(const TensorDesc& d, int Mmax, int want_workers, 
     const int wps = 4 * d.bits; const size_t nwords = (size_t)rows * seqs * wps;
     uint32_t* dw = dev_copy<uint32_t>(words, nwords * 4); load_check(cudaMalloc(&t.frag, nwords * 4), "cudaMalloc");
     load_check((cudaError_t)yskn_repack_warp_to_frag(dw, (uint32_t*)t.frag, rows, seqs, wps, nullptr), "repack"); load_check(cudaDeviceSynchronize(), "repack"); cudaFree(dw);
-    t.tiles_by_k.assign(9, {}); for (int i = 0; i < ntiles; ++i) t.tiles_by_k[d.bits].push_back(i); t.kmax = d.bits;
+    t.tiles_by_k.assign(11, {}); for (int i = 0; i < ntiles; ++i) t.tiles_by_k[d.bits].push_back(i); t.kmax = d.bits;
   } else {
     const uint8_t* kt = c.at<uint8_t>(d.rar.k_off); const uint64_t* off = c.at<uint64_t>(d.rar.off_off);
     size_t total_u4 = 0; std::vector<uint64_t> toff(ntiles); std::vector<uint8_t> tk(ntiles);
@@ -59,7 +59,7 @@ DevTensor Model::upload_linear(const TensorDesc& d, int Mmax, int want_workers, 
     for (int i = 0; i < ntiles; ++i) { const int wps = 4 * tk[i]; const size_t nw = (size_t)64 * seqs * wps;
       uint32_t* dw = dev_copy<uint32_t>(words + off[i], nw * 4); load_check((cudaError_t)yskn_repack_warp_to_frag(dw, (uint32_t*)(t.frag + toff[i]), 64, seqs, wps, nullptr), "repack"); load_check(cudaDeviceSynchronize(), "repack"); cudaFree(dw); }
     t.tile_off = dev_copy<uint64_t>(toff.data(), ntiles * 8); t.tile_k = dev_copy<uint8_t>(tk.data(), ntiles);
-    t.tiles_by_k.assign(9, {}); t.kmax = 0; for (int i = 0; i < ntiles; ++i) { t.tiles_by_k[tk[i]].push_back(i); t.kmax = std::max(t.kmax, (int)tk[i]); }
+    t.tiles_by_k.assign(11, {}); t.kmax = 0; for (int i = 0; i < ntiles; ++i) { t.tiles_by_k[tk[i]].push_back(i); t.kmax = std::max(t.kmax, (int)tk[i]); }
   }
   
   const int G = cols / 512; int nw = force_workers > 0 ? std::min(G, force_workers) : std::max(1, std::min(G, (int)std::ceil((double)want_workers / ntiles)));
@@ -77,6 +77,7 @@ void Model::upload_embedding(const TensorDesc& d) {
 }
 void Model::load(const std::string& path, int max_ctx_, int Mmax) {
   c.open(path); cfg = c.model; max_ctx = ((max_ctx_ + 63) / 64) * 64;
+  for (const TensorDesc& d : c.tensors) if (d.bits > 8) throw std::runtime_error("K = 10 (" + d.name + "): only the qwen3_5 engine reads 5-bit matrices");
   { int dev = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }   // the current GPU, not device 0
   int want = sm_count * 8;                                            
   { const char* e = std::getenv("YSKN_GEMV_WANT"); if (e && std::atoi(e) > 0) want = std::atoi(e); }   

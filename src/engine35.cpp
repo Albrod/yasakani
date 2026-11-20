@@ -350,6 +350,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
       if (d.role != "embedding" || d.layout != "row" || d.rows != V_ || d.cols != H_ || d.physical_rows != V_ || d.L != 12 || d.start != "zero" ||
           d.has_rot_out || d.rot_in.kind != "H512" || d.has_rar || d.stream_bytes != nwords * 4)
         throw std::runtime_error("qwen3_5 engine: unsupported coded embedding (role embedding, row layout, L 12, zero start, H512 input rotation)");
+      if (d.bits > 8) throw std::runtime_error("qwen3_5 engine: K = 10 is read for matrices only, not for the embedding");
       emb_K_ = d.bits;
       emb_codes_ = static_cast<uint32_t*>(shared35_buffer(shared_weights_, "embedding/codes", nwords * 4, [&](void* p) {
         upload_weight35(p, m_.c.at<uint32_t>(d.stream_off), nwords * 4); }));
@@ -363,6 +364,7 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
         if (t.role != "embedding" || t.layout != "row" || t.rows != V_ || t.cols != H_ || t.physical_rows != V_ || t.L != 12 || t.start != "zero" ||
             t.has_rot_out || t.rot_in.kind != d.rot_in.kind || t.rot_in.sign_offset != d.rot_in.sign_offset || t.has_rar || t.stream_bytes != nw2 * 4)
           throw std::runtime_error("qwen3_5 engine: unsupported residual embedding table");
+        if (t.bits > 8) throw std::runtime_error("qwen3_5 engine: K = 10 is read for matrices only, not for the embedding");
         const bool third = t.name == "embed_tokens.res2";
         uint32_t*& codes = third ? emb3_codes_ : emb2_codes_; uint16_t*& lut = third ? emb3_lut_ : emb2_lut_; uint16_t*& sc = third ? emb3_sc_ : emb2_sc_;
         (third ? emb3_K_ : emb2_K_) = t.bits; codes = dz35<uint32_t>(nw2 * 4); upload_weight35(codes, m_.c.at<uint32_t>(t.stream_off), nw2 * 4);
@@ -2024,7 +2026,7 @@ bool Engine35::layer_prepare() {
                                       : std::vector<DevTensor*>{&Y.qkv,&Y.z,&Y.out,&Y.gate,&Y.up,&Y.down};
     size_t sum=0,big=0;
     for (auto* t:ts) { const auto& d=t->dev;
-      if (!d.lno || !d.lut8 || d.tile_k || d.group_worker || d.N%16 || d.Kc%512 || (d.k_default!=4 && d.k_default!=6 && d.k_default!=8)) {
+      if (!d.lno || !d.lut8 || d.tile_k || d.group_worker || d.N%16 || d.Kc%512 || (d.k_default!=4 && d.k_default!=6 && d.k_default!=8 && d.k_default!=10)) {
         layer_unavailable_=true; return false;
       }
       size_t z=(size_t)d.N*d.Kc;sum+=z;big=std::max(big,z);
