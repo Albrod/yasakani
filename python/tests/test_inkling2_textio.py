@@ -2,6 +2,7 @@
 # Copyright (c) 2026 the YASAKANI authors
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 
@@ -11,14 +12,15 @@ from yasakani.chat import clean_messages
 from yasakani.runtime import ModelPack
 from yasakani.textio import ChatFormatter, Inkling2OutputStream
 
-INK2_DIR = Path("/home/au/models/Inkling-2-Mini")
-LOCAL_INK2_DIR = Path("/Volumes/w/models/Inkling-2-Mini")
+# A folder of the published Inkling-2 Mini download (without yasakani.json); the second test is skipped when it is not set.
+INK2_DIR_ENV = "YASAKANI_TEST_INK2_HF_DIR"
 
 
 def _model_dir() -> Path | None:
-    for p in (INK2_DIR, LOCAL_INK2_DIR):
-        if (p / "tokenizer.json").is_file() and (p / "chat_template.jinja").is_file():
-            return p
+    v = os.environ.get(INK2_DIR_ENV)
+    p = Path(v) if v else None
+    if p is not None and (p / "tokenizer.json").is_file() and (p / "chat_template.jinja").is_file():
+        return p
     return None
 
 
@@ -38,7 +40,7 @@ class Inkling2TextIoTest(unittest.TestCase):
     def test_formatter_and_stream_against_model_files(self) -> None:
         mdir = _model_dir()
         if mdir is None:
-            self.skipTest("Inkling-2-Mini files not present")
+            self.skipTest("set %s to a folder of the Inkling-2 Mini download" % INK2_DIR_ENV)
         pack = ModelPack.load(mdir, hf_inkling2=True)
         self.assertTrue(pack.is_hf_inkling2)
         self.assertEqual(pack.vocab_size, 200058)
