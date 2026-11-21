@@ -59,9 +59,9 @@ A "pass" is one run through the whole 27B model (64 layers). YASAKANI works on t
   ([7. Does the output change?](#7-does-the-output-change)).
 * The more predictable the content, the more tokens are confirmed. This is why the numbers in the speed table of the README differ so much
   from task to task.
-* **Check it yourself.** `quickstart/lookahead_check.py` (item 2 of the quickstart menu) writes the four tasks of this table on your PC,
-  without look-ahead and with the shipping settings, and prints the time of one pass, the tokens confirmed per pass, the speed, and
-  whether the two texts are the same.
+* **Check it yourself.** `quickstart/lookahead_check.py` ("compare look-ahead on and off" in the quickstart menu;
+  `START.cmd --action compare` runs it directly) writes the four tasks of this table on your PC, without look-ahead and with the
+  shipping settings, and prints the time of one pass, the tokens confirmed per pass, the speed, and whether the two texts are the same.
 
 ## 2. The shape of the model
 

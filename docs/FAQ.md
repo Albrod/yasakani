@@ -528,15 +528,18 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 it offers 0.2.0. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.2.0.zip`) by hand once and run `START.cmd`; the models are kept.
 
-* **The check.** At most once a day, when the menu opens, the quickstart first prints that it asks github.com, then sends one HTTPS request:
+* **The check.** At most once a day, before it shows the menu or before it opens the browser page directly (from the second run on,
+  `START.cmd` does that without a menu), the quickstart first prints that it asks github.com, then sends one HTTPS request:
   `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest`, with the User-Agent `yasakani-quickstart` and nothing else about
   your PC (no ID, no version of Windows, no GPU, no prompt). It waits at most 5 seconds; if GitHub cannot be reached, it says so in one line and
   goes on. Pre-releases are never offered. GitHub sees your IP address, as with any download.
 * **Turning it off.** `START.cmd --no-update-check` turns the daily check off and remembers it (in `quickstart_state.json`);
   `START.cmd --update-check` turns it on again. The environment variable `YASAKANI_NO_UPDATE_CHECK=1` also turns it off. The menu item
   “check for a new version” and `START.cmd --action update` still work when you choose them.
-* **Nothing changes without a yes.** When there is a newer version, the quickstart shows the old and new version and the release page, and
-  asks. In the browser chat, a bar offers **Update** and **Later**; the page itself sends nothing to GitHub.
+* **Nothing changes without a yes.** When there is a newer version, the quickstart shows the old and new version. Before the menu it
+  also shows the release page and asks. When it opens the browser page directly, it asks nothing in the black window; it only prints
+  how to update (the button of the page, or `START.cmd --action update`). In the browser page, a bar offers **Update** and **Later**,
+  and nothing changes until you press **Update**. The page itself sends nothing to GitHub.
 * **What an update does.** It downloads the quickstart ZIP and `SHA256SUMS.txt` of that release, only from
   `https://github.com/yasakani-dev/yasakani/releases/download/<tag>/`, compares the ZIP's SHA-256 with `SHA256SUMS.txt`, and accepts only
   the known start files (no folders, no other files). It copies the current start files to `backup\<old version>\`, puts the new ones in

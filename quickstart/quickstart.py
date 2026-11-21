@@ -8,16 +8,23 @@ Double-click START.cmd.  This script then
   4. makes a private Python environment in this folder and installs the package,
   5. downloads the model folder from Hugging Face,
   6. runs `yasakani info`, `yasakani verify` and `yasakani selfcheck`,
-  7. and offers: measure the speed, compare look-ahead on and off, chat in your browser or in the terminal, or start the
-     local server.
+  7. and offers: open the page in your browser (chat, speed test, API address, model switch), measure the speed, compare
+     look-ahead on and off, chat in the terminal, or start the local server.
 
-The browser chat (chat.html) is served by this script on 127.0.0.1 only.  The script passes the requests of that page on to
-`yasakani serve`, which runs on this computer too.  Nothing is sent anywhere else.
+From the second run on (the chosen model passed the checks of step 6 in an earlier run) step 7 opens the browser page directly,
+without the model question and the menu.  START.cmd --menu shows the menu again.
 
-Updates: at most once a day, when the menu is shown, the script asks GitHub's API for the latest release (one HTTPS request
-without anything about this computer; it says so first, and --no-update-check turns it off).  Nothing is updated without a yes.  An
-update downloads the start files of that release, checks them against its SHA256SUMS.txt, keeps the current ones in backup/<version>/,
-puts the new ones in place and runs the new quickstart.py, which installs its own engine as usual.  --action rollback goes back.
+The browser page (chat.html) is served by this script on 127.0.0.1 only.  It opens as soon as `yasakani serve` is started and shows
+the progress while the model loads (GET /webchat/status).  The script passes the requests of that page on to `yasakani serve`, which
+runs on this computer too.  Nothing is sent anywhere else.  The quit button and the model switch of the page are POSTs to this
+script (/webchat/shutdown, /webchat/switch_model) that need this address in Host and Origin and a one-time token; the script then
+stops `yasakani serve` and ends, or starts it again with the other downloaded model on the same address.
+
+Updates: at most once a day, when the menu is shown or the browser page is opened directly, the script asks GitHub's API for the
+latest release (one HTTPS request without anything about this computer; it says so first, and --no-update-check turns it off).
+Nothing is updated without a yes (at the menu: the question; in the page: the update button).  An update downloads the start files
+of that release, checks them against its SHA256SUMS.txt, keeps the current ones in backup/<version>/, puts the new ones in place and
+runs the new quickstart.py, which installs its own engine as usual.  --action rollback goes back.
 
 Everything is kept inside the folder this file is in.  Nothing is installed system-wide.
 Run it again any time: finished steps are skipped.
@@ -61,6 +68,16 @@ START_FILES = ("LICENSE", "README.txt", "START.cmd", "chat.html", "lookahead_che
 MAX_START_FILE, MAX_START_ZIP, MAX_SUMS, MAX_API = 4 << 20, 16 << 20, 64 << 10, 1 << 20
 CHECK_EVERY = 24 * 3600
 UPDATE_RC = 75                      # run_web: the page asked for the update; the server is stopped
+SWITCH_RC = 76                      # run_web: the page picked another downloaded model (a.web_switch); the server is stopped
+QUIT_RC = 77                        # run_web: the quit button of the page; the server is stopped and the launcher ends
+CONTROL_MAX_BODY = 4096             # the body of a control request of the page (/webchat/shutdown, /webchat/switch_model)
+DEFAULT_MODEL_ID = "qwen3.8-27b"    # the model's id in `yasakani serve`; once it is ready the page gets the engine's own answer
+MODEL_ID_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}")    # the engine's id goes to the page only when it is a plain name
+GPU_CACHE_SECONDS, GPU_QUERY_TIMEOUT = 2.0, 5        # the GPU line of the page: nvidia-smi at most this often, and its time limit
+GPU_SETTLE_SECONDS, GPU_SETTLE_MIB = 15.0, 1024      # a model switch waits this long for the GPU memory to come back this near
+FAIL_GRACE = 5.0                    # seconds the page's server waits for a page to ask after `yasakani serve` ended by itself
+END_GRACE = 2.0                     # seconds the page's server stays after Enter or the end of the server, so the page can say so
+REOPEN_SECONDS = 10.0               # a model switch: how long the page's port is tried again
 PAGE_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
             "base-uri 'none'; form-action 'none'")
 MODELS = {
@@ -68,6 +85,10 @@ MODELS = {
     "speed": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-speed", "need_gb": 14},
     "max": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-max-quality", "need_gb": 20},
 }
+MODEL_ORDER = ("quality", "speed", "max")            # the order of the model question (1, 2, 3)
+ACTIONS = ("auto", "menu", "bench", "compare", "web", "chat", "serve", "none", "update", "rollback")
+MENU = {"1": "web", "2": "bench", "3": "compare", "4": "chat", "5": "serve", "7": "update"}   # "6" and anything else: quit
+MENU_DEFAULT = "1"                  # Enter alone opens the page in the browser
 
 # ---- GPUs (0.1.3).  The engine is built for compute capability 8.6, 8.9 and 12.x (RTX 30, 40 and 50 series) and tested on the
 # RTX 5090 only.  The context rule is the one of yasakani/gpu.py, which the package applies each time it opens the model; it is
@@ -292,41 +313,75 @@ T = {
     },
     "menu": {
         "ja": "\n何をしますか？\n"
-              "  1) 速さを測る             （yasakani bench）\n"
-              "  2) 先読みあり・なしを比べる （技術の解説の数字を、このパソコンで確かめます。1 分ほど）\n"
-              "  3) ブラウザーでチャット     （ブラウザーが開きます）\n"
-              "  4) この画面でチャット       （yasakani chat。終わるときは /exit）\n"
-              "  5) サーバーを起動           （OpenAI 互換。http://127.0.0.1:8765/v1 。止めるときは Ctrl+C）\n"
+              "  1) ブラウザーで開く〈おすすめ〉 （チャット・速さの測定・モデルの切り替え）\n"
+              "  2) 速さを測る                   （yasakani bench）\n"
+              "  3) 先読みあり・なしを比べる     （技術の解説の数字を、このパソコンで確認します。1 分ほど）\n"
+              "  4) この画面でチャット           （yasakani chat。終わる時は /exit）\n"
+              "  5) サーバーを起動               （OpenAI 互換。http://127.0.0.1:8765/v1 。止める時は Ctrl+C）\n"
               "  6) 終わる\n"
-              "番号を入れて Enter: ",
+              "番号を入れて Enter [{d}]: ",
         "en": "\nWhat next?\n"
-              "  1) measure the speed             (yasakani bench)\n"
-              "  2) compare look-ahead on and off (checks the numbers of the technical notes on this PC; about a minute)\n"
-              "  3) chat in the browser           (a browser window opens)\n"
-              "  4) chat in this window           (yasakani chat; type /exit to leave)\n"
-              "  5) start the server              (OpenAI-compatible, http://127.0.0.1:8765/v1 ; Ctrl+C stops it)\n"
+              "  1) open in the browser (recommended)  (chat, speed test, model switch)\n"
+              "  2) measure the speed                  (yasakani bench)\n"
+              "  3) compare look-ahead on and off      (checks the numbers of the technical notes on this PC; about a minute)\n"
+              "  4) chat in this window                (yasakani chat; type /exit to leave)\n"
+              "  5) start the server                   (OpenAI-compatible, http://127.0.0.1:8765/v1 ; Ctrl+C stops it)\n"
               "  6) quit\n"
-              "Type the number and press Enter: ",
+              "Type the number and press Enter [{d}]: ",
+    },
+    "direct": {
+        "ja": "{m}で、ブラウザーの画面を開きます（このモデルの点検は済んでいます）。\n"
+              "メニューを出す時は、このフォルダーで開いたコマンドプロンプトで START.cmd --menu と打ってください。",
+        "en": "Opening the page in your browser with the {m} (this model passed its checks before).\n"
+              "For the menu, type START.cmd --menu in a command prompt opened in this folder.",
     },
     "web_boot": {
         "ja": "サーバーを起動します（モデルの読み込みに 1 分ほどかかることがあります）。",
         "en": "Starting the server (loading the model can take about a minute).",
     },
     "web_ready": {
-        "ja": "\nブラウザーでチャットできます: {u}\n"
-              "（ブラウザーが自動で開きます。開かないときは、上のアドレスをブラウザーに入れてください）\n"
-              "終わるときは、この画面で Enter を押してください。",
-        "en": "\nChat in your browser: {u}\n"
-              "(A browser window opens by itself. If it does not, type the address above into your browser.)\n"
-              "Press Enter in this window to stop.",
+        "ja": "\nブラウザーの画面を開きます: {u}\n"
+              "（開かない時は、上のアドレスをブラウザーに入れてください）\n"
+              "モデルの読み込みが終わると、そのままチャットできます。\n"
+              "終わる時は、ブラウザーの終了ボタンか、この画面で Enter を押してください。",
+        "en": "\nOpening the page in your browser: {u}\n"
+              "(If no browser window opens, type the address above into your browser.)\n"
+              "The chat works as soon as the model is loaded.\n"
+              "To stop, use the quit button of the page or press Enter in this window.",
     },
     "web_ready_manual": {
-        "ja": "\nブラウザーでチャットできます: {u}\n"
-              "（上のアドレスをブラウザーに入れてください）\n"
-              "終わるときは、この画面で Enter を押してください。",
-        "en": "\nChat in your browser: {u}\n"
-              "(Type the address above into your browser.)\n"
-              "Press Enter in this window to stop.",
+        "ja": "\nブラウザーで次のアドレスを開いてください: {u}\n"
+              "モデルの読み込みが終わると、そのままチャットできます。\n"
+              "終わる時は、ブラウザーの終了ボタンか、この画面で Enter を押してください。",
+        "en": "\nOpen this address in your browser: {u}\n"
+              "The chat works as soon as the model is loaded.\n"
+              "To stop, use the quit button of the page or press Enter in this window.",
+    },
+    "web_again": {
+        "ja": "\nブラウザーの画面はそのまま使えます: {u}\n"
+              "終わる時は、ブラウザーの終了ボタンか、この画面で Enter を押してください。",
+        "en": "\nThe page in your browser goes on at the same address: {u}\n"
+              "To stop, use the quit button of the page or press Enter in this window.",
+    },
+    "web_moved": {
+        "ja": "前のアドレスを使えないので、新しいアドレスで開きます。前のタブは閉じてください。",
+        "en": "The address used before is not free, so the page opens at a new address. Please close the old tab.",
+    },
+    "web_loaded": {
+        "ja": "モデルの読み込みが終わりました（{s} 秒）。ブラウザーでチャットできます。",
+        "en": "The model is loaded ({s} s). The chat in the browser is ready.",
+    },
+    "web_quit": {
+        "ja": "ブラウザーの終了ボタンが押されました。サーバーを止めます。",
+        "en": "The quit button of the page was pressed. Stopping the server.",
+    },
+    "web_switch": {
+        "ja": "ブラウザーの画面で{m}が選ばれました。サーバーを止めて、モデルを読み込み直します。",
+        "en": "The page picked the {m}. Stopping the server and loading that model.",
+    },
+    "switch_back": {
+        "ja": "{m}は点検に合格しなかったので、{o}に戻します。",
+        "en": "The {m} did not pass the checks, so going back to the {o}.",
     },
     "cmp_nofile": {
         "ja": "lookahead_check.py が見つかりません: {p}\nzip をもう一度展開してください。",
@@ -335,6 +390,10 @@ T = {
     "web_fail": {
         "ja": "サーバーを起動できませんでした。上のメッセージを確かめてください。",
         "en": "The server did not start. See the messages above.",
+    },
+    "web_died": {
+        "ja": "サーバーが途中で止まりました。上のメッセージを確認してください。",
+        "en": "The server stopped while it was running. See the messages above.",
     },
     "web_nopage": {
         "ja": "chat.html が見つかりません: {p}\nzip をもう一度展開してください。",
@@ -351,11 +410,19 @@ T = {
         "en": "Next time just double-click START.cmd again (finished steps are skipped).\n"
               "The settings for typing commands yourself are in {f}.",
     },
+    "again_direct": {
+        "ja": "次からは START.cmd をダブルクリックすると、ブラウザーの画面が直接開きます。\n"
+              "メニューを出す時は、このフォルダーで開いたコマンドプロンプトで START.cmd --menu と打ってください。\n"
+              "自分でコマンドを打つ時の設定は {f} に書きました。",
+        "en": "Next time, double-clicking START.cmd opens the page in your browser directly.\n"
+              "For the menu, type START.cmd --menu in a command prompt opened in this folder.\n"
+              "The settings for typing commands yourself are in {f}.",
+    },
     "bye": {"ja": "終了します。", "en": "Bye."},
     "stopped": {"ja": "中止しました。", "en": "Stopped."},
     "menu_update": {
-        "ja": "  7) 新しい版を確かめる       （github.com に問い合わせます）\n",
-        "en": "  7) check for a new version     (asks github.com)\n",
+        "ja": "  7) 新しい版を確認する           （github.com に問い合わせます）\n",
+        "en": "  7) check for a new version            (asks github.com)\n",
     },
     "upd_line": {
         "ja": "github.com に新しい版を問い合わせます（1 回だけ。このパソコンの情報は送りません。止めるときは --no-update-check）",
@@ -377,6 +444,12 @@ T = {
     "upd_later": {
         "ja": "更新しません。あとで更新するときは、メニューの 7 か START.cmd --action update です。",
         "en": "Not updating. To update later, use 7 in the menu or START.cmd --action update.",
+    },
+    "upd_page": {
+        "ja": "新しい版があります: {o} → {n}\n"
+              "更新する時は、ブラウザーの画面の更新ボタンを押すか、START.cmd --action update を使ってください。",
+        "en": "A new version is available: {o} -> {n}\n"
+              "To update, press the update button of the page or use START.cmd --action update.",
     },
     "upd_get": {"ja": "ダウンロード中: {u}", "en": "Downloading: {u}"},
     "upd_sha_ok": {"ja": "SHA-256 は、その版の SHA256SUMS.txt の値と同じです。", "en": "The SHA-256 matches the release's SHA256SUMS.txt."},
@@ -499,12 +572,55 @@ def save_state(path, st):
     os.replace(tmp, path)
 
 
-def ask(prompt, default=""):
+def ask(prompt, default="", eof=None):
+    """One typed line; Enter alone is ``default``.  At the end of the input (no keyboard: the input is closed, or a file that has
+    ended) it is ``eof`` when that is given, else ``default``."""
     try:
         s = input(prompt).strip()
     except EOFError:
-        s = ""
+        return default if eof is None else eof
     return s or default
+
+
+def menu_prompt(ui):
+    m = ui.t("menu", d=MENU_DEFAULT)
+    i = m.rfind("\n")                                   # the update item goes after the last item, above the prompt line
+    return m[:i + 1] + ui.t("menu_update") + m[i + 1:]
+
+
+def menu_choice(ui):
+    """Shows the menu.  -> "web", "bench", "compare", "chat", "serve", "update", or None for quit.  Enter alone is the first item;
+    the end of the input (no keyboard) is quit: otherwise the page and the server would be started again and again."""
+    return MENU.get(ask(menu_prompt(ui), MENU_DEFAULT, eof="6"))
+
+
+def flush_keys():
+    """Drops the keys that wait in the console.  Before the page's wait starts: a key typed during the steps before must not end the
+    page at once.  Before the menu comes back after the page: Enter alone is the first item of the menu, so a second Enter left over
+    would open the page again at once.  It is not called where this script ends, so keys typed for the next program stay."""
+    try:
+        import msvcrt
+    except ImportError:
+        return
+    if sys.stdin is not None and sys.stdin.isatty():
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+
+
+def direct_start(action, model, checked, model_dir=None):
+    """--action auto: True when the launcher opens the page in the browser at once, without the model question and the menu.  That
+    is when the chosen model passed the checks on this computer in an earlier run (``checked`` is models_ok of the saved state, read
+    before this run changes it) and no --model-dir is given.  Otherwise auto behaves as the menu: the first run, a model that was
+    never checked, a model folder of the user's own."""
+    return action == "auto" and not model_dir and model in MODELS and bool((checked or {}).get(model))
+
+
+def installed_models(home, downloaded, quality_fits, isfile=os.path.isfile):
+    """The models the page can switch between: those the quickstart downloaded into this home (models_downloaded of the state, and
+    the folder is still there) that fit this GPU, in the order of the model question."""
+    return [name for name in MODEL_ORDER
+            if (downloaded or {}).get(name) and (quality_fits or name == "speed")
+            and isfile(os.path.join(home, "models", name, "yasakani.json"))]
 
 
 def parse_gpus(text, fields=GPU_FIELDS):
@@ -1008,14 +1124,49 @@ def pick_port(preferred, avoid=()):
 
 
 class LocalServer(ThreadingHTTPServer):
-    """Listens on 127.0.0.1 only and never shares its port."""
+    """Listens on 127.0.0.1 only and never shares its port.  It remembers the connections it accepted: browsers keep theirs open,
+    and a thread of a stopped server would go on answering the page on such a connection.  close_connections() ends them (after a
+    model switch the next server listens on the same port, and the page must reach that one)."""
     allow_reuse_address = False
     daemon_threads = True
+
+    def __init__(self, *args, **kw):
+        self._conns, self._conns_lock, self._closing = set(), threading.Lock(), False
+        super().__init__(*args, **kw)
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
+
+    def get_request(self):
+        request, addr = super().get_request()
+        with self._conns_lock:
+            self._conns.add(request)
+        return request, addr
+
+    def shutdown_request(self, request):
+        with self._conns_lock:
+            self._conns.discard(request)
+        super().shutdown_request(request)
+
+    def close_connections(self):
+        """Ends every connection that is still open (call it after shutdown() and server_close()).  The thread of each one sees the
+        end of its connection and finishes."""
+        self._closing = True
+        with self._conns_lock:
+            conns = list(self._conns)
+        for c in conns:
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass                                    # the other side closed it first
+
+    def handle_error(self, request, client_address):
+        # a connection that broke (the browser went away, or close_connections() above) is not worth a traceback in the console
+        if self._closing or isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class UpdateRequest:
@@ -1038,18 +1189,191 @@ class UpdateRequest:
             self.token = None
             return True
 
+    def close(self):
+        """From here on the update button is not taken (the launcher leaves the page for another reason: the quit button, a model
+        switch, Enter, the end of the server).  -> False when the token was used or closed before."""
+        with self._lock:
+            was_open, self.token = self.token is not None, None
+            return was_open
 
-def make_web_handler(page, conf, engine_port, web_port, update=None):
+
+class ControlRequest:
+    """The quit button and the model switch of the chat page, made like UpdateRequest.  The page gets the one-time ``token`` from
+    /webchat/config and sends it in the X-YASAKANI-Control header of a POST to /webchat/shutdown or /webchat/switch_model; the
+    request must also name this address in Host and Origin.  The token works once, for one of the two requests.  After that this
+    server of the page takes no control request any more (the server that comes after a model switch has a token of its own)."""
+
+    HEADER = "X-YASAKANI-Control"
+
+    def __init__(self):
+        self.token = hashlib.sha256(os.urandom(32)).hexdigest()
+        self.event = threading.Event()                  # set when the answer to the accepted request has been written
+        self.action, self.model = None, None            # "shutdown", or "switch" and the model's name, once a request was accepted
+        self._lock = threading.Lock()
+
+    def take(self, token, action, model=None):
+        with self._lock:
+            if not self.token or not token or not hmac.compare_digest(self.token.encode(), token.encode("utf-8", "replace")):
+                return False
+            self.token, self.action, self.model = None, action, model
+            return True
+
+    def close(self):
+        """From here on no control request is accepted (the launcher leaves the page for another reason, e.g. Enter).  -> False
+        when the token was used or closed before."""
+        with self._lock:
+            was_open, self.token = self.token is not None, None
+            return was_open
+
+
+class WebSession:
+    """What the chat page is told about this run of `yasakani serve`: GET /webchat/status, and the part of /webchat/config that
+    the engine reports.  watch() asks the engine's /health in a thread of its own until the model is ready, so that neither a
+    request of the page nor the Enter key in the console ever waits for the engine."""
+
+    def __init__(self, model, proc=None, engine_port=None, installed=(), on_ready=None, clock=time.monotonic):
+        self.model, self.proc, self.engine_port = model, proc, engine_port
+        self.installed = tuple(installed)               # the models the page can switch between (empty: no switching)
+        self.on_ready, self._clock = on_ready, clock
+        self.t0 = clock()                               # `yasakani serve` was started just before
+        self.ready = False                              # /health said "ok" once
+        self.model_id, self.max_context = DEFAULT_MODEL_ID, None
+        self.leaving = None                             # "stopping" or "switching": the launcher itself ends this run
+        self.phase = None                               # "checking": the checks of a model switch run (open_check_server)
+        self.told_failed = threading.Event()            # a page was told "failed"
+        self._thread = None
+
+    def elapsed(self):
+        return round(max(0.0, self._clock() - self.t0), 1)
+
+    def state(self):
+        if self.leaving:
+            return self.leaving
+        if self.proc is not None and self.proc.poll() is not None:
+            return "failed"                             # the server ended and the launcher did not ask for it
+        return "ready" if self.ready else "loading"
+
+    def status(self):
+        s = {"state": self.state(), "elapsed": self.elapsed(), "model": self.model}
+        if self.phase:
+            s["phase"] = self.phase                     # only while there is something to add to the state
+        return s
+
+    def leave(self, state):
+        """The launcher stops `yasakani serve` now ("stopping") or changes the model ("switching").  The first call counts."""
+        if self.leaving is None:
+            self.leaving = state
+
+    def probe(self):
+        """Asks the engine once.  -> True when the model is ready; its context limit and its id are known then."""
+        if self.ready:
+            return True
+        try:
+            code, body, _ = get_json(self.engine_port, "/health")
+        except (OSError, http.client.HTTPException):
+            return False
+        if code != 200 or not isinstance(body, dict) or body.get("status") != "ok":
+            return False
+        ctx = body.get("max_context_tokens")
+        self.max_context = ctx if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0 else None
+        try:
+            code, body, _ = get_json(self.engine_port, "/v1/models")
+            data = body.get("data") if code == 200 and isinstance(body, dict) else None
+            first = data[0] if isinstance(data, list) and data else None
+            # a model folder of the user's own can report any text; the page shows the id and puts it into the samples for other
+            # programs (a command line among them), so only a plain name is passed on
+            if isinstance(first, dict) and isinstance(first.get("id"), str) and MODEL_ID_OK.fullmatch(first["id"]):
+                self.model_id = first["id"]
+        except (OSError, http.client.HTTPException):
+            pass                                        # the usual id stays
+        self.ready = True
+        return True
+
+    def watch(self, poll=0.5):
+        """Starts the thread that waits for the model (once).  It ends when the model is ready, when the server ended or when the
+        launcher leaves."""
+        if self._thread is not None or self.engine_port is None:
+            return
+
+        def run():
+            while not self.leaving and (self.proc is None or self.proc.poll() is None):
+                time.sleep(poll)                        # first too: a server that was just started does not listen yet
+                if self.probe():
+                    if self.on_ready is not None and not self.leaving:
+                        self.on_ready(self.elapsed())
+                    return
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+
+def _smi_quick(cmd, **kw):
+    kw["timeout"] = GPU_QUERY_TIMEOUT                   # a request of the page never waits a minute for nvidia-smi
+    return subprocess.run(cmd, **kw)
+
+
+class GpuWatch:
+    """The GPU line of the chat page: name, driver and memory of the GPU the engine runs on (the one step 1 picked), read from
+    nvidia-smi with the launcher's own parser, at most once in GPU_CACHE_SECONDS.  When nvidia-smi cannot be asked, the facts of
+    step 1 stay and the memory in use is None: a request of the page never fails for it."""
+
+    def __init__(self, gpu, query=None, ttl=GPU_CACHE_SECONDS, clock=time.monotonic):
+        self.gpu = dict(gpu or {})
+        self._query = query or (lambda: query_gpus(run=_smi_quick))
+        self._ttl, self._clock = ttl, clock
+        self._lock, self._at, self._value = threading.Lock(), None, None
+
+    def _read(self):
+        now = None
+        try:
+            for g in self._query():
+                same = g.get("uuid") == self.gpu["uuid"] if self.gpu.get("uuid") else g.get("index") == self.gpu.get("index")
+                if same:
+                    now = g
+                    break
+        except Exception:  # noqa: BLE001 - nvidia-smi is gone, slow or prints something else: the memory in use is not known
+            now = None
+        g = now or self.gpu
+        return {"name": g.get("name"), "driver": g.get("driver"), "total_mib": g.get("total"),
+                "used_mib": now.get("used") if now else None}
+
+    def get(self, fresh=False):
+        with self._lock:                                # one nvidia-smi at a time; the other requests wait for its answer
+            if fresh or self._at is None or self._clock() - self._at >= self._ttl:
+                self._value = self._read()
+                self._at = self._clock()
+            return dict(self._value)
+
+
+def make_web_handler(page, conf, engine_port, web_port, update=None, control=None, session=None, gpu=None):
     """The handler of the browser chat: the page, its settings, and three paths passed on to `yasakani serve`.
 
     Like `yasakani serve`, it answers only requests that name this address in ``Host`` and, if they carry an ``Origin``, come from
     this address - so a web page of another site that is open in the browser cannot talk to the model through it.  With ``update``
-    (an UpdateRequest) it also answers POST /webchat/update; without it that path does not exist."""
+    (an UpdateRequest) it also answers POST /webchat/update; without it that path does not exist.  In the same way ``control`` (a
+    ControlRequest) brings POST /webchat/shutdown and /webchat/switch_model, and ``session`` (a WebSession) GET /webchat/status.
+    ``gpu`` (a GpuWatch) gives the GPU line of /webchat/config.  ``engine_port`` None means that no `yasakani serve` runs now (the
+    checks of a model switch, open_check_server): api_base is null and the paths that are passed on answer 503."""
     own = ("127.0.0.1:%d" % web_port, "localhost:%d" % web_port)
     origins = tuple("http://" + h for h in own)
     if update is not None:
-        conf = dict(conf, update={"version": update.rel["version"], "page": update.rel["page"]}, update_token=update.token)
-    conf_bytes = json.dumps(conf).encode("utf-8")
+        conf = dict(conf, update={"version": update.rel["version"], "page": update.rel["page"]})
+    if control is not None and session is None:
+        session = WebSession(conf.get("model"))         # a control request is checked against the session's models
+    # the address of `yasakani serve` for other programs on this computer
+    api_base = "http://127.0.0.1:%d/v1" % engine_port if engine_port is not None else None
+
+    def config_bytes():
+        # built for every request: the tokens, the GPU memory and what the engine reported change while the page is open
+        c = dict(conf, api_base=api_base, model_id=DEFAULT_MODEL_ID, max_context_tokens=None, models_installed=[],
+                 control_token=control.token if control is not None else None,
+                 gpu=gpu.get() if gpu is not None else {"name": None, "driver": None, "total_mib": None, "used_mib": None})
+        if update is not None:
+            c["update_token"] = update.token            # null once it was used or the launcher is leaving the page
+        if session is not None:
+            c.update(model_id=session.model_id, max_context_tokens=session.max_context,
+                     models_installed=[{"name": m, "current": m == session.model} for m in session.installed])
+        return json.dumps(c).encode("utf-8")
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1076,6 +1400,7 @@ def make_web_handler(page, conf, engine_port, web_port, update=None):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")     # the page and its answers are never shown inside another page
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
             self.send_header("Referrer-Policy", "no-referrer")
             for k, v in extra:
@@ -1091,6 +1416,8 @@ def make_web_handler(page, conf, engine_port, web_port, update=None):
                        json.dumps({"error": {"message": message, "type": kind}}).encode("utf-8"), close=close)
 
         def _relay(self, method, path, body=None):
+            if engine_port is None:                     # no `yasakani serve` now (the checks of a model switch)
+                return self._error(503, "the model is being changed", "unavailable", close=True)
             conn = http.client.HTTPConnection("127.0.0.1", engine_port, timeout=900)
             started = False
             try:
@@ -1139,7 +1466,13 @@ def make_web_handler(page, conf, engine_port, web_port, update=None):
             if path in ("/", "/index.html"):
                 return self._send(200, "text/html; charset=utf-8", page, (("Content-Security-Policy", PAGE_CSP),))
             if path == "/webchat/config":
-                return self._send(200, "application/json; charset=utf-8", conf_bytes)
+                return self._send(200, "application/json; charset=utf-8", config_bytes())
+            if path == "/webchat/status" and session is not None:
+                status = session.status()
+                self._send(200, "application/json; charset=utf-8", json.dumps(status).encode("utf-8"))
+                if status["state"] == "failed":
+                    session.told_failed.set()           # run_web keeps this server until a page has heard it (or FAIL_GRACE)
+                return None
             if path in ("/health", "/v1/models"):
                 return self._relay("GET", path)
             if path == "/favicon.ico":
@@ -1150,9 +1483,12 @@ def make_web_handler(page, conf, engine_port, web_port, update=None):
             why = self._refused()
             if why:
                 return self._error(403, "forbidden: " + why, "forbidden", close=True)
-            if update is not None and self.path.split("?", 1)[0] == "/webchat/update":
+            path = self.path.split("?", 1)[0]
+            if update is not None and path == "/webchat/update":
                 return self._update()
-            if self.path.split("?", 1)[0] != "/v1/chat/completions":
+            if control is not None and path in ("/webchat/shutdown", "/webchat/switch_model"):
+                return self._control(path == "/webchat/switch_model")
+            if path != "/v1/chat/completions":
                 return self._error(404, "not found", "not_found", close=True)
             try:
                 n = int(self.headers.get("Content-Length", "") or -1)
@@ -1179,6 +1515,41 @@ def make_web_handler(page, conf, engine_port, web_port, update=None):
                        json.dumps({"status": "updating", "version": update.rel["version"]}).encode("utf-8"), close=True)
             self.wfile.flush()
             update.event.set()
+
+        def _control(self, switch):
+            # the order: Origin, the size, the request itself (a refused request leaves the token valid), then the token
+            if (self.headers.get("Origin") or "").lower() not in origins:      # as /webchat/update: Origin is required here
+                return self._error(403, "forbidden: origin", "forbidden", close=True)
+            try:
+                n = int(self.headers.get("Content-Length", "") or 0)
+            except ValueError:
+                n = -1
+            if n < 0 or n > CONTROL_MAX_BODY:
+                return self._error(413, "request body too large", "invalid_request_error", close=True)
+            body = self.rfile.read(n) if n else b""
+            name = None
+            if switch:
+                try:
+                    j = json.loads(body.decode("utf-8"))
+                except (ValueError, RecursionError):
+                    j = None
+                name = j.get("model") if isinstance(j, dict) else None
+                if not isinstance(name, str) or name not in MODELS:
+                    return self._error(400, "the body must be JSON with \"model\": one of " + ", ".join(MODEL_ORDER),
+                                       "invalid_request_error", close=True)
+                if name not in session.installed:
+                    return self._error(409, "that model is not downloaded on this computer", "conflict", close=True)
+                if name == session.model:
+                    return self._error(409, "that model is in use already", "conflict", close=True)
+            if not control.take(self.headers.get(ControlRequest.HEADER), "switch" if switch else "shutdown", name):
+                return self._error(403, "forbidden: token", "forbidden", close=True)
+            session.leave("switching" if switch else "stopping")       # /webchat/status says so from now on
+            answer = {"status": "switching", "model": name} if switch else {"status": "stopping"}
+            try:
+                self._send(202, "application/json; charset=utf-8", json.dumps(answer).encode("utf-8"), close=True)
+                self.wfile.flush()
+            finally:
+                control.event.set()                     # also when the page went away before it read the answer
 
     return Handler
 
@@ -1238,16 +1609,30 @@ def web_selftest(web_port):
         line("the page is served", code == 200 and ctype.startswith("text/html") and b"YASAKANI" in data and "default-src 'none'" in csp,
              "%d bytes" % len(data))
         code, ctype, _, data = raw("GET", "/webchat/config")
-        line("the settings of the page", code == 200 and json.loads(data).get("version") == QS_VERSION)
+        conf = json.loads(data) if code == 200 else {}
+        line("the settings of the page", code == 200 and conf.get("version") == QS_VERSION)
+        line("the address for other programs",
+             re.fullmatch(r"http://127\.0\.0\.1:\d{1,5}/v1", str(conf.get("api_base"))) is not None
+             and isinstance(conf.get("model_id"), str) and isinstance(conf.get("gpu"), dict)
+             and isinstance(conf.get("models_installed"), list) and "control_token" in conf, str(conf.get("api_base")))
         code, ctype, _, data = raw("GET", "/health")
         h = json.loads(data) if code == 200 else {}
         line("the model is ready", h.get("status") == "ok", "context %s tokens" % h.get("max_context_tokens"))
+        code, _, _, data = raw("GET", "/webchat/status")
+        s = json.loads(data) if code == 200 else {}
+        line("the page is told so", s.get("state") == "ready", "%s after %s s" % (s.get("state"), s.get("elapsed")))
         code, _, _, _ = raw("GET", "/health", headers={"Origin": "http://example.com"})
         line("a page of another site is refused", code == 403, "HTTP %d" % code)
         code, _, _, _ = raw("GET", "/health", headers={"Host": "example.com"})
         line("another host name is refused", code == 403, "HTTP %d" % code)
         code, _, _, _ = raw("POST", "/v1/chat/completions", body=b"{}", headers={"Sec-Fetch-Site": "cross-site"})
         line("a cross-site request is refused", code == 403, "HTTP %d" % code)
+        # the two control paths, without anything that could stop this server: no token, and a request of another site
+        code, _, _, _ = raw("POST", "/webchat/shutdown", body=b"", headers={"Origin": "http://127.0.0.1:%d" % web_port})
+        line("quitting needs the token of the page", code in (403, 404), "HTTP %d" % code)
+        code, _, _, _ = raw("POST", "/webchat/switch_model", body=b'{"model": "speed"}',
+                            headers={"Origin": "http://example.com", ControlRequest.HEADER: "0" * 64})
+        line("a model switch from another site is refused", code == 403, "HTTP %d" % code)
         code, _, _, _ = raw("GET", "/yasakani_env.cmd")
         line("other files are not served", code == 404, "HTTP %d" % code)
         body = json.dumps({"messages": [{"role": "user", "content": "Write the numbers from 1 to 120, separated by spaces."}],
@@ -1295,17 +1680,24 @@ def web_selftest(web_port):
     return good
 
 
-def wait_for_stop(proc, update, poll=0.2):
-    """Waits until Enter is pressed in this window, the server ends, or the page asked for the update (-> "update").  Enter is read
-    with msvcrt, not input(): a thread left waiting in input() would take the first line typed into the next quickstart.py."""
+def wait_for_stop(proc, update, poll=0.2, control=None, session=None):
+    """Waits until Enter is pressed in this window (-> "enter"), the server ends ("ended"), the page asked for the update
+    ("update"), or the page's quit button or model switch was accepted (``control``: "shutdown" or "switch").  Enter is read
+    with msvcrt, not input(): a thread left waiting in input() would take the first line typed into the next quickstart.py.
+    Nothing in this loop waits for the engine: ``session`` asks it in a thread of its own and tells the page whether the model is
+    loading, ready or failed, so Enter is seen within ``poll`` seconds also while the model loads."""
     try:
         import msvcrt
     except ImportError:
         msvcrt = None
     tty = sys.stdin is not None and sys.stdin.isatty()
+    if session is not None:
+        session.watch()
     while True:
         if update is not None and update.event.is_set():
             return "update"
+        if control is not None and control.event.is_set():
+            return control.action
         if proc.poll() is not None:
             return "ended"
         if tty and msvcrt is not None:
@@ -1315,77 +1707,242 @@ def wait_for_stop(proc, update, poll=0.2):
         time.sleep(poll)
 
 
-def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None):
-    page_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat.html")
-    if not os.path.isfile(page_path):
+def stop_process(proc, seconds=30):
+    """Stops `yasakani serve`: terminate, wait up to ``seconds``, then kill.  (python.exe of the private environment starts the real
+    interpreter as its child inside a job object that ends with it, so ending the one we started leaves nothing behind.)"""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def wait_gpu_free(read_used, before, seconds=GPU_SETTLE_SECONDS, margin=GPU_SETTLE_MIB, sleep=time.sleep, clock=time.monotonic):
+    """After `yasakani serve` was stopped for a model switch: waits until the GPU memory in use is back near ``before`` (the MiB
+    in use before that server loaded its model), at most ``seconds``.  The next server chooses its context from the memory that is
+    free when it starts, and the driver can take a moment to give the memory of the stopped one back.  -> True when the memory is
+    back; False when the time is over or the memory cannot be read (the caller goes on either way)."""
+    if before is None:
+        return False
+    end = clock() + seconds
+    while True:
+        used = read_used()
+        if used is None:
+            return False
+        if used <= before + margin:
+            return True
+        if clock() >= end:
+            return False
+        sleep(0.5)
+
+
+def open_page_server(make_handler, port, seconds=0.0, sleep=time.sleep, clock=time.monotonic):
+    """A LocalServer on exactly ``port`` (``make_handler(port)`` gives its handler); None when the port cannot be had.  With
+    ``seconds`` it tries again for that long: after a model switch the server of the model before has just closed on this port."""
+    end = clock() + seconds
+    while True:
+        try:
+            return LocalServer(("127.0.0.1", port), make_handler(port))
+        except OSError:
+            if clock() >= end:
+                return None
+            sleep(0.2)
+
+
+def close_page_server(httpd):
+    """Closes a LocalServer that serves in a thread, and the connections it accepted."""
+    httpd.shutdown()
+    httpd.server_close()
+    httpd.close_connections()
+
+
+def read_page():
+    """chat.html next to this file.  -> (its bytes, its path); the bytes are None when the file is not there."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat.html")
+    if not os.path.isfile(path):
+        return None, path
+    with open(path, "rb") as f:
+        return f.read(), path
+
+
+def page_settings(ui, name):
+    """The part of /webchat/config that does not change while the page is open."""
+    return {"lang": ui.lang, "model": name, "version": QS_VERSION, "repo": REPO_URL, "support": SUPPORT_URL}
+
+
+def open_check_server(ui, port, model, installed=(), gpu=None):
+    """A model switch to a model that never passed the checks runs them first.  No `yasakani serve` runs during that time, and a
+    page that waits at its address could not know why nothing answers.  This minimal server takes the page's port for that time:
+    GET /webchat/status answers state "switching" with "phase": "checking", the seconds since the checks began and the new model's
+    name.  It has no engine behind it (the paths that are passed on answer 503) and takes no button of the page (control_token is
+    null, the control paths do not exist).  -> the server, or None when the page file or the port cannot be had (the console shows
+    the checks either way).  The caller closes it with close_page_server() right before the browser chat starts on that port."""
+    page = read_page()[0]
+    if page is None or not port:
+        return None
+    session = WebSession(model, installed=installed)
+    session.leave("switching")
+    session.phase = "checking"
+    httpd = open_page_server(lambda p: make_web_handler(page, page_settings(ui, model), None, p, None, None, session, gpu),
+                             port, REOPEN_SECONDS)
+    if httpd is not None:
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def stay_for_the_page(session, since, clock=time.monotonic, sleep=time.sleep):
+    """After Enter in the console, or after `yasakani serve` ended by itself: the page's server goes on answering /webchat/status
+    ("stopping" or "failed") until END_GRACE seconds after ``since``, so that an open page can show the end instead of 'cannot be
+    reached'.  After a server that ended by itself it first waits until a page has asked, at most FAIL_GRACE seconds.
+    `yasakani serve` is stopped before this is called, so nothing is left behind when Ctrl+C ends the wait."""
+    try:
+        if session.state() == "failed":
+            session.told_failed.wait(FAIL_GRACE)
+        rest = END_GRACE - (clock() - since)
+        if rest > 0:
+            sleep(rest)
+    except KeyboardInterrupt:
+        pass
+
+
+def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, installed=(), reopen=None):
+    """The page in the browser.  Starts `yasakani serve`, opens the page at once (it shows the loading and goes on when the model
+    is ready), then waits for Enter, a button of the page or the end of the server.  -> 0, 7 (the server did not start, or it
+    ended by itself with an error), 8 (--web-test failed), UPDATE_RC, QUIT_RC, or SWITCH_RC with the model's name in a.web_switch.
+    ``gpu`` is a GpuWatch and ``installed`` the models the page can switch between.  ``reopen`` is the port of a page that waits
+    after a model switch: the page's server comes back on that port and no browser window is opened.  On every way out
+    `yasakani serve` is stopped and the page's server is closed; the tokens of the page's buttons end with the wait (if the update
+    button and a control request were both taken within one look of the wait, the update counts)."""
+    page, page_path = read_page()
+    if page is None:
         ui.say("web_nopage", p=page_path)
         return 7
-    with open(page_path, "rb") as f:
-        page = f.read()
-    eport = pick_port(ENGINE_PORT)
-    wport = pick_port(getattr(a, "web_port", None) or WEB_PORT, avoid=(eport,))
-    a.web_port_used = wport
+    wanted = reopen or getattr(a, "web_port", None) or WEB_PORT
+    eport = pick_port(ENGINE_PORT, avoid=(wanted,))
     update = UpdateRequest(update_rel) if update_rel else None
+    control = None if a.web_test else ControlRequest()  # --web-test only looks: no quit button, no model switch
+    before = gpu.get(fresh=True)["used_mib"] if gpu is not None else None     # the GPU memory in use before this model is loaded
     ui.say("web_boot")
     proc = subprocess.Popen([vpy, "-m", "yasakani", "serve", "--model-dir", mdir, "--dll", dll, "--port", str(eport)], env=env)
-    httpd = None
+    name = "custom" if a.model_dir else model
+    session = WebSession(name, proc, eport, () if a.model_dir else installed,
+                         on_ready=lambda seconds: ui.say("web_loaded", s="%.0f" % seconds))
+    conf = page_settings(ui, name)
+
+    def handler(port):
+        return make_web_handler(page, conf, eport, port, update, control, session, gpu)
+
+    httpd, why = None, None
     try:
-        if not wait_ready(eport, proc):
-            ui.say("web_fail")
-            return 7
-        conf = {"lang": ui.lang, "model": "custom" if a.model_dir else model, "version": QS_VERSION, "repo": REPO_URL, "support": SUPPORT_URL}
-        httpd = LocalServer(("127.0.0.1", wport), make_web_handler(page, conf, eport, wport, update))
+        if reopen:
+            httpd = open_page_server(handler, reopen, REOPEN_SECONDS)
+            if httpd is None:
+                ui.say("web_moved")
+        if httpd is None:
+            wport = pick_port(wanted, avoid=(eport,))
+            httpd = LocalServer(("127.0.0.1", wport), handler(wport))
+        wport = httpd.server_address[1]
+        a.web_port_used = wport
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         url = "http://127.0.0.1:%d/" % wport
         if a.web_test:
+            if not wait_ready(eport, proc):
+                ui.say("web_fail")
+                return 7
+            session.probe()                             # /webchat/status says "ready" for the self-test
             return 0 if web_selftest(wport) else 8
-        ui.say("web_ready_manual" if a.no_browser else "web_ready", u=url)
-        if not a.no_browser:
+        kept = wport == reopen                          # the page that asked for the switch is open at this address
+        ui.say("web_again" if kept else "web_ready_manual" if a.no_browser else "web_ready", u=url)
+        if not kept and not a.no_browser:
             try:
                 webbrowser.open(url)
             except Exception:  # noqa: BLE001 - the address is printed above
                 pass
+        flush_keys()                                    # a key typed during the steps before must not end the page at once
         try:
-            why = wait_for_stop(proc, update)
+            why = wait_for_stop(proc, update, control=control, session=session)
         except KeyboardInterrupt:
             why = "enter"
+        # Whatever ended the wait: the page's buttons are not taken any more.  A button that was taken in the same moment (its
+        # token is used and the page has its 202) counts.
+        pressed, asked = update is not None and not update.close(), not control.close()
+        if pressed:
+            why = "update"
+        elif asked and control.action and why in ("enter", "ended"):
+            why = control.action
         if why == "update":
             ui.say("upd_web")
             return UPDATE_RC
+        if why == "shutdown":
+            ui.say("web_quit")
+            return QUIT_RC
+        if why == "switch":
+            a.web_switch = control.model
+            ui.say("web_switch", m=ui.t("m_" + control.model))
+            return SWITCH_RC
+        if why == "ended" and not session.ready:        # it never loaded the model: the failure of `yasakani serve` is above
+            ui.say("web_fail")
+            return 7
+        if why == "ended" and proc.poll():              # it ended by itself with an error after it had been ready.  Not 0, so
+            ui.say("web_died")                          # that START.cmd keeps the window with the server's messages open
+            return 7
         return 0
     finally:
-        if httpd is not None:
-            httpd.shutdown()
-            httpd.server_close()
+        # `yasakani serve` is stopped first, so nothing is left behind whatever happens after that.  The page's server is closed
+        # last, so that the page hears what happens ("stopping", "switching", "failed").
+        if control is not None:
+            control.close()
+        if update is not None:
+            update.close()
+        t_end = time.monotonic()
         if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        ui.say("web_end")
+            session.leave("stopping")
+            stop_process(proc)
+            if why == "switch":
+                wait_gpu_free(lambda: gpu.get(fresh=True)["used_mib"] if gpu is not None else None, before)
+        try:
+            if why != "switch":
+                ui.say("web_end")
+            if httpd is not None and why in ("enter", "ended"):
+                stay_for_the_page(session, t_end)       # an open page gets the time to ask and to show the end
+        finally:
+            if httpd is not None:
+                close_page_server(httpd)
 
 
-def main(argv=None):
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="YASAKANI quickstart")
     ap.add_argument("--model", choices=sorted(MODELS), help="skip the question: quality, speed or max")
     ap.add_argument("--model-dir", help="use this model folder instead of downloading one")
     ap.add_argument("--engine-zip", help="use this engine zip instead of downloading it (its SHA-256 is still checked)")
     ap.add_argument("--home", help="where to keep everything (default: the folder of this file)")
-    ap.add_argument("--action", choices=("menu", "bench", "compare", "web", "chat", "serve", "none", "update", "rollback"),
-                    default="menu",
-                    help="what to do after the checks (default: show the menu); compare = look-ahead on and off, "
-                         "web = chat in the browser; update = look for a new version now and install it after a yes "
+    ap.add_argument("--action", choices=ACTIONS, default="auto",
+                    help="what to do after the checks.  auto (default): open the page in the browser at once when the chosen "
+                         "model passed the checks in an earlier run, else show the menu; menu = always show the menu; "
+                         "web = the page in the browser (chat, speed test, API address, model switch, quit button); "
+                         "compare = look-ahead on and off; update = look for a new version now and install it after a yes "
                          "(with --yes without asking); rollback = put back the start files of the version before the last update")
+    ap.add_argument("--menu", action="store_true",
+                    help="show the menu instead of opening the page in the browser at once (the same as --action menu; "
+                         "an --action given as well wins)")
     ap.add_argument("--no-update-check", action="store_true",
                     help="turn the automatic check for a new version off (kept in quickstart_state.json)")
     ap.add_argument("--update-check", action="store_true", help="turn the automatic check for a new version on again")
     ap.add_argument("--update-dev-base", metavar="URL",
                     help="development only: look for updates at http://127.0.0.1:<port> (a test server on this computer) "
                          "instead of GitHub")
-    ap.add_argument("--web-port", type=int, help="with the browser chat: the port to try first (an update keeps the page's port)")
-    ap.add_argument("--no-browser", action="store_true", help="with the browser chat: do not open a browser window")
-    ap.add_argument("--web-test", action="store_true", help="start the browser chat, check it once and stop")
+    ap.add_argument("--web-port", type=int,
+                    help="with the page in the browser: the port to try first (an update keeps the page's port)")
+    ap.add_argument("--no-browser", action="store_true",
+                    help="with the page in the browser: do not open a browser window (the address is printed)")
+    ap.add_argument("--web-test", action="store_true",
+                    help="start the page in the browser, wait for the model, check the page once and stop")
     ap.add_argument("--lang", choices=("ja", "en"), help="language of the messages (default: the Windows display language)")
     ap.add_argument("--yes", action="store_true", help="answer yes to questions (the update question only with --action update)")
     ap.add_argument("--skip-checks", action="store_true", help="do not run info / verify / selfcheck")
@@ -1394,7 +1951,13 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.web_test:
         a.action = "web"
+    elif a.menu and a.action == "auto":
+        a.action = "menu"
+    return a
 
+
+def main(argv=None):
+    a = parse_args(argv)
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(errors="replace")
@@ -1500,6 +2063,7 @@ def main(argv=None):
     else:
         ui.say("driver_ok", d=dlabel)
     quality_fits = gpu["total"] is None or gpu["total"] >= QUALITY_MIN_TOTAL_MIB
+    gpu_watch = GpuWatch(gpu)                           # the page shows this GPU's memory while it is open
 
     # 2. model
     ui.step(2, n, "s_model")
@@ -1511,6 +2075,10 @@ def main(argv=None):
             return 2
         model = "speed"
         ui.say("speed_only")
+    # --action auto: straight to the page in the browser when this model passed the checks in an earlier run, else as the menu
+    direct = direct_start(a.action, model or st.get("model"), ok, a.model_dir)
+    if a.action == "auto":
+        a.action = "web" if direct else "menu"
     if not model:
         prev = st.get("model") or "quality"
         if a.yes or a.model_dir or a.action != "menu":
@@ -1518,15 +2086,21 @@ def main(argv=None):
         else:
             d = {"speed": "2", "max": "3"}.get(prev, "1")
             model = {"2": "speed", "3": "max"}.get(ask(ui.t("pick", d=d), d), "quality")
-    ui.say("picked", m=ui.t("m_" + model))
-    if gpu["total"] is not None and gpu["used"] is not None and gpu["total"] < FULL_CONTEXT_MIN_TOTAL_MIB and not a.model_dir:
-        n_ctx, head_off = estimate_context(gpu["total"] - gpu["used"], model)
+
+    def context_note(used):
+        """On cards that do not keep the full context: the context the package will choose with ``used`` MiB in use."""
+        if gpu["total"] is None or used is None or gpu["total"] >= FULL_CONTEXT_MIN_TOTAL_MIB or a.model_dir:
+            return
+        n_ctx, head_off = estimate_context(gpu["total"] - used, model)
         if n_ctx < MIN_CONTEXT:
-            ui.say("ctx_short", u=gpu["used"])
+            ui.say("ctx_short", u=used)
         else:
             ui.say("ctx_auto", n="{:,}".format(n_ctx))
             if head_off:
                 ui.say("ctx_head")
+
+    ui.say("picked", m=ui.t("m_" + model))
+    context_note(gpu["used"])
     mdir = os.path.abspath(a.model_dir) if a.model_dir else os.path.join(home, "models", model)
     try:
         mdir.encode("ascii")
@@ -1630,11 +2204,14 @@ def main(argv=None):
         ui.say("run", c=cmd)
         return subprocess.call(args, env=env)
 
-    # 6. checks
-    ui.step(6, n, "s_verify")
-    if a.skip_checks or (ok.get(model) and not a.model_dir):
-        ui.say("checks_done")
-    else:
+    def checks_done():
+        return bool(a.skip_checks or (ok.get(model) and not a.model_dir))
+
+    def run_checks():
+        """info, verify and selfcheck for the model in use, unless it passed them before.  -> 0, or the exit code to end with."""
+        if checks_done():
+            ui.say("checks_done")
+            return 0
         differs = False
         for cmd in ("info", "verify", "selfcheck"):
             if cmd == "selfcheck":
@@ -1653,33 +2230,44 @@ def main(argv=None):
         if not a.model_dir:
             ok[model] = True
             save_state(state_path, st)
+        return 0
 
     envfile = os.path.join(home, "yasakani_env.cmd")
-    with open(envfile, "w", encoding="ascii", newline="\r\n") as f:
-        f.write("@echo off\nrem Run this in a command prompt, then type: yasakani chat   (or serve, bench, info ...)\n")
-        f.write('set "YASAKANI_DLL=%s"\nset "YASAKANI_MODEL_DIR=%s"\nset "PATH=%s;%%PATH%%"\n'
-                % (dll, mdir, os.path.join(vdir, "Scripts")))
-        if pin:
-            f.write('set "CUDA_VISIBLE_DEVICES=%s"\n' % pin)
+
+    def write_env():
+        with open(envfile, "w", encoding="ascii", newline="\r\n") as f:
+            f.write("@echo off\nrem Run this in a command prompt, then type: yasakani chat   (or serve, bench, info ...)\n")
+            f.write('set "YASAKANI_DLL=%s"\nset "YASAKANI_MODEL_DIR=%s"\nset "PATH=%s;%%PATH%%"\n'
+                    % (dll, mdir, os.path.join(vdir, "Scripts")))
+            if pin:
+                f.write('set "CUDA_VISIBLE_DEVICES=%s"\n' % pin)
+
+    # 6. checks
+    ui.step(6, n, "s_verify")
+    rc = run_checks()
+    if rc:
+        return rc
+    write_env()
 
     # 7. use it
     ui.step(7, n, "s_menu")
     print(ui.t("support", u=SUPPORT_URL, r=REPO_URL))
     action = a.action
     pending = None                                      # a newer release this launcher knows of (offered once, then in the chat page)
-    if action == "menu":
+    if action == "menu" or direct:
         print()
         pending = update_check(ui, st, save, src, disabled=check_disabled(a, st))
-        if pending:
+        if pending and action == "menu":
             rc = apply_update(ui, qs_dir, pending, src, update_answered(a), after_args("menu"), st, save)
             if rc is not None:
                 return rc
+        elif pending:                                   # the direct start asks nothing here: the page shows its update button
+            ui.say("upd_page", o=QS_VERSION, n=pending["version"])
+    if direct:
+        ui.say("direct", m=ui.t("m_" + model))
     while True:
         if action == "menu":
-            m = ui.t("menu")
-            i = m.rfind("\n")                           # the update item goes after the last item, above the prompt line
-            pick = ask(m[:i + 1] + ui.t("menu_update") + m[i + 1:], "6")
-            cmd = {"1": "bench", "2": "compare", "3": "web", "4": "chat", "5": "serve", "7": "update"}.get(pick)
+            cmd = menu_choice(ui)
         else:
             cmd = None if action == "none" else action
         if not cmd:
@@ -1692,14 +2280,53 @@ def main(argv=None):
                     return rc
             continue
         if cmd == "web":
-            rc = run_web(ui, a, vpy, env, mdir, dll, model, pending)
+            reopen = None
+            while True:                                 # once more for every model the page switches to
+                rc = run_web(ui, a, vpy, env, mdir, dll, model, pending, gpu_watch,
+                             [] if a.model_dir else installed_models(home, got, quality_fits), reopen)
+                if rc != SWITCH_RC:
+                    break
+                # The page waits at its address.  What the steps above did for the first model, for this one: run the checks if
+                # it never passed them, then remember it and write the settings file.  Then `yasakani serve` again, on the page's
+                # port.  While the checks run, a minimal server tells the page so at its address (open_check_server).
+                back, reopen = (model, mdir), a.web_port_used
+                model = a.web_switch
+                mdir = os.path.join(home, "models", model)
+                env["YASAKANI_MODEL_DIR"] = mdir
+                print()
+                ui.say("picked", m=ui.t("m_" + model))
+                context_note(gpu_watch.get(fresh=True)["used_mib"])
+                told = None if checks_done() else open_check_server(ui, reopen, model, installed_models(home, got, quality_fits),
+                                                                    gpu_watch)
+                try:
+                    rc = run_checks()
+                finally:
+                    if told is not None:
+                        close_page_server(told)
+                if rc:
+                    # The state file and the settings file name a model only after it passed the checks, so they still name the
+                    # model before.  The page goes on with that one.
+                    print()
+                    ui.say("switch_back", m=ui.t("m_" + model), o=ui.t("m_" + back[0]))
+                    model, mdir = back
+                    env["YASAKANI_MODEL_DIR"] = mdir
+                    continue
+                st["model"] = model
+                save_state(state_path, st)
+                write_env()
+            if rc == QUIT_RC:                           # the quit button of the page ends the launcher, also from the menu
+                break
             if rc == UPDATE_RC:                         # the button of the page: that is the yes
                 rc = apply_update(ui, qs_dir, pending, src, True, after_args("web", a.web_port_used), st, save)
                 if rc != 9:
                     return 0 if rc is None else rc
+                if action != "menu":
+                    return 9                            # the update failed and nothing changed: not 0, so that START.cmd keeps the window with the reason open
                 pending, rc = None, 0                   # the update failed and nothing changed: back to the menu
             if rc and action != "menu":
                 return rc
+            if action == "menu":
+                flush_keys()                            # an Enter typed twice must not open the page again from the menu
         elif cmd == "compare":
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lookahead_check.py")
             if not os.path.isfile(script):
@@ -1716,7 +2343,8 @@ def main(argv=None):
         if action != "menu":
             break
     print()
-    ui.say("again", f=envfile)
+    # what the next double-click does: the page at once when the model of the state file has passed the checks, else the steps
+    ui.say("again_direct" if direct_start("auto", st.get("model"), ok) else "again", f=envfile)
     print(ui.t("support", u=SUPPORT_URL, r=REPO_URL))
     ui.say("bye")
     return 0

@@ -427,9 +427,9 @@ yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
 
 0.1.7 から、起動ファイル（`START.cmd`）が自分で更新できます。0.1.7 からは 0.2.0 への更新を案内します。v0.1.6 以前からは、今の版の起動用 ZIP（`yasakani-quickstart-0.2.0.zip`）を一度だけ手で取得して `START.cmd` を実行してください。モデルはそのまま使えます。
 
-* **確認。** メニューを開くとき、1 日に 1 回まで、github.com に問い合わせると表示してから HTTPS のリクエストを 1 回送ります。送るのは `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest` だけで、User-Agent は `yasakani-quickstart` です。ID、Windows の版、GPU、質問など、パソコンの情報は送りません。待つのは 5 秒までで、GitHub につながらないときは 1 行で知らせて先に進みます。試験版（プレリリース）は案内しません。どのダウンロードとも同じく、GitHub には IP アドレスが届きます。
-* **止め方。** `START.cmd --no-update-check` で毎日の確認を止め、その設定を `quickstart_state.json` に残します。`START.cmd --update-check` で戻ります。環境変数 `YASAKANI_NO_UPDATE_CHECK=1` でも止まります。止めていても、メニューの「新しい版を確かめる」と `START.cmd --action update` は使えます。
-* **聞かずには変えません。** 新しい版があると、今の版と新しい版、公開ページを示して聞きます。ブラウザーのチャットでは、上に **更新する** と **あとで** の帯が出ます。ページ自身は GitHub に何も送りません。
+* **確認。** 確認は 1 日に 1 回までです。メニューを出す前か、ブラウザーの画面を直接開く前にします（2 回目からの `START.cmd` は、メニューを出さずに画面を開きます）。github.com に問い合わせると表示してから HTTPS のリクエストを 1 回送ります。送るのは `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest` だけで、User-Agent は `yasakani-quickstart` です。ID・Windows の版・GPU・質問など、パソコンの情報は送りません。待つのは 5 秒までで、GitHub につながらない時は 1 行で知らせて先に進みます。試験版（プレリリース）は案内しません。どのダウンロードとも同じく、GitHub には IP アドレスが届きます。
+* **止め方。** `START.cmd --no-update-check` で毎日の確認を止め、その設定を `quickstart_state.json` に残します。`START.cmd --update-check` で戻ります。環境変数 `YASAKANI_NO_UPDATE_CHECK=1` でも止まります。止めていても、メニューの「新しい版を確認する」と `START.cmd --action update` は使えます。
+* **聞かずには変えません。** 新しい版があると、今の版と新しい版を示します。メニューの前では公開ページも示して、更新するかを聞きます。ブラウザーの画面を直接開く時は、黒い画面では聞きません。更新の方法（画面のボタンか `START.cmd --action update`）を表示するだけです。ブラウザーの画面では、上に **更新する** と **あとで** の帯が出ます。**更新する** を押すまで何も変えません。ページ自身は GitHub に何も送りません。
 * **更新ですること。** その版の起動用 ZIP と `SHA256SUMS.txt` を `https://github.com/yasakani-dev/yasakani/releases/download/<タグ>/` からだけ取得し、ZIP の SHA-256 を `SHA256SUMS.txt` と比べます。中身は決まった起動ファイルだけを受け付けます（フォルダーやほかのファイルは断ります）。今の起動ファイルを `backup\<前の版>\` に控えてから入れ替え、新しい起動ファイルを起動します。新しい起動ファイルは初回と同じく自分のエンジンの ZIP を取得して SHA-256 を確かめ、Python のパッケージを入れ直します。モデルはそのまま使います。
 * **戻し方。** `START.cmd --action rollback` で、最後の更新の前の起動ファイルに戻します。次の起動で、その版のエンジンを入れ直します。
 * **どこまで信用できるか。** 配布ファイルにはコード署名がありません。確かめは GitHub の HTTPS と、同じリリースの `SHA256SUMS.txt` によります。壊れたダウンロードや差し替えられたダウンロードは見つけますが、GitHub 上のリリースそのものが差し替えられた場合は見つけられません。

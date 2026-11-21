@@ -9,6 +9,10 @@ Windows 11 と NVIDIA の RTX 1 枚のパソコンで、YASAKANI をすぐに試
   1. この zip を、C:\yasakani のような英数字だけの場所に展開します。
   2. START.cmd をダブルクリックします。
   3. 画面の質問に番号で答えます（モデルは「品質モデル」「最速モデル」「最高品質モデル」のどれか）。
+  4. 最後にメニューが出ます。Enter を押すと、ブラウザーの画面が開きます。
+  5. 点検まで済むと、次からは START.cmd をダブルクリックするだけで、ブラウザーの画面が直接開きます
+     （モデルの質問とメニューは出ません）。メニューを出す時は、このフォルダーでコマンドプロンプトを開いて
+     START.cmd --menu と打ちます。
 
 START.cmd がすること
   - このパソコンの確認（Python 3.10 以上、GPU、NVIDIA のドライバー、空き容量）
@@ -16,7 +20,8 @@ START.cmd がすること
   - このフォルダーの中に Python の環境を作って、パッケージを入れる
   - モデル（約 13〜18 GB）を Hugging Face からダウンロードする
   - 点検（yasakani info・verify・selfcheck）
-  - 速さを測る／先読みあり・なしを比べる／ブラウザーでチャットする／黒い画面でチャットする／サーバーを起動する、から選ぶ
+  - メニューを出す：1 番（Enter だけでも同じ）がブラウザーの画面です。ほかに、速さを測る／先読みあり・なしを比べる／
+    黒い画面でチャットする／サーバーを起動する、を選べます
 
 知っておくこと
   - Python 3.10 以上が要ります（https://www.python.org/downloads/windows/）。
@@ -29,13 +34,20 @@ START.cmd がすること
   - 「先読みあり・なしを比べる」（lookahead_check.py）は、同じ 4 つの課題を、先読みなしと出荷時の設定で書かせます。
     1 回の計算の時間、1 回で確定したトークン数、速さ、書かれた文章が同じかどうかを表示します。
     技術の解説（docs/TECHNOLOGY.ja.md）の 1.3 の表と比べられます。
-  - ブラウザーのチャット画面（chat.html）は、このパソコンの中だけで動きます（127.0.0.1）。会話はどこにも送られません。
+  - ブラウザーの画面（chat.html）は、このパソコンの中だけで動きます（127.0.0.1）。会話はどこにも送られません。
+    タブは「チャット」「スピード測定」「API 接続」「モデル・状態」の 4 つです。「API 接続」には、ほかのアプリから使う時の
+    アドレスが出ます。「モデル・状態」では、ダウンロード済みのモデルが 2 つ以上ある時に切り替えられます。
+    終わる時は、画面の「終了」ボタンを押すか、黒い画面で Enter を押します。メニューから開いた時の Enter は、
+    メニューに戻るだけです。START.cmd が正常に終わると、黒い画面は自動で閉じます。エラーで止まった時は、
+    キーを押すまで開いたままです。
   - 入れたものは、すべてこのフォルダーの中に置きます。パソコン全体には何も入れません。
     やめるときは、このフォルダーを消すだけです。
   - 配布ファイルにはコード署名がありません。Windows が警告を出したら、発行元と入手先を確かめたうえで実行してください。
-  - もう一度 START.cmd をダブルクリックすると、済んだ手順は飛ばして続きから始まります。
-  - 新しい版の確認：1 日に 1 回、メニューを開くときに github.com に問い合わせます（問い合わせる前に表示します。
-    送るのは最新の版を聞くリクエスト 1 回だけで、このパソコンの情報は送りません）。新しい版があれば、変える前に聞きます。
+  - 途中で止めた時も、もう一度 START.cmd をダブルクリックすれば、済んだ手順は飛ばして続きから始まります。
+  - 新しい版の確認：1 日に 1 回まで、github.com に問い合わせます。問い合わせるのは、メニューを出す前か、ブラウザーの画面を
+    直接開く前です（問い合わせる前に表示します。送るのは最新の版を聞くリクエスト 1 回だけで、このパソコンの情報は送りません）。
+    新しい版がある時、メニューの前では更新するかを聞きます。ブラウザーの画面を直接開く時は、黒い画面では聞きません。
+    画面に「更新する」ボタンが出ます。「y」と答えるかボタンを押すまで、何も変えません。
     更新すると今の起動ファイルを backup フォルダーに控え、エンジンとパッケージを入れ直します（モデルはそのまま）。
     今すぐ確かめる：メニューの 7 か START.cmd --action update
     前の版に戻す：START.cmd --action rollback
@@ -50,6 +62,9 @@ How to use
   1. Unpack this zip to a plain path such as C:\yasakani
   2. Double-click START.cmd
   3. Answer the questions with a number (the model is the "quality model", the "fastest model" or the "max-quality model").
+  4. A menu comes last. Press Enter and the page opens in your browser.
+  5. Once the checks have passed, a double-click on START.cmd opens the browser page directly (no model question, no menu).
+     For the menu, open a command prompt in this folder and type START.cmd --menu
 
 What START.cmd does
   - checks this computer (Python 3.10 or newer, the GPU, the NVIDIA driver, free disk space)
@@ -57,7 +72,8 @@ What START.cmd does
   - makes a Python environment inside this folder and installs the package
   - downloads the model (about 13 to 18 GB) from Hugging Face
   - runs the checks (yasakani info, verify, selfcheck)
-  - lets you measure the speed, compare look-ahead on and off, chat in your browser or in the terminal, or start the server
+  - shows a menu: 1 (or Enter alone) is the page in your browser; the other items measure the speed, compare look-ahead
+    on and off, chat in the terminal, or start the server
 
 Good to know
   - Python 3.10 or newer is needed (https://www.python.org/downloads/windows/).
@@ -70,12 +86,18 @@ Good to know
   - "Compare look-ahead on and off" (lookahead_check.py) writes the same four tasks without look-ahead and with the
     shipping settings. It prints the time of one pass, the tokens confirmed per pass, the speed, and whether the text is
     the same. Compare the result with table 1.3 of the technical notes (docs/TECHNOLOGY.md).
-  - The browser chat (chat.html) runs on this computer only (127.0.0.1). The conversation is not sent anywhere.
+  - The browser page (chat.html) runs on this computer only (127.0.0.1). The conversation is not sent anywhere.
+    It has four tabs: Chat, Speed, API and Model. The API tab shows the address for other apps. On the Model tab you can
+    switch between models when two or more are downloaded. To stop, press the Quit button of the page or press Enter in
+    the black window (if the page was opened from the menu, Enter goes back to the menu). When START.cmd ends without
+    an error, the black window closes by itself; after an error it waits for a key, so that the messages can be read.
   - Everything is kept inside this folder; nothing is installed system-wide. To remove it, delete the folder.
   - The files are not code-signed. If Windows shows a warning, check the publisher and the source before you run them.
-  - Double-click START.cmd again any time: finished steps are skipped.
-  - New versions: once a day, when the menu opens, START.cmd asks github.com for the latest version (it says so first;
-    one request, nothing about this computer is sent). If there is a newer one, it asks before it changes anything.
+  - If a run was stopped halfway, double-click START.cmd again: finished steps are skipped.
+  - New versions: at most once a day START.cmd asks github.com for the latest version, before it shows the menu or before
+    it opens the browser page directly (it says so first; one request, nothing about this computer is sent). If there is a
+    newer one, it asks before the menu whether to update. When the page opens directly, nothing is asked in the black
+    window: the page shows an Update button. Nothing changes until you answer y or press the button.
     An update copies the current start files to the backup folder and installs the engine and the package again
     (the models are kept). Check now: 7 in the menu or START.cmd --action update. Go back: START.cmd --action rollback.
     Turn the check off: START.cmd --no-update-check (on again: --update-check).

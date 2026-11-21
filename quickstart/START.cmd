@@ -20,8 +20,10 @@ pause
 exit /b 1
 :run
 rem The lines in brackets are read as one block before they run, so an update can replace this file while it runs.
+rem Exit code 0: the window closes by itself.  Any other code: it waits for a key, so that the messages can be read.
 (
   %PY% "%~dp0quickstart.py" %*
+  if not errorlevel 1 if errorlevel 0 exit /b 0
   call set "RC=%%ERRORLEVEL%%"
   echo.
   pause

@@ -72,6 +72,22 @@ What it does not do:
   image input this includes encoding the images on the CPU (about 15 s for a large image at the default limit on a 16-core CPU).
 * Do not expose it directly to the internet.
 
+## The quickstart's browser page
+
+The page that `START.cmd` opens in your browser is served by the quickstart script (`quickstart/quickstart.py`), not by `yasakani serve`.
+
+* The script listens on `127.0.0.1` only and passes the page's chat requests on to `yasakani serve` on the same computer.
+* It applies the same rules as the server: the `Host` header must name its own address, and a request that carries an `Origin` from
+  another site (or a `Sec-Fetch-Site` other than `same-origin` / `none`) is refused.
+* The page is one HTML file. It loads nothing from outside (no scripts, styles, fonts or images from another host), and its
+  Content-Security-Policy allows connections to its own address only.
+* The update, quit and model-switch buttons of the page are requests to the script. Each must carry the page's own `Origin` and a
+  one-time token, compared in constant time. The page reads the token from the script at its own address, so a page of another site
+  cannot read it. Like the server, this does not protect against other programs that run on the same PC.
+* The page sends nothing outside this computer. The script itself uses the network only for its downloads (the engine ZIP and the
+  start files of an update from GitHub, Python packages through pip, the model from Hugging Face) and for the check for a new
+  version (see the FAQ, “How does the update work?”).
+
 ## Model files
 
 `.yskn` files are binary files read by native code. A damaged or deliberately crafted file could crash the process or, in the worst case,

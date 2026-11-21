@@ -9,6 +9,7 @@
 <!--
   YASAKANI quickstart: the chat page (one file, nothing loaded from the network).
   It is served by quickstart.py on 127.0.0.1 and talks only to that address, which passes the requests on to `yasakani serve`.
+  Four tabs: chat, speed, API, model.  The address can name the tab to open: #chat (the default), #speed, #api or #model.
   Apache License 2.0 - part of https://github.com/yasakani-dev/yasakani
 -->
 <style>
@@ -30,17 +31,50 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body { background: var(--bg); color: var(--ink); font: 16px/1.7 var(--sans); display: flex; flex-direction: column; }
-  button, textarea, input { font: inherit; color: inherit; }
+  button, textarea, input, select { font: inherit; color: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   header { display: flex; align-items: center; gap: 20px; padding: 10px 24px; border-bottom: 1px solid var(--line); }
   .brand { font-weight: 700; font-size: 20px; letter-spacing: 0.14em; }
   .model { color: var(--ink2); font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model .st { color: var(--ink); margin-right: 1em; font-variant-numeric: tabular-nums; }
+  .model .st::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); margin-right: 8px; }
+  .model.ready .st::before { background: var(--accent); }
+  .model.wait .st::before { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
+  .model.bad .st { color: var(--err); }
+  .model.bad .st::before { background: var(--err); }
+  @keyframes blink { 50% { opacity: 0.25; } }
   .meter { margin-left: auto; text-align: right; font-family: var(--meter); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .meter .num { font-size: 40px; font-weight: 600; line-height: 1; color: var(--accent); }
   .meter .unit { font-size: 15px; color: var(--ink2); margin-left: 6px; }
   .meter .what { display: block; font-family: var(--sans); font-size: 12px; color: var(--dim); line-height: 1.3; min-height: 1.3em; }
+  .btn2 { background: none; border: 1px solid var(--line); border-radius: 6px; padding: 5px 14px; font-size: 14px; color: var(--ink); cursor: pointer; white-space: nowrap; }
+  .btn2:hover { border-color: var(--accent); }
+  .btn2[disabled] { opacity: 0.45; cursor: default; border-color: var(--line); }
+  header .btn2 { color: var(--ink2); }
 
+  .tabs { display: flex; gap: 4px; padding: 0 10px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 9px 14px 7px; color: var(--ink2); font-size: 15px; cursor: pointer; white-space: nowrap; }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
+  .tabs button:focus-visible { outline-offset: -2px; }
+
+  .load { padding: 12px 24px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .load .lt { font-size: 15px; font-variant-numeric: tabular-nums; }
+  .load.bad .lt { color: var(--err); }
+  .load .lh { color: var(--dim); font-size: 13px; }
+  .track { height: 4px; background: var(--panel2); border-radius: 2px; overflow: hidden; margin: 8px 0 6px; }
+  .track i { display: block; height: 100%; width: 32%; background: var(--accent-fill); border-radius: 2px; animation: slide 1.6s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(313%); } }
+  @media (prefers-reduced-motion: reduce) {
+    .track i { animation: none; width: 100%; opacity: 0.5; }
+    .model.wait .st::before { animation: none; }
+  }
+
+  .pane { flex: 1; min-height: 0; }
+  .pane.chat { display: flex; flex-direction: column; }
+  .pane.page { overflow-y: auto; padding: 28px 24px 24px; }
+  .pane[hidden] { display: none; }
   main { flex: 1; overflow-y: auto; padding: 28px 24px 12px; }
   .col { max-width: 880px; margin: 0 auto; }
   .turn { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 4px 20px; padding: 14px 0; border-top: 1px solid var(--line); }
@@ -59,10 +93,14 @@
   .body table { border-collapse: collapse; font-size: 0.95em; }
   .body th, .body td { border: 1px solid var(--line); padding: 5px 11px; text-align: left; vertical-align: top; }
   .body th { background: var(--panel); font-weight: 700; }
-  .body pre { margin: 0.4em 0 0.8em; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow-x: auto;
-              font: 14px/1.55 var(--mono); white-space: pre; }
+  .cb { position: relative; margin: 5.6px 0 11.2px; padding-top: 32px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  .cb pre { margin: 0; padding: 2px 14px 12px; overflow-x: auto; font: 14px/1.55 var(--mono); white-space: pre; }
   .body code { font-family: var(--mono); font-size: 0.92em; background: var(--panel); padding: 0.05em 0.3em; border-radius: 4px; }
-  .body pre code { background: none; padding: 0; font-size: 1em; }
+  .cb pre code { font-family: inherit; background: none; padding: 0; font-size: 1em; }
+  .copy { background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 9px; font: 12px/1.7 var(--sans); color: var(--ink2); cursor: pointer; white-space: nowrap; }
+  .copy:hover { border-color: var(--accent); color: var(--ink); }
+  .copy[disabled] { opacity: 0.45; cursor: default; border-color: var(--line); }
+  .cb .copy { position: absolute; top: 5px; right: 6px; }       /* in the row above the code, so it never lies over a long line */
   details.think { margin: 0 0 0.7em; color: var(--ink2); font-size: 14px; }
   details.think summary { cursor: pointer; color: var(--dim); width: fit-content; }
   details.think .t { white-space: pre-wrap; border-left: 2px solid var(--line); padding: 2px 0 2px 12px; margin-top: 6px; }
@@ -76,18 +114,23 @@
   .tries { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
   .tries button { background: none; border: 1px solid var(--line); border-radius: 6px; padding: 9px 14px; text-align: left; cursor: pointer; color: var(--ink); }
   .tries button:hover { border-color: var(--accent); }
+  .tries button[disabled] { opacity: 0.45; cursor: default; border-color: var(--line); }
 
   .composer { border-top: 1px solid var(--line); padding: 14px 24px 10px; }
   .row { display: flex; gap: 12px; align-items: flex-end; }
   textarea { flex: 1; min-height: 52px; max-height: 40vh; resize: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; line-height: 1.6; }
   textarea::placeholder { color: var(--dim); }
   textarea:focus-visible { outline: none; border-color: var(--accent); }
+  textarea[disabled] { opacity: 0.6; }
   .send { background: var(--accent-fill); color: var(--on-accent); border: 0; border-radius: 8px; padding: 0 22px; height: 52px; min-width: 96px; font-weight: 700; cursor: pointer; }
   .send[disabled] { opacity: 0.45; cursor: default; }
   .send.stop { background: none; color: var(--ink); border: 1px solid var(--ink2); }
   .opts { display: flex; flex-wrap: wrap; gap: 6px 26px; align-items: center; margin-top: 8px; color: var(--ink2); font-size: 14px; }
   .opts label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
   .opts input { width: 17px; height: 17px; accent-color: var(--accent-fill); }
+  .opts select { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; cursor: pointer; }
+  .opts select[disabled] { opacity: 0.45; cursor: default; }
+  .opts option { background: var(--panel); color: var(--ink); }
   .link { background: none; border: 0; padding: 0; color: var(--ink2); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
   .local { margin-left: auto; color: var(--dim); }
 
@@ -96,44 +139,141 @@
   .upd button.go { background: var(--accent-fill); color: var(--on-accent); border: 0; border-radius: 6px; padding: 4px 16px; font-weight: 700; cursor: pointer; }
   .upd button[disabled] { opacity: 0.45; cursor: default; }
 
+  .page h2 { font-size: 24px; line-height: 1.35; margin: 0 0 6px; font-weight: 700; }
+  .page h3 { font-size: 13px; line-height: 1.7; color: var(--dim); font-weight: 400; margin: 18px 0 0; }
+  .page .lead { color: var(--ink2); margin: 0 0 22px; }
+  .page h2 + .kv { margin-top: 14px; }
+  .hint { color: var(--dim); font-size: 14px; margin: 6px 0 0; }
+  .hint:empty { display: none; }
+  .hint.bad { color: var(--err); }
+  .kv { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 4px 20px; padding: 14px 0; border-top: 1px solid var(--line); }
+  .kv[hidden] { display: none; }
+  .kv .k { color: var(--dim); font-size: 13px; padding-top: 3px; }
+  .kv .v { min-width: 0; overflow-wrap: anywhere; }
+  .kv .sub { color: var(--ink2); font-size: 14px; margin-left: 1em; }
+  .line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+  .line code { font-family: var(--mono); font-size: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 9px; min-width: 0; overflow-wrap: anywhere; }
+  .line .nm { font-weight: 700; }
+  .line .cur { color: var(--accent); font-size: 13px; }
+  #m_list .line { padding: 3px 0; min-height: 40px; }
+  .btn { background: var(--accent-fill); color: var(--on-accent); border: 0; border-radius: 8px; padding: 0 22px; height: 46px; min-width: 120px; font-weight: 700; cursor: pointer; }
+  .btn[disabled] { opacity: 0.45; cursor: default; }
+  .btn.stop { background: none; color: var(--ink); border: 1px solid var(--ink2); }
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 22px 0 14px; }
+  .tile { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px 12px; background: var(--panel); min-width: 0; }
+  .tile .k { color: var(--dim); font-size: 13px; }
+  .tile .n { font-family: var(--meter); font-variant-numeric: tabular-nums; font-size: 34px; font-weight: 600; line-height: 1.2; }
+  .tile.main .n { color: var(--accent); }
+  .tile .u { font-family: var(--meter); font-size: 14px; color: var(--ink2); margin-left: 6px; white-space: nowrap; }
+  .mem { height: 10px; background: var(--panel2); border-radius: 5px; overflow: hidden; margin: 8px 0 6px; max-width: 520px; }
+  .mem i { display: block; height: 100%; width: 0; background: var(--accent-fill); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
   footer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 24px; font-size: 15px; display: flex; flex-wrap: wrap; gap: 4px 20px; align-items: baseline; }
   footer strong { color: var(--accent); font-size: 17px; }
   footer a { color: var(--ink); text-underline-offset: 3px; }
   footer span { color: var(--ink2); }
 
   @media (max-width: 640px) {
-    header { padding: 8px 14px; gap: 12px; }
+    header { padding: 8px 14px; gap: 2px 12px; flex-wrap: wrap; }
+    .brand { font-size: 18px; }
+    .model { order: 5; flex: 0 0 100%; }
     .meter .num { font-size: 30px; }
+    .tabs { padding: 0 4px; gap: 0; }
+    .tabs button { padding: 8px 9px 6px; font-size: 14px; }
+    .load { padding: 10px 14px 8px; }
+    .upd { padding: 8px 14px; }
     main { padding: 16px 14px 8px; }
+    .pane.page { padding: 16px 14px 16px; }
     .turn { grid-template-columns: minmax(0, 1fr); }
     .stamp, .note { grid-column: 1; }
     .composer { padding: 10px 14px 8px; }
     .local { margin-left: 0; }
     footer { padding: 8px 14px; }
     .empty h1 { font-size: 24px; }
+    .page h2 { font-size: 21px; }
+    .kv { grid-template-columns: minmax(0, 1fr); }
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .tile .n { font-size: 28px; }
   }
 </style>
 </head>
 <body>
 <header>
   <div class="brand">YASAKANI</div>
-  <div class="model" id="model"></div>
+  <div class="model" id="state"><span class="st" id="st"></span><span id="st_more"></span></div>
   <div class="meter" title="tokens per second"><span class="num" id="num">–</span><span class="unit">tok/s</span><span class="what" id="what"></span></div>
+  <button class="btn2" id="quit" type="button" hidden></button>
 </header>
+<nav class="tabs" id="tabs" role="tablist">
+  <button id="t_chat" type="button" role="tab" aria-controls="p_chat" aria-selected="true"></button>
+  <button id="t_speed" type="button" role="tab" aria-controls="p_speed" aria-selected="false" tabindex="-1"></button>
+  <button id="t_api" type="button" role="tab" aria-controls="p_api" aria-selected="false" tabindex="-1"></button>
+  <button id="t_model" type="button" role="tab" aria-controls="p_model" aria-selected="false" tabindex="-1"></button>
+</nav>
 <div class="upd" id="upd" hidden><span id="upd_text"></span><button class="go" id="upd_go" type="button"></button><button class="link" id="upd_later" type="button"></button></div>
-<main id="main"><div class="col" id="log"></div></main>
-<div class="composer"><div class="col">
-  <div class="row">
-    <textarea id="box" rows="1" autofocus></textarea>
-    <button class="send" id="send" type="button"></button>
-  </div>
-  <div class="opts">
-    <label><input type="checkbox" id="think" checked><span id="l_think"></span></label>
-    <button class="link" id="fresh" type="button"></button>
-    <span class="local" id="l_local"></span>
-  </div>
+<div class="upd" id="ask" hidden><span id="ask_text"></span><button class="go" id="ask_yes" type="button"></button><button class="link" id="ask_no" type="button"></button></div>
+<div class="load" id="load" hidden><div class="col">
+  <div class="lt" id="load_text"></div>
+  <div class="track" id="load_bar"><i></i></div>
+  <div class="lh" id="load_hint"></div>
 </div></div>
+
+<section class="pane chat" id="p_chat" role="tabpanel" aria-labelledby="t_chat">
+  <main id="main"><div class="col" id="log"></div></main>
+  <div class="composer"><div class="col">
+    <div class="row">
+      <textarea id="box" rows="1" autofocus></textarea>
+      <button class="send" id="send" type="button"></button>
+    </div>
+    <div class="opts">
+      <label><input type="checkbox" id="think" checked><span id="l_think"></span></label>
+      <label><span id="l_effort"></span><select id="effort"><option value="xhigh" selected></option><option value="medium"></option><option value="low"></option></select></label>
+      <button class="link" id="fresh" type="button"></button>
+      <span class="local" id="l_local"></span>
+    </div>
+  </div></div>
+</section>
+
+<section class="pane page" id="p_speed" role="tabpanel" aria-labelledby="t_speed" hidden><div class="col">
+  <h2 id="sp_title"></h2>
+  <p class="lead" id="sp_lead"></p>
+  <div class="line"><button class="btn" id="sp_go" type="button"></button><span id="sp_state"></span></div>
+  <p class="hint" id="sp_why"></p>
+  <div class="tiles">
+    <div class="tile main"><div class="k" id="sp_l_avg"></div><span class="n" id="sp_avg">–</span><span class="u">tok/s</span></div>
+    <div class="tile"><div class="k" id="sp_l_peak"></div><span class="n" id="sp_peak">–</span><span class="u">tok/s</span></div>
+    <div class="tile"><div class="k" id="sp_l_ttft"></div><span class="n" id="sp_ttft">–</span><span class="u" id="sp_u_sec"></span></div>
+    <div class="tile"><div class="k" id="sp_l_tok"></div><span class="n" id="sp_tok">–</span></div>
+  </div>
+  <p class="hint" id="sp_note"></p>
+  <p class="hint" id="sp_cond"></p>
+</div></section>
+
+<section class="pane page" id="p_api" role="tabpanel" aria-labelledby="t_api" hidden><div class="col">
+  <h2 id="api_title"></h2>
+  <p class="lead" id="api_lead"></p>
+  <div class="kv"><div class="k" id="api_l_base"></div><div class="v line"><code id="api_base">–</code><button class="copy" id="c_base" type="button" data-from="api_base"></button></div></div>
+  <div class="kv"><div class="k" id="api_l_model"></div><div class="v line"><code id="api_model">–</code><button class="copy" id="c_model" type="button" data-from="api_model"></button></div></div>
+  <div class="kv"><div class="k" id="api_l_key"></div><div class="v" id="api_key_v"></div></div>
+  <p class="hint" id="api_note"></p>
+  <div id="api_samples"></div>
+  <p class="hint" id="api_local"></p>
+</div></section>
+
+<section class="pane page" id="p_model" role="tabpanel" aria-labelledby="t_model" hidden><div class="col">
+  <h2 id="md_title"></h2>
+  <div class="kv"><div class="k" id="md_l_state"></div><div class="v" id="m_state"></div></div>
+  <div class="kv"><div class="k" id="md_l_models"></div><div class="v"><div id="m_list"></div><p class="hint bad" id="m_note"></p><p class="hint" id="m_hint"></p></div></div>
+  <div class="kv"><div class="k" id="md_l_gpu"></div><div class="v"><span id="gpu_name"></span><span class="sub" id="gpu_drv"></span></div></div>
+  <div class="kv"><div class="k" id="md_l_mem"></div><div class="v"><div class="mem" id="mem_bar" hidden><i id="mem_fill"></i></div><span id="mem_text"></span></div></div>
+  <div class="kv"><div class="k" id="md_l_ctx"></div><div class="v" id="ctx_v"></div></div>
+  <div class="kv"><div class="k" id="md_l_ver"></div><div class="v" id="ver_v"></div></div>
+  <div class="kv" id="row_quit" hidden><div class="k" id="md_l_quit"></div><div class="v"><button class="btn2" id="quit2" type="button"></button><p class="hint" id="md_quit_hint"></p></div></div>
+</div></section>
+
 <footer id="support"></footer>
+<div class="sr" id="live" aria-live="polite"></div>
 
 <script>
 'use strict';
@@ -154,12 +294,62 @@ const TEXT = {
     w_now: 'いまの速さ', w_avg: 'この回答の平均', w_idle: '',
     s_tok: '{n} トークン', s_sec: '{n} 秒', s_think: 'うち思考 {n}',
     stopped: '止めました。', cut: '上限の長さに達したので、ここで止まりました。',
-    err_net: 'サーバーに届きませんでした。起動ファイルの黒い画面が開いたままか確かめて、もう一度送ってください。',
+    err_net: 'サーバーに届きませんでした。起動ファイルの黒い画面が開いたままか確認して、もう一度送ってください。',
     err_http: 'サーバーが断りました（{c}）: {m}',
     upd: '新しい版 {v} があります', upd_go: '更新する', upd_later: 'あとで',
     upd_wait: '更新しています。終わると、このページは自動で戻ります（エンジンとモデルの読み込みで数分かかることがあります）。',
-    upd_fail: '更新を始められませんでした（{m}）。', upd_lost: 'まだ戻りません。黒い画面に出ているアドレスを開いてください。',
+    upd_fail: '更新を始められませんでした（{m}）。',
+    upd_lost: 'まだ戻りません。更新が終わっていないようです。黒い画面に出ている内容を確認してください。',
+    upd_same: '更新できませんでした。今の版のまま使えます。黒い画面に出ている内容を確認してください。',
     sup: [['strong', '開発を応援してください'], ['a', 'CAMPFIRE のクラウドファンディング（2026 年 12 月 16 日まで）', 'support'], ['a', 'GitHub', 'repo']],
+    tab_chat: 'チャット', tab_speed: 'スピード測定', tab_api: 'API 接続', tab_model: 'モデル・状態',
+    st_ready: '準備完了', st_loading: '読み込み中… {n} 秒', st_switch: '切り替え中… {n} 秒', st_check: '初回の確認中… {n} 秒',
+    st_failed: '起動できませんでした', st_died: 'モデルが止まりました', st_stopped: '終了しました', st_ended: '応答がありません',
+    st_update: '更新中', unknown: '不明',
+    ld_load: '{m}を読み込んでいます… {n} 秒', ld_switch: '{m}に切り替えています… {n} 秒', ld_switch0: 'モデルを切り替えています… {n} 秒',
+    ld_check: '{m}の初回の確認をしています… {n} 秒', ld_check0: 'モデルの初回の確認をしています… {n} 秒',
+    ld_hint: '読み込みには 1 分ほどかかることがあります（パソコンによって変わります）。終わると、このページのまま会話できます。',
+    ld_sw_hint: 'モデルの読み込みに 1 分ほどかかることがあります。初めて使うモデルは、最初に確認をするので数分かかります（進み具合は黒い画面に出ます）。',
+    ld_check_hint: 'このモデルを初めて使う時だけの確認です。数分かかります。進み具合は黒い画面に出ます。',
+    ld_failed: 'モデルを起動できませんでした。黒い画面に出ている内容を確認してください。',
+    ld_died: 'モデルが途中で止まりました。黒い画面に出ている内容を確認してください。',
+    ld_gone: 'サーバーに届きません。起動ファイルの黒い画面が開いたままか確認してください。',
+    ld_ended: 'YASAKANI から応答がありません。終了したか、届かなくなっています。このタブは閉じて構いません。もう一度使う時は START.cmd を開いてください。',
+    ld_stopped: 'YASAKANI のサーバーが止まりました。このタブは閉じて構いません。もう一度使う時は START.cmd を開いてください。',
+    ld_sw_lost: 'モデルの切り替えが終わりませんでした。黒い画面に出ている内容を確認してください。',
+    ph_wait: 'モデルの読み込みが終わると書けます',
+    effort: '思考の量', ef_xhigh: '多い（xhigh）', ef_medium: '中（medium）', ef_low: '少ない（low）',
+    copy: 'コピー', copied: 'コピーしました', copy_fail: '選びました。Ctrl+C でコピーできます',
+    quit: '終了', q_ask: 'YASAKANI を終了しますか？モデルを止めて、GPU のメモリを空けます。', q_yes: '終了する', q_no: 'やめる',
+    q_done: 'YASAKANI を終了しました。このタブは閉じて構いません。もう一度使う時は START.cmd を開いてください。',
+    q_fail: '終了できませんでした（{m}）。黒い画面で Enter を押しても終了できます。',
+    c_retry: '受け付けられませんでした。もう一度押してください。', c_wait: '少しお待ちください…',
+    c_later: 'いまは受け付けられません。少し待って、もう一度押してください。',
+    sp_title: 'スピード測定', sp_lead: '決まった 1 問をこのブラウザーから送り、答えが届く速さを測ります。',
+    sp_run: '測定する', sp_again: 'もう一度測る', sp_avg: '平均', sp_peak: '瞬間最大', sp_ttft: '初回応答（TTFT）', sp_tok: '生成トークン', sec: '秒',
+    sp_running: '測定中… {n} トークン', sp_done: '測定が終わりました（全体で {s} 秒）。', sp_short: '答えが短く、平均を計算できませんでした。',
+    sp_busy: '回答を書いている間は測定できません。', sp_wait: 'モデルの読み込みが終わると測定できます。',
+    sp_note: 'この数字は、この 1 問をブラウザーの中で測った目安です。プロジェクトの標準の測定は "yasakani bench" です。',
+    sp_cond: '条件：英語の 1 問（Python のコードと説明を書く課題）・思考なし・最大 {n} トークン・temperature 0。平均は、最初の出力が届いてから最後の出力が届くまでの速さです。瞬間最大は、最も速かった 1 秒間の速さです。',
+    api_title: 'API 接続', api_lead: 'OpenAI 互換の API です。ほかのアプリやプログラムから、下のアドレスとモデル名で使えます。',
+    api_base: 'アドレス（base_url）', api_model: 'モデル名（model）', api_key: 'API キー',
+    api_key_v: '要りません。キーが必須のアプリには、好きな文字を入れてください。',
+    api_py: 'Python（openai パッケージ）', api_curl: 'curl（コマンドプロンプト）',
+    api_local: 'このアドレスは、このパソコンの中からだけ使えます。YASAKANI を終了すると止まります。',
+    api_wait: 'モデルの読み込みが終わると使えます。', api_off: 'いまは止まっています。', api_none: 'この起動ファイルからは、アドレスを取得できませんでした。',
+    api_odd: 'このモデル名には、サンプルに使えない文字が入っています。サンプルは表示しません。',
+    api_odd_base: 'アドレスがいつもの形と違うので、サンプルは表示しません。',
+    md_title: 'モデル・状態', md_state: '状態', md_models: 'モデル', md_gpu: 'GPU', md_driver: 'ドライバー {v}', md_mem: 'GPU メモリ',
+    md_mem_v: '{u} / {t} MiB を使用中（ほかのアプリの分も含みます）', md_ctx: '文脈の上限', md_ctx_v: '{n} トークン',
+    md_ctx_wait: '読み込みが終わると分かります', md_ver: '起動ファイルの版', md_cur: '使用中', md_wait: '読み込み中', md_check: '確認中',
+    md_switch: '切り替える',
+    md_custom: 'モデルのフォルダーを指定して起動したので、切り替えはできません。',
+    md_old: 'この起動ファイルは、ブラウザーからの切り替えと終了に対応していません。',
+    md_busy: '回答を書いている間は切り替えられません。',
+    md_hint: 'ここに出るのはダウンロード済みのモデルです。ほかのモデルは "START.cmd --model max" のように起動するとダウンロードできます（quality・speed・max。quality と max には GPU のメモリが 24 GB 以上要ります）。',
+    md_sw_fail: '切り替えられませんでした（{m}）。',
+    md_sw_back: '切り替えは終わりませんでした。前のモデルを使っています。黒い画面に出ている内容を確認してください。',
+    md_quit: '終了', md_quit_go: 'YASAKANI を終了する', md_quit_hint: 'モデルを止めて、GPU のメモリを空けます。',
   },
   en: {
     title: 'YASAKANI chat', me: 'You', ai: 'YASAKANI',
@@ -179,44 +369,129 @@ const TEXT = {
     err_http: 'The server refused the request ({c}): {m}',
     upd: 'New version {v} available', upd_go: 'Update', upd_later: 'Later',
     upd_wait: 'Updating. This page comes back by itself when it is done (loading the engine and the model can take a few minutes).',
-    upd_fail: 'The update could not start ({m}).', upd_lost: 'The page has not come back yet. Open the address shown in the black window.',
+    upd_fail: 'The update could not start ({m}).',
+    upd_lost: 'The page has not come back. The update does not seem to have finished. Look at the messages in the black window.',
+    upd_same: 'The update did not work. The current version stays in use. Look at the messages in the black window.',
     sup: [['strong', 'Like it?'], ['a', 'A star on GitHub helps', 'repo'], ['a', 'Crowdfunding on CAMPFIRE', 'support'], ['span', '(open to residents of Japan, until 16 Dec 2026)']],
+    tab_chat: 'Chat', tab_speed: 'Speed', tab_api: 'API', tab_model: 'Model',
+    st_ready: 'ready', st_loading: 'loading… {n} s', st_switch: 'switching… {n} s', st_check: 'first-time check… {n} s',
+    st_failed: 'did not start', st_died: 'the model stopped', st_stopped: 'stopped', st_ended: 'no answer',
+    st_update: 'updating', unknown: 'unknown',
+    ld_load: 'Loading the {m}… {n} s', ld_switch: 'Switching to the {m}… {n} s', ld_switch0: 'Switching the model… {n} s',
+    ld_check: 'Running the first-time checks of the {m}… {n} s', ld_check0: 'Running the first-time checks of the model… {n} s',
+    ld_hint: 'Loading can take about a minute (it depends on the computer). When it is done you can chat on this page as it is.',
+    ld_sw_hint: 'Loading the model can take about a minute. A model that is used for the first time is checked first, which takes a few minutes (the black window shows the progress).',
+    ld_check_hint: 'These checks run only the first time a model is used. They take a few minutes. The black window shows the progress.',
+    ld_failed: 'The model did not start. Look at the messages in the black window.',
+    ld_died: 'The model stopped while it was running. Look at the messages in the black window.',
+    ld_gone: 'The server cannot be reached. Check that the black quickstart window is still open.',
+    ld_ended: 'YASAKANI does not answer. It has ended or cannot be reached. You can close this tab. To use it again, open START.cmd.',
+    ld_stopped: 'The YASAKANI server was stopped. You can close this tab. To use it again, open START.cmd.',
+    ld_sw_lost: 'The model switch did not finish. Look at the messages in the black window.',
+    ph_wait: 'You can write here when the model has loaded',
+    effort: 'Thinking effort', ef_xhigh: 'xhigh (most)', ef_medium: 'medium', ef_low: 'low (least)',
+    copy: 'Copy', copied: 'Copied', copy_fail: 'Selected - press Ctrl+C',
+    quit: 'Quit', q_ask: 'Quit YASAKANI? The model is stopped and the GPU memory is freed.', q_yes: 'Quit', q_no: 'Cancel',
+    q_done: 'YASAKANI was stopped. You can close this tab. To use it again, open START.cmd.',
+    q_fail: 'Could not quit ({m}). Pressing Enter in the black window also quits.',
+    c_retry: 'The request was not accepted. Press the button again.', c_wait: 'One moment…',
+    c_later: 'This cannot be accepted right now. Wait a moment and press again.',
+    sp_title: 'Speed', sp_lead: 'Sends one fixed prompt from this browser and measures how fast the answer arrives.',
+    sp_run: 'Measure', sp_again: 'Measure again', sp_avg: 'average', sp_peak: 'highest moment', sp_ttft: 'first token (TTFT)', sp_tok: 'tokens generated', sec: 's',
+    sp_running: 'Measuring… {n} tokens', sp_done: 'Done ({s} s in all).', sp_short: 'The answer was too short for an average.',
+    sp_busy: 'Cannot measure while an answer is being written.', sp_wait: 'You can measure when the model has loaded.',
+    sp_note: 'This is a rough in-browser figure for this one prompt. The project\'s standard measurement is "yasakani bench".',
+    sp_cond: 'Conditions: one English prompt (write Python code and explain it), thinking off, at most {n} tokens, temperature 0. The average runs from the first piece that arrives to the last one. The highest moment is the fastest single second.',
+    api_title: 'API', api_lead: 'An OpenAI-compatible API. Other apps and programs can use it with the address and the model name below.',
+    api_base: 'Address (base_url)', api_model: 'Model name (model)', api_key: 'API key',
+    api_key_v: 'Not needed. If an app insists on a key, enter any text.',
+    api_py: 'Python (openai package)', api_curl: 'curl (Command Prompt)',
+    api_local: 'This address works only from inside this computer. It stops when YASAKANI is quit.',
+    api_wait: 'It answers when the model has loaded.', api_off: 'It is not running now.', api_none: 'This launcher did not give the address.',
+    api_odd: 'The model name contains characters that cannot be used in a sample. No sample is shown.',
+    api_odd_base: 'The address does not have its usual form, so no sample is shown.',
+    md_title: 'Model and status', md_state: 'Status', md_models: 'Models', md_gpu: 'GPU', md_driver: 'driver {v}', md_mem: 'GPU memory',
+    md_mem_v: '{u} / {t} MiB in use (all apps together)', md_ctx: 'Context limit', md_ctx_v: '{n} tokens',
+    md_ctx_wait: 'known when the model has loaded', md_ver: 'Launcher version', md_cur: 'in use', md_wait: 'loading', md_check: 'checking',
+    md_switch: 'Switch',
+    md_custom: 'Started with a model folder, so switching is off.',
+    md_old: 'This launcher does not support switching and quitting from the browser.',
+    md_busy: 'Cannot switch while an answer is being written.',
+    md_hint: 'The models listed are the ones already downloaded. Start with "START.cmd --model max" (quality, speed or max) to download another one; quality and max need a GPU with 24 GB of memory or more.',
+    md_sw_fail: 'Could not switch ({m}).',
+    md_sw_back: 'The switch did not finish. The model before is in use. Look at the messages in the black window.',
+    md_quit: 'Quit', md_quit_go: 'Quit YASAKANI', md_quit_hint: 'Stops the model and frees the GPU memory.',
   },
 };
+// The fixed labels of the page: element id -> key of TEXT.
+const LABELS = { l_think: 'think', fresh: 'fresh', l_local: 'local', l_effort: 'effort', quit: 'quit', quit2: 'md_quit_go',
+  t_chat: 'tab_chat', t_speed: 'tab_speed', t_api: 'tab_api', t_model: 'tab_model', ask_yes: 'q_yes', ask_no: 'q_no',
+  sp_title: 'sp_title', sp_lead: 'sp_lead', sp_l_avg: 'sp_avg', sp_l_peak: 'sp_peak', sp_l_ttft: 'sp_ttft', sp_l_tok: 'sp_tok', sp_u_sec: 'sec',
+  sp_note: 'sp_note', api_title: 'api_title', api_lead: 'api_lead', api_l_base: 'api_base', api_l_model: 'api_model', api_l_key: 'api_key',
+  api_key_v: 'api_key_v', api_local: 'api_local', c_base: 'copy', c_model: 'copy', md_title: 'md_title', md_l_state: 'md_state',
+  md_l_models: 'md_models', md_l_gpu: 'md_gpu', md_l_mem: 'md_mem', md_l_ctx: 'md_ctx', md_l_ver: 'md_ver', md_l_quit: 'md_quit',
+  md_quit_hint: 'md_quit_hint' };
 let L = TEXT[(navigator.language || 'en').toLowerCase().startsWith('ja') ? 'ja' : 'en'];
 const t = (k, v) => String(L[k]).replace(/\{(\w)\}/g, (m, a) => (v && a in v ? v[a] : m));
 const fmt = n => Number(n).toLocaleString('en-US');
 const cfg = { lang: null, model: 'custom', repo: 'https://github.com/yasakani-dev/yasakani', support: 'https://camp-fire.jp/projects/992233/view' };
+const KNOWN = { speed: 1, quality: 1, max: 1 };
+const TABS = ['chat', 'speed', 'api', 'model'];
 
 let history = [];              // {role, content} sent to the server
 let busy = null;               // AbortController while an answer is being written
+let bench = null;              // AbortController while the speed tab measures
 let ready = false;
 
+// ---- what the launcher and the model are doing, as GET /webchat/status tells it (see tick)
+let phase = 'loading';         // loading | ready | switching | gone | updating, and the final ones: failed | stopped | ended
+let statusApi = true;          // false once /webchat/status answered 404 (an older launcher): /health is asked, as before
+let controls = false;          // the launcher takes "quit" and "switch model" from this page (its config has control_token)
+let health = null;             // the last ready answer of /health, for a config without the model id and the context limit
+let loadBase = 0, loadAt = performance.now();     // the model had been loading for loadBase seconds at the time loadAt
+let switchAt = 0, switchTo = '';                  // a model switch that is under way: since when, and (if this page asked) to what
+let checking = false;          // the launcher says that it runs the first-time checks of a model ("phase": "checking" in the status)
+let ran = false;               // the model was ready at least once since it was started
+let lostAt = 0, lostTries = 0; // the launcher does not answer: since when, and after how many tries
+let endText = '';              // the text that explains a final state (a key of TEXT)
+let tab = 'chat', said = '', updOff = false, benchDone = false;
+let pollTimer = null, gpuTimer = null, clockTimer = null, ticking = false, gap = false, pending = false;
+// How long the page goes on asking a launcher that does not answer.  After that it says so and stops asking (see onStatus).
+const LOST_MS = 20000;                 // usually
+const SWITCH_MS = 20 * 60000;          // after a model switch: the first-time checks of a model take minutes, with or without answers
+const UPDATE_MS = 10 * 60000;          // after the update button
+const ASK_MS = 10000;                  // one question
+
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+// Text that is painted again and again is only written when it changed, so a selection made in it stays.
+function put(id, text) { const e = $(id); if (e.textContent !== text) e.textContent = text; }
+const modelName = k => t('m_' + (k in KNOWN ? k : 'custom'));
+const modelId = () => (typeof cfg.model_id === 'string' && cfg.model_id) || (health && health.model) || '';
+const ctxLimit = () => Number(cfg.max_context_tokens) || (health && Number(health.max_context_tokens)) || 0;
+const waiting = () => phase === 'loading' || phase === 'switching';
+const over = () => phase === 'failed' || phase === 'stopped' || phase === 'ended';      // final: the page asks the launcher nothing more
+const quiet = () => over() || phase === 'updating';        // no status is asked, and an answer that still arrives is dropped
+const sleep = ms => new Promise(done => setTimeout(done, ms));
 
 function applyLanguage() {
   document.documentElement.lang = L === TEXT.ja ? 'ja' : 'en';
   document.title = L.title;
-  $('box').placeholder = L.ph; $('l_think').textContent = L.think; $('fresh').textContent = L.fresh; $('l_local').textContent = L.local;
+  for (const id in LABELS) $(id).textContent = L[LABELS[id]];
+  for (const o of $('effort').options) o.textContent = L['ef_' + o.value];
+  $('sp_cond').textContent = t('sp_cond', { n: fmt(BENCH_MAX) });
   const f = $('support'); f.textContent = '';
   for (const [tag, text, key] of L.sup) {
     const e = el(tag, null, text);
     if (tag === 'a') { e.href = cfg[key]; e.target = '_blank'; e.rel = 'noopener noreferrer'; }
     f.appendChild(e);
   }
-  setButton();
+  refresh();
   if (!history.length && !busy) showEmpty();
 }
 function setButton() {
   const b = $('send');
   b.textContent = busy ? L.stop : L.send; b.classList.toggle('stop', !!busy);
-  b.disabled = !busy && (!ready || !$('box').value.trim());
-}
-function showModel(h) {
-  const name = t('m_' + (cfg.model in { speed: 1, quality: 1, max: 1 } ? cfg.model : 'custom'));
-  if (!h) { $('model').textContent = L.gone; return; }
-  if (h.status !== 'ok') { $('model').textContent = name + '　' + L.loading; return; }
-  $('model').textContent = name + '　' + (h.model || '') + (h.max_context_tokens ? '　' + t('ctx', { n: fmt(h.max_context_tokens) }) : '');
+  b.disabled = !busy && (!ready || !!bench || !$('box').value.trim());
 }
 function showEmpty() {
   const log = $('log'); log.textContent = '';
@@ -225,9 +500,78 @@ function showEmpty() {
   const tries = el('div', 'tries');
   for (const s of L.tries) {
     const [label, prompt] = Array.isArray(s) ? s : [s, s];
-    const b = el('button', null, label); b.type = 'button'; b.onclick = () => { if (!busy && ready) { $('box').value = prompt; send(); } }; tries.appendChild(b);
+    const b = el('button', null, label); b.type = 'button'; b.disabled = !ready;
+    b.addEventListener('click', () => { if (!busy && !bench && ready) { $('box').value = prompt; send(); } }); tries.appendChild(b);
   }
   box.appendChild(tries); log.appendChild(box);
+}
+
+// ---- the state line of the header, the loading strip under the tabs and what is switched off meanwhile.
+//      The strip shows the seconds that have passed and a bar that only moves: how far the loading is, nobody tells the page.
+function loadSeconds() {
+  const now = performance.now();
+  return Math.max(0, Math.floor(switchAt ? (now - switchAt) / 1000 : loadBase + (now - loadAt) / 1000));
+}
+function paintStatus() {
+  const n = loadSeconds();
+  let cls = '', st = '', more = '', text = '', hint = '', bad = false;
+  if (phase === 'ready') {
+    const id = modelId(), ctx = ctxLimit();
+    cls = 'ready'; st = L.st_ready;
+    more = modelName(cfg.model) + (id ? '　' + id : '') + (ctx ? '　' + t('ctx', { n: fmt(ctx) }) : '');
+  } else if (phase === 'loading' && !checking) {
+    cls = 'wait'; st = t('st_loading', { n }); more = modelName(cfg.model); text = t('ld_load', { m: more, n }); hint = L.ld_hint;
+  } else if (waiting()) {               // a model switch, or the checks that run before a model is used for the first time
+    const to = phase === 'switching' ? switchTo : cfg.model, m = typeof to === 'string' && to in KNOWN ? modelName(to) : '';
+    cls = 'wait'; st = t(checking ? 'st_check' : 'st_switch', { n });
+    text = t((checking ? 'ld_check' : 'ld_switch') + (m ? '' : '0'), { m, n });
+    hint = checking ? L.ld_check_hint : L.ld_sw_hint;
+  } else if (phase === 'failed') { cls = 'bad'; st = ran ? L.st_died : L.st_failed; text = ran ? L.ld_died : L.ld_failed; bad = true; }
+  else if (phase === 'stopped') { st = L.st_stopped; text = L[endText] || L.ld_stopped; }
+  else if (phase === 'ended') { bad = endText !== 'ld_ended'; cls = bad ? 'bad' : ''; st = L.st_ended; text = L[endText] || L.ld_ended; }
+  else if (phase === 'updating') { cls = 'wait'; st = L.st_update; }
+  else { cls = 'bad'; st = L.gone; text = L.ld_gone; bad = true; }
+  $('state').className = 'model' + (cls ? ' ' + cls : '');
+  put('st', st); put('st_more', more); put('m_state', st);
+  const load = $('load');
+  load.hidden = !text; load.classList.toggle('bad', bad);
+  put('load_text', text); $('load_bar').hidden = !hint; put('load_hint', hint); $('load_hint').hidden = !hint;
+  const box = $('box'), off = quiet();
+  // "gone" and "ended" leave the box alone: what was typed can still be edited and copied
+  box.disabled = waiting() || phase === 'failed' || phase === 'stopped' || phase === 'updating';
+  box.placeholder = waiting() ? L.ph_wait : L.ph;
+  for (const b of document.querySelectorAll('.tries button')) b.disabled = !ready;
+  $('quit').hidden = !controls; $('row_quit').hidden = !controls;
+  $('quit').disabled = off; $('quit2').disabled = off;
+  const now = phase + (checking ? '+' : '');
+  if (said !== now) { said = now; $('live').textContent = phase === 'loading' && !checking ? L.loading : text || st; }
+}
+function refresh() { paintStatus(); setButton(); paintSpeed(); paintApi(); paintModel(); showUpdate(); }
+
+// ---- copying.  One click on a "copy" button puts the text of its code block (or of the element named in data-from) on the
+//      clipboard.  Where the browser gives no clipboard, the text is selected instead and the button says to press Ctrl+C.
+async function copyText(btn, node) {
+  let done = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(node.textContent); done = true; }
+  } catch (e) { done = false; }
+  if (!done) {
+    try { const r = document.createRange(); r.selectNodeContents(node); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } catch (e) { /* the text stays readable */ }
+  }
+  btn.textContent = done ? L.copied : L.copy_fail;
+  setTimeout(() => { btn.textContent = L.copy; }, done ? 1500 : 6000);
+}
+document.addEventListener('click', e => {
+  const b = e.target instanceof Element ? e.target.closest('button.copy') : null;
+  if (!b) return;
+  const node = b.dataset.from ? $(b.dataset.from) : b.parentNode.querySelector('pre');
+  if (node) copyText(b, node);
+});
+function codeBlock(code) {
+  const box = el('div', 'cb'), pre = el('pre'), b = el('button', 'copy', L.copy);
+  pre.appendChild(el('code', null, code)); b.type = 'button';
+  box.appendChild(pre); box.appendChild(b);
+  return box;
 }
 
 // ---- rendering of one answer.  Everything goes in as text, never as HTML.  The Markdown marks the model uses most are
@@ -277,17 +621,26 @@ function proseInto(node, part) {
     add('p', s);
   }
 }
+// The answer is painted again and again while it arrives.  The pieces between ``` marks that did not change keep their
+// elements (only the last piece grows), so the copy button of a finished code block is still the same button when it is clicked.
+const painted = new WeakMap();           // node -> [{text, nodes}] in the order of the pieces
 function renderInto(node, raw) {
-  node.textContent = '';
-  raw.split(/```/).forEach((part, i) => {
+  const parts = raw.split(/```/);
+  let kept = painted.get(node);
+  if (!kept) { kept = []; painted.set(node, kept); node.textContent = ''; }
+  let same = 0;
+  while (same < kept.length && same < parts.length && kept[same].text === parts[same]) same++;
+  for (const old of kept.splice(same)) for (const n of old.nodes) n.remove();
+  for (let i = same; i < parts.length; i++) {
+    const part = parts[i], piece = document.createDocumentFragment();
     if (i % 2 === 1) {
       const nl = part.indexOf('\n');
       const code = nl >= 0 && /^[\w+#.-]{0,20}$/.test(part.slice(0, nl).trim()) ? part.slice(nl + 1) : part;
-      const pre = el('pre'); pre.appendChild(el('code', null, code.replace(/\n$/, ''))); node.appendChild(pre);
-      return;
-    }
-    proseInto(node, part);
-  });
+      piece.appendChild(codeBlock(code.replace(/\n$/, '')));
+    } else proseInto(piece, part);
+    kept.push({ text: part, nodes: Array.from(piece.childNodes) });
+    node.appendChild(piece);
+  }
 }
 const nearBottom = () => { const m = $('main'); return m.scrollHeight - m.scrollTop - m.clientHeight < 120; };
 const toBottom = () => { const m = $('main'); m.scrollTop = m.scrollHeight; };
@@ -309,7 +662,7 @@ let meterTimer = null, meterFirst = 0;
 function meterTick() {
   const now = performance.now();
   while (arrivals.length && now - arrivals[0] > 1000) arrivals.shift();
-  if (!busy) return;
+  if (!busy && !bench) return;
   if (arrivals.length && !meterFirst) meterFirst = arrivals[0];
   const span = Math.min(1000, now - meterFirst);            // in the first second, divide by the time that has passed
   $('num').textContent = arrivals.length && span >= 250 ? fmt(Math.round(arrivals.length * 1000 / span)) : '–';
@@ -318,10 +671,35 @@ function meterTick() {
 function meterStart() { arrivals.length = 0; meterFirst = 0; $('num').textContent = '–'; $('what').textContent = L.w_now; meterTimer = setInterval(meterTick, 200); }
 function meterEnd(avg) { clearInterval(meterTimer); meterTimer = null; $('num').textContent = avg ? fmt(Math.round(avg)) : '–'; $('what').textContent = avg ? L.w_avg : L.w_idle; }
 
+// ---- one streamed answer of /v1/chat/completions: `each` gets every JSON event of the stream
+async function refusal(r) {
+  let m = r.statusText;
+  try { const j = await r.json(); m = (j.error && j.error.message) || m; } catch (e) { /* not JSON */ }
+  return Object.assign(new Error(t('err_http', { c: r.status, m })), { shown: true });
+}
+async function readEvents(r, each) {
+  const reader = r.body.getReader(); const dec = new TextDecoder('utf-8');
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf('\n\n')) >= 0) {
+      const line = buf.slice(0, cut).trim(); buf = buf.slice(cut + 2);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') continue;
+      let o; try { o = JSON.parse(data); } catch (e) { continue; }
+      each(o);
+    }
+  }
+}
+
 async function send() {
   const box = $('box');
   const text = box.value.trim();
-  if (!text || busy || !ready) return;
+  if (!text || busy || bench || !ready) return;
   box.value = ''; grow();
   addTurn('me', text);
   const conv = history;
@@ -340,50 +718,37 @@ async function send() {
     if (stick) toBottom();
   };
   const painter = setInterval(paint, 66);
-  busy = new AbortController(); setButton(); meterStart();
+  busy = new AbortController(); refresh(); meterStart();
   const payload = { messages: history.slice(), stream: true, stream_options: { include_usage: true } };
+  // Thinking off is a switch of the chat template; with thinking on, reasoning_effort (low, medium, xhigh) says how long the
+  // model thinks (xhigh is also what the model does when nothing is said).
   if (!$('think').checked) payload.chat_template_kwargs = { enable_thinking: false };
+  else payload.reasoning_effort = $('effort').value;
   try {
     const r = await fetch('/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: busy.signal });
-    if (!r.ok) {
-      let m = r.statusText;
-      try { const j = await r.json(); m = (j.error && j.error.message) || m; } catch (e) { /* not JSON */ }
-      throw Object.assign(new Error(t('err_http', { c: r.status, m })), { shown: true });
-    }
-    const reader = r.body.getReader(); const dec = new TextDecoder('utf-8');
-    let buf = '';
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let cut;
-      while ((cut = buf.indexOf('\n\n')) >= 0) {
-        const line = buf.slice(0, cut).trim(); buf = buf.slice(cut + 2);
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (data === '[DONE]') continue;
-        let o; try { o = JSON.parse(data); } catch (e) { continue; }
-        if (o.error) { failed = t('err_http', { c: o.error.code || 500, m: o.error.message || '' }); continue; }
-        if (o.usage) usage = o.usage;
-        const c = o.choices && o.choices[0];
-        if (!c) continue;
-        if (c.finish_reason) finish = c.finish_reason;
-        const d = c.delta || {};
-        const now = performance.now();
-        if (typeof d.reasoning_content === 'string' && d.reasoning_content) { reasoning += d.reasoning_content; nThink++; }
-        else if (typeof d.content === 'string' && d.content) { content += d.content; nAnswer++; }
-        else continue;
-        if (!tFirst) tFirst = now;
-        tLast = now; arrivals.push(now); dirty = true;
-      }
-    }
+    if (!r.ok) throw await refusal(r);
+    await readEvents(r, o => {
+      if (o.error) { failed = t('err_http', { c: o.error.code || 500, m: o.error.message || '' }); return; }
+      if (o.usage) usage = o.usage;
+      const c = o.choices && o.choices[0];
+      if (!c) return;
+      if (c.finish_reason) finish = c.finish_reason;
+      const d = c.delta || {};
+      const now = performance.now();
+      if (typeof d.reasoning_content === 'string' && d.reasoning_content) { reasoning += d.reasoning_content; nThink++; }
+      else if (typeof d.content === 'string' && d.content) { content += d.content; nAnswer++; }
+      else return;
+      if (!tFirst) tFirst = now;
+      tLast = now; arrivals.push(now); dirty = true;
+    });
   } catch (e) {
     if (e.name === 'AbortError') failed = L.stopped; else failed = e.shown ? e.message : L.err_net;
+    if (!e.shown && e.name !== 'AbortError') pollIn(300);        // the state line says soon whether the server is gone
   }
   clearInterval(painter);
   if (conv !== history) return;
   dirty = true; paint();
-  busy = null; setButton();
+  busy = null; refresh();
   const n = usage ? usage.completion_tokens : nThink + nAnswer;
   const secs = (tLast - tFirst) / 1000;
   const avg = n >= 16 && secs > 0.15 ? (n - 1) / secs : 0;
@@ -402,7 +767,7 @@ async function send() {
   if (content) history.push({ role: 'assistant', content });
   else history.pop();                    // nothing was answered: the question is not kept, so it can be sent again
   if (nearBottom()) toBottom();
-  $('box').focus();
+  if (tab === 'chat') $('box').focus();
 }
 
 function grow() { const b = $('box'); b.style.height = 'auto'; b.style.height = Math.min(b.scrollHeight + 2, window.innerHeight * 0.4) + 'px'; setButton(); }
@@ -411,27 +776,359 @@ $('box').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); send(); }
 });
 $('send').addEventListener('click', () => { if (busy) busy.abort(); else send(); });
-$('fresh').addEventListener('click', () => { if (busy) busy.abort(); busy = null; history = []; meterEnd(0); showEmpty(); setButton(); $('box').focus(); });
+$('fresh').addEventListener('click', () => { if (busy) busy.abort(); busy = null; history = []; meterEnd(0); showEmpty(); refresh(); $('box').focus(); });
+$('think').addEventListener('change', () => { $('effort').disabled = !$('think').checked; });
 
-async function poll() {
-  let h = null;
-  try { const r = await fetch('/health', { cache: 'no-store' }); h = await r.json(); } catch (e) { h = null; }
-  ready = !!(h && h.status === 'ok');
-  showModel(h); setButton();
-  setTimeout(poll, ready ? 15000 : 1500);
+// ---- the speed tab.  One fixed prompt, thinking off, sent the way the chat sends its questions.  The figures are a rough
+//      in-browser measurement of this prompt (the page says so); `yasakani bench` gives the project's standard numbers.
+const BENCH_MAX = 768;
+const BENCH_PROMPT = 'Write a Python class for a small LRU cache with get, put and delete, with type hints and docstrings. '
+  + 'Then write five unit tests for it and explain the design in a few short paragraphs.';
+// The highest rate over one full second of the run, in arriving pieces; a run shorter than a second has only its average.
+function peakRate(stamps) {
+  let best = 0, lo = 0;
+  for (let hi = 0; hi < stamps.length; hi++) {
+    while (stamps[hi] - stamps[lo] >= 1000) lo++;
+    if (stamps[hi] - stamps[0] >= 1000) best = Math.max(best, hi - lo + 1);
+  }
+  return best;
 }
+function paintSpeed() {
+  const b = $('sp_go');
+  b.textContent = bench ? L.stop : benchDone ? L.sp_again : L.sp_run; b.classList.toggle('stop', !!bench);
+  b.disabled = !bench && (!ready || !!busy);
+  put('sp_why', bench ? '' : busy ? L.sp_busy : waiting() ? L.sp_wait : '');
+}
+async function measure() {
+  if (bench || busy || !ready) return;
+  const run = bench = new AbortController(), stamps = [];
+  let usage = null, failed = null;
+  for (const id of ['sp_avg', 'sp_peak', 'sp_ttft', 'sp_tok']) $(id).textContent = '–';
+  const state = $('sp_state'); state.className = ''; state.textContent = t('sp_running', { n: 0 });
+  refresh(); meterStart();
+  const live = setInterval(() => { state.textContent = t('sp_running', { n: fmt(stamps.length) }); }, 200);
+  const payload = { messages: [{ role: 'user', content: BENCH_PROMPT }], stream: true, stream_options: { include_usage: true },
+                    temperature: 0, max_tokens: BENCH_MAX, chat_template_kwargs: { enable_thinking: false } };
+  const tSend = performance.now();
+  try {
+    const r = await fetch('/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: run.signal });
+    if (!r.ok) throw await refusal(r);
+    await readEvents(r, o => {
+      if (o.error) { failed = t('err_http', { c: o.error.code || 500, m: o.error.message || '' }); return; }
+      if (o.usage) usage = o.usage;
+      const d = (o.choices && o.choices[0] && o.choices[0].delta) || {};
+      if (!(typeof d.content === 'string' && d.content) && !(typeof d.reasoning_content === 'string' && d.reasoning_content)) return;
+      const now = performance.now();
+      stamps.push(now); arrivals.push(now);
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') failed = L.stopped; else failed = e.shown ? e.message : L.err_net;
+    if (!e.shown && e.name !== 'AbortError') pollIn(300);
+  }
+  clearInterval(live);
+  bench = null; benchDone = true;
+  // The average as the launcher's self-test computes it: the reported tokens over the time between the first and the last piece.
+  const pieces = stamps.length, n = usage ? usage.completion_tokens : pieces;
+  const secs = pieces ? (stamps[pieces - 1] - stamps[0]) / 1000 : 0;
+  const avg = n > 16 && secs > 0.1 ? (n - 1) / secs : 0;
+  const peak = avg ? Math.max(avg, peakRate(stamps) * n / pieces) : 0;       // pieces -> tokens; never under the average
+  meterEnd(avg);
+  $('sp_avg').textContent = avg ? fmt(Math.round(avg)) : '–';
+  $('sp_peak').textContent = peak ? fmt(Math.round(peak)) : '–';
+  $('sp_ttft').textContent = pieces ? ((stamps[0] - tSend) / 1000).toFixed(2) : '–';
+  $('sp_tok').textContent = pieces ? fmt(n) : '–';
+  state.className = failed ? 'hint bad' : '';
+  state.textContent = failed || (avg ? t('sp_done', { s: ((stamps[pieces - 1] - tSend) / 1000).toFixed(1) }) : L.sp_short);
+  refresh();
+}
+$('sp_go').addEventListener('click', () => { if (bench) bench.abort(); else measure(); });
+
+// ---- the API tab: the address of `yasakani serve` for other programs, and two samples made from it.
+//      A sample is program text and a command line that people paste and run.  The model id comes from the model's folder, so
+//      it goes into a sample only when it is made of plain characters (no quote, space, &, |, <, >, ^, % or the like), and the
+//      address only in the form the launcher builds it.  Otherwise the two fields above stay and no sample is shown.
+const ID_OK = /^[A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,199}$/;
+const BASE_OK = /^http:\/\/127\.0\.0\.1:\d{1,5}\/v1$/;
+let apiShown = null;
+function paintApi() {
+  const base = typeof cfg.api_base === 'string' ? cfg.api_base : '', id = modelId();
+  put('api_base', base || '–'); put('api_model', id || '–');
+  $('c_base').disabled = !base; $('c_model').disabled = !id;
+  put('api_note', waiting() ? L.api_wait : phase !== 'ready' && phase !== 'updating' ? L.api_off : !base ? L.api_none : '');
+  const key = base + '\n' + id + '\n' + L.title;
+  if (key === apiShown) return;            // the samples (and their copy buttons) stay as they are until an input changes
+  apiShown = key;
+  const box = $('api_samples'); box.textContent = '';
+  if (!base || !id) return;
+  if (!BASE_OK.test(base)) { box.appendChild(el('p', 'hint', L.api_odd_base)); return; }
+  if (!ID_OK.test(id)) { box.appendChild(el('p', 'hint', L.api_odd)); return; }
+  const py = ['from openai import OpenAI', '',
+              'client = OpenAI(base_url="' + base + '", api_key="unused")',
+              'r = client.chat.completions.create(',
+              '    model="' + id + '",',
+              '    messages=[{"role": "user", "content": "Hello!"}],',
+              ')',
+              'print(r.choices[0].message.content)'].join('\n');
+  const curl = 'curl ' + base + '/chat/completions -H "Content-Type: application/json" ^\n'
+             + '  -d "{\\"model\\":\\"' + id + '\\",\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"Hello!\\"}]}"';
+  box.appendChild(el('h3', null, L.api_py)); box.appendChild(codeBlock(py));
+  box.appendChild(el('h3', null, L.api_curl)); box.appendChild(codeBlock(curl));
+}
+
+// ---- the model tab: the GPU and its memory (read again every few seconds while the tab is on screen), the context limit,
+//      and the downloaded models with a switch button each
+let modelsShown = null;
+function paintModel() {
+  const g = cfg.gpu && typeof cfg.gpu === 'object' ? cfg.gpu : {};
+  put('gpu_name', g.name ? String(g.name) : L.unknown);
+  put('gpu_drv', g.driver ? t('md_driver', { v: String(g.driver) }) : '');
+  const total = typeof g.total_mib === 'number' ? g.total_mib : 0, used = typeof g.used_mib === 'number' ? g.used_mib : -1;
+  const dead = over() || phase === 'gone';                           // what was read before says nothing about now
+  const known = !dead && total > 0 && used >= 0;
+  $('mem_bar').hidden = !known;
+  $('mem_fill').style.width = known ? Math.min(100, used / total * 100).toFixed(1) + '%' : '0';
+  put('mem_text', known ? t('md_mem_v', { u: fmt(used), t: fmt(total) }) : dead ? '–' : L.unknown);
+  const ctx = ctxLimit();
+  put('ctx_v', waiting() ? L.md_ctx_wait : phase !== 'ready' ? '–' : ctx ? t('md_ctx_v', { n: fmt(ctx) }) : L.unknown);
+  put('ver_v', cfg.version ? String(cfg.version) : L.unknown);
+  const custom = !(cfg.model in KNOWN);
+  const rows = (Array.isArray(cfg.models_installed) ? cfg.models_installed : []).filter(m => m && m.name in KNOWN)
+    .map(m => ({ name: m.name, current: !!m.current }));
+  if (!rows.some(m => m.current)) rows.unshift({ name: cfg.model, current: true });
+  // The mark beside a model: in use, loading (during a switch: the model that was asked for), or nothing when no model runs.
+  const coming = checking ? L.md_check : L.md_wait;
+  for (const m of rows) {
+    m.mark = phase === 'ready' ? (m.current ? L.md_cur : '') : phase === 'loading' ? (m.current ? coming : '')
+           : phase === 'switching' ? (m.name === switchTo ? coming : '') : '';
+  }
+  const can = controls && !custom && (phase === 'ready' || phase === 'loading') && !busy && !bench && !pending;
+  put('m_hint', custom ? L.md_custom : !controls ? L.md_old : busy || bench ? L.md_busy : rows.length < 3 && !dead ? L.md_hint : '');
+  const key = JSON.stringify([rows, can, L.title]);
+  if (key === modelsShown) return;         // the buttons stay the same elements between two readings of the config
+  modelsShown = key;
+  const list = $('m_list'); list.textContent = '';
+  for (const m of rows) {
+    const row = el('div', 'line');
+    row.appendChild(el('span', 'nm', modelName(m.name)));
+    if (m.mark) row.appendChild(el('span', 'cur', m.mark));
+    else if (!m.current) { const b = el('button', 'btn2', L.md_switch); b.type = 'button'; b.dataset.model = m.name; b.disabled = !can; row.appendChild(b); }
+    list.appendChild(row);
+  }
+}
+function gpuWatch() {
+  clearTimeout(gpuTimer); gpuTimer = null;
+  if (tab !== 'model' || document.hidden || quiet()) return;
+  gpuTimer = setTimeout(async () => { await loadConfig(); refresh(); gpuWatch(); }, 3000);
+}
+document.addEventListener('visibilitychange', gpuWatch);
+
+// ---- tabs.  All four stay in the page; a tab only shows its part.  The address keeps the name (#speed, #api, #model).
+function showTab(name, fromAddress) {
+  tab = TABS.includes(name) ? name : 'chat';
+  for (const k of TABS) {
+    const on = k === tab, b = $('t_' + k);
+    $('p_' + k).hidden = !on; b.setAttribute('aria-selected', on ? 'true' : 'false'); b.tabIndex = on ? 0 : -1;
+  }
+  if (!fromAddress) { try { window.history.replaceState(null, '', '#' + tab); } catch (e) { /* the address stays */ } }
+  if (tab === 'model' && !quiet()) loadConfig().then(refresh);
+  gpuWatch();
+}
+for (const k of TABS) $('t_' + k).addEventListener('click', () => showTab(k));
+$('tabs').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const next = TABS[(TABS.indexOf(tab) + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length];
+  e.preventDefault(); showTab(next); $('t_' + next).focus();
+});
+window.addEventListener('hashchange', () => showTab(location.hash.slice(1), true));
+
+// ---- the launcher.  GET /webchat/config: the settings (read again when something may have changed).  GET /webchat/status:
+//      what the model is doing.  The page opens while the model is still loading, so it asks about once a second until the
+//      model is ready and a little less often after that.  It does not ask for ever: "stopping" and "failed" end it, and so does a
+//      launcher that stays silent (LOST_MS; much longer after a model switch).  The page then says so and asks nothing more.
+// One GET.  It gives up after ASK_MS, so that a launcher that is busy or gone cannot keep the page waiting.
+async function get(path) {
+  const c = new AbortController(), timer = setTimeout(() => c.abort(), ASK_MS);
+  try { return await fetch(path, { cache: 'no-store', signal: c.signal }); } finally { clearTimeout(timer); }
+}
+async function loadConfig() {
+  try {
+    const r = await get('/webchat/config');
+    if (!r.ok) return false;
+    const c = await r.json();
+    if (!c || typeof c !== 'object' || over()) return false;
+    controls = 'control_token' in c;
+    Object.assign(cfg, { control_token: null }, c);
+    return true;
+  } catch (e) { return false; }             // the settings read before stay
+}
+async function loadHealth() {
+  try {
+    const r = await get('/health'); const h = await r.json();
+    if (h && h.status === 'ok') health = h;
+  } catch (e) { /* the state line shows less */ }
+}
+async function askStatus() {
+  if (statusApi) {
+    try {
+      const r = await get('/webchat/status');
+      if (r.status !== 404) return r.ok ? await r.json() : null;
+      statusApi = false;
+    } catch (e) { return null; }
+  }
+  // An older launcher has no /webchat/status: the engine's /health tells loading from ready, as this page always asked it.
+  // Any answer means that the launcher is there; only a request that fails counts as "no answer".
+  try {
+    const r = await get('/health'); let h = null;
+    try { h = await r.json(); } catch (e) { /* not JSON: not ready */ }
+    if (h && h.status === 'ok') { health = h; return { state: 'ready' }; }
+    return { state: 'loading' };
+  } catch (e) { return null; }
+}
+async function onStatus(s) {
+  if (quiet()) return;            // quit, update or a final state came while the question was under way: that state stands
+  const was = phase, now = performance.now();
+  if (!s || typeof s.state !== 'string') {                  // no answer
+    if (!lostAt) lostAt = now;
+    lostTries++; gap = true; health = null;
+    // Between two models the launcher's server is closed, and before a model is used for the first time the launcher checks
+    // it for minutes, with or without answers: the page keeps the state it shows and waits much longer than usual.
+    const slow = was === 'switching' || checking;
+    if (now - lostAt < LOST_MS || lostTries < 3 || (slow && now - (switchAt || lostAt) < SWITCH_MS)) {
+      if (!slow) { phase = 'gone'; ready = false; }
+      return;
+    }
+    endNow('ended', slow ? 'ld_sw_lost' : 'ld_ended');      // silent for too long: the page says so and stops asking
+    return;
+  }
+  lostAt = 0; lostTries = 0;
+  if (s.state === 'stopping') { endNow('stopped', 'ld_stopped'); return; }      // "quit" in another tab, or Enter in the black window
+  if (s.state === 'failed') { endNow('failed'); return; }   // `yasakani serve` ended by itself
+  checking = s.phase === 'checking';                        // absent with a launcher that does not tell
+  if (s.state === 'switching') {
+    // a switch this page did not ask for (another tab, or the page was loaded during it): the launcher tells how long the checks run
+    if (was !== 'switching') { switchAt = now - (checking && typeof s.elapsed === 'number' && s.elapsed > 0 ? s.elapsed * 1000 : 0); switchTo = ''; health = null; }
+    if (checking && !switchTo && typeof s.model === 'string' && s.model in KNOWN) switchTo = s.model;       // the model that is checked
+    phase = 'switching'; ready = false; ran = false; return;
+  }
+  const up = s.state === 'ready', other = typeof s.model === 'string' && s.model !== cfg.model;
+  // Right after a switch was accepted, an answer that still names another model is the old server's last word.
+  if (was === 'switching' && switchTo && typeof s.model === 'string' && s.model !== switchTo && now - switchAt < 15000) return;
+  if (gap || other || was === 'switching' || was === 'gone' || (up && was !== 'ready')) {
+    gap = false;
+    if (other || was === 'switching') health = null;
+    await loadConfig();                                     // the model, a new control token and, once ready, the context limit
+    if (up && !ctxLimit()) await loadHealth();
+    if (phase !== was) return;                              // a button was pressed meanwhile (quit, switch, update): its state stands
+  }
+  if (typeof s.elapsed === 'number') { loadBase = s.elapsed; loadAt = now; }
+  else if (!up && was !== 'loading') { loadBase = 0; loadAt = now; }
+  phase = up ? 'ready' : 'loading'; ready = up;
+  if (switchTo && typeof s.model === 'string' && s.model !== switchTo) $('m_note').textContent = L.md_sw_back;      // the launcher went back to the model before
+  switchAt = 0; switchTo = '';                              // the switch is over: the seconds shown are the launcher's own again
+  if (up) { ran = true; checking = false; }
+}
+function pollIn(ms) { clearTimeout(pollTimer); pollTimer = setTimeout(tick, ms); }
+async function tick() {
+  if (ticking || quiet()) return;
+  ticking = true;
+  const was = phase;
+  try { await onStatus(await askStatus()); } catch (e) { /* the next round asks again */ }
+  ticking = false;
+  if (quiet()) return;
+  refresh();
+  if (phase === 'ready' && was !== 'ready' && tab === 'chat' && (!document.activeElement || document.activeElement === document.body)) $('box').focus();
+  // Also when ready the page asks often: after Enter in the black window, or when the model ended by itself, the launcher's
+  // server says "stopping" or "failed" for about two seconds only, and the page should hear it and say so.
+  pollIn(waiting() ? 1000 : 1500);
+}
+
+// ---- quit and model switch.  Like the update button below, they ask the launcher (this address) with a one-time token of
+//      /webchat/config, here in the X-YASAKANI-Control header.  A token that was refused is never sent again by itself: the
+//      config is read once more and the person presses the button again.
+//      `say` shows a short text while the page waits; `wanted` says whether the person still wants it when the wait is over.
+async function control(path, body, say, wanted) {
+  if (!cfg.control_token) {
+    // The token in hand was used, or none came yet: the config has the next one.  Right after a model switch the launcher's
+    // new server needs a moment, so the config is asked for a few seconds; the page says "one moment" meanwhile.
+    if (say) say(L.c_wait);
+    const until = performance.now() + 8000;
+    for (;;) {
+      await loadConfig();
+      if (cfg.control_token || quiet() || !(waiting() || phase === 'gone') || performance.now() >= until) break;
+      await sleep(1000);
+    }
+  }
+  if (quiet() || (wanted && !wanted())) return { ok: false, dropped: true };
+  const token = cfg.control_token;
+  if (!token) return { ok: false, later: true };            // nothing can be accepted now (a switch or the checks are under way)
+  cfg.control_token = null;
+  let r;
+  try {
+    r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-YASAKANI-Control': token }, body: JSON.stringify(body), cache: 'no-store' });
+  } catch (e) { return { ok: false, message: L.gone }; }
+  if (r.status === 202) return { ok: true };
+  let message = 'HTTP ' + r.status;
+  try { const j = await r.json(); if (j.error && j.error.message) message = j.error.message + ' - ' + message; } catch (e) { /* not JSON */ }
+  await loadConfig();
+  return { ok: false, message, retry: r.status === 403 && !!cfg.control_token };
+}
+// The final states: "stopped" (quit), "failed" (the model ended by itself) and "ended" (the launcher stayed silent, or a
+// switch or an update never came back).  `why` names the text that explains it.  From here on nothing asks the launcher.
+function endNow(state, why) {
+  phase = state; ready = false; checking = false; endText = why || '';
+  if (state === 'stopped') { if (busy) busy.abort(); if (bench) bench.abort(); }
+  clearTimeout(pollTimer); clearTimeout(gpuTimer); clearInterval(clockTimer);
+  $('ask').hidden = true; $('upd').hidden = true; updOff = true;
+  refresh();
+}
+let asked = 0;                 // counts the quit questions: a "yes" counts only for the question it was given to
+function askQuit() {
+  if (quiet()) return;
+  asked++;
+  $('ask_text').textContent = L.q_ask; $('ask_yes').disabled = false; $('ask').hidden = false;
+  $('ask_no').focus();
+}
+$('quit').addEventListener('click', askQuit);
+$('quit2').addEventListener('click', askQuit);
+$('ask_no').addEventListener('click', () => { asked++; $('ask').hidden = true; });
+$('ask_yes').addEventListener('click', async () => {
+  const mine = asked;
+  $('ask_yes').disabled = true;
+  const res = await control('/webchat/shutdown', {}, text => { $('ask_text').textContent = text; }, () => asked === mine);
+  if (res.ok) { endNow('stopped', 'q_done'); return; }
+  if (res.dropped) return;                                  // "cancel" was pressed meanwhile, or it ended by itself
+  $('ask_yes').disabled = false;
+  $('ask_text').textContent = res.later ? L.c_later : res.retry ? L.c_retry : t('q_fail', { m: res.message });
+});
+$('m_list').addEventListener('click', async e => {
+  const b = e.target instanceof Element ? e.target.closest('button[data-model]') : null;
+  if (!b || b.disabled || pending || busy || bench) return;
+  const name = b.dataset.model;
+  pending = true; $('m_note').textContent = ''; paintModel();
+  const res = await control('/webchat/switch_model', { model: name }, text => { $('m_note').textContent = text; });
+  pending = false;
+  $('m_note').textContent = res.ok || res.dropped ? '' : res.later ? L.c_later : res.retry ? L.c_retry : t('md_sw_fail', { m: res.message });
+  if (res.ok && !quiet()) {
+    phase = 'switching'; ready = false; ran = false; checking = false; health = null;
+    switchAt = performance.now(); switchTo = name; lostAt = 0; lostTries = 0;
+    pollIn(1000);
+  }
+  refresh();
+});
+
 // The launcher found a newer version.  The page itself asks nothing of GitHub; the button asks the launcher (this address),
 // with the one-time token of /webchat/config.  The launcher stops the server, updates and starts again on the same port.
 function showUpdate() {
   const u = cfg.update;
-  if (!u || !cfg.update_token) return;
+  if (!u || !cfg.update_token || updOff || !$('upd').hidden) return;
   $('upd_text').textContent = t('upd', { v: u.version });
   $('upd_go').textContent = L.upd_go; $('upd_later').textContent = L.upd_later;
   $('upd').hidden = false;
 }
-$('upd_later').addEventListener('click', () => { $('upd').hidden = true; });
+$('upd_later').addEventListener('click', () => { $('upd').hidden = true; updOff = true; });
 $('upd_go').addEventListener('click', async () => {
   if (busy) busy.abort();
+  if (bench) bench.abort();
   $('upd_go').disabled = true;
   try {
     const r = await fetch('/webchat/update', { method: 'POST', headers: { 'X-Yasakani-Token': cfg.update_token }, cache: 'no-store' });
@@ -440,26 +1137,37 @@ $('upd_go').addEventListener('click', async () => {
     $('upd_text').textContent = t('upd_fail', { m: e.message }); $('upd_go').disabled = false; return;
   }
   cfg.update_token = null;
+  phase = 'updating'; ready = false; checking = false; updOff = true;          // the page loads again when the new version answers (below)
+  clearTimeout(pollTimer); clearTimeout(gpuTimer); $('ask').hidden = true;
+  refresh();
   $('upd_go').hidden = true; $('upd_later').hidden = true; $('send').disabled = true;
   $('upd_text').textContent = L.upd_wait;
-  const t0 = Date.now(), old = cfg.version;
+  const t0 = performance.now(), old = cfg.version, oldToken = cfg.control_token;
+  let away = false;                       // the server that took the request was seen gone
   (async function back() {
-    try {
-      const r = await fetch('/webchat/config', { cache: 'no-store' });
-      if (r.ok) { const c = await r.json(); if (c.version && c.version !== old) { location.reload(); return; } }
-    } catch (e) { /* not back yet */ }
-    if (Date.now() - t0 > 20 * 60 * 1000) { $('upd_text').textContent = L.upd_lost; return; }
+    let c = null;
+    try { const r = await get('/webchat/config'); if (r.ok) c = await r.json(); } catch (e) { if (e.name !== 'AbortError') away = true; }
+    if (phase !== 'updating') return;
+    if (c && c.version && c.version !== old) { location.reload(); return; }
+    if (c && typeof c === 'object' && (away || (typeof c.control_token === 'string' && c.control_token !== oldToken))) {
+      // A new server of the launcher answers with the version it had: the update did not work and nothing changed.
+      controls = 'control_token' in c; Object.assign(cfg, { control_token: null }, c);
+      phase = 'loading'; loadBase = 0; loadAt = performance.now(); gap = true;
+      $('upd_text').textContent = L.upd_same;
+      tick(); return;
+    }
+    // Not back in time: the update did not finish (the black window says why).  The page says so and stops asking.
+    if (performance.now() - t0 > UPDATE_MS) { endNow('ended', 'upd_lost'); return; }
     setTimeout(back, 2000);
   })();
 });
 
 (async function start() {
-  try {
-    const r = await fetch('/webchat/config', { cache: 'no-store' });
-    if (r.ok) Object.assign(cfg, await r.json());
-  } catch (e) { /* the defaults stay */ }
+  await loadConfig();                       // without an answer the defaults stay
   if (cfg.lang && TEXT[cfg.lang]) L = TEXT[cfg.lang];
-  applyLanguage(); grow(); poll(); showUpdate();
+  applyLanguage(); grow(); showTab(location.hash.slice(1), true);
+  clockTimer = setInterval(() => { if (waiting()) paintStatus(); }, 500);
+  tick();
 })();
 </script>
 </body>
