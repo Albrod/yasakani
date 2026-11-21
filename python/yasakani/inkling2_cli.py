@@ -118,7 +118,8 @@ def cmd_info(args) -> int:
         print("binding  %s  (drafter calls: %s)" % (binding.name, "yes" if all(callable(getattr(mod.Ink2Native, n, None))
                                                                              for n in ink.DRAFT_CALLS) else "no, drafting not available"))
         caps = int(getattr(lib, "caps", 0) or 0)
-        names = [n for bit, n in ((1, "packed dense matrices"), (2, "drafter")) if caps & bit]
+        names = [n for bit, n in ((1, "packed dense matrices"), (2, "drafter"), (4, "converted drafter files"),
+                                  (8, "3-bit drafter matrices")) if caps & bit]
         print("         engine capabilities: %s" % (", ".join(names) if names else "none"))
     except (YasakaniError, OSError, AttributeError) as ex:
         print("engine   NOT FOUND:", ex)
@@ -139,9 +140,11 @@ def cmd_info(args) -> int:
         if not d:
             print("  drafter    none (generation without drafting)")
         else:
-            print("  drafter    %-36s %s  (%s)%s" % (d["file"], _human((pack.root / d["file"]).stat().st_size) if pack.drafter else "-",
-                                                 d.get("format", "hf-safetensors"), "  PROBLEM: " + pack.drafter_problem
-                                                 if pack.drafter_problem else ""))
+            print("  drafter    %-36s %s  (%s%s)%s" % (d["file"], _human((pack.root / d["file"]).stat().st_size) if pack.drafter else "-",
+                                                   d.get("format", "hf-safetensors"),
+                                                   ", version %s, scheme %s" % (d.get("version", 2), d.get("scheme"))
+                                                   if pack.drafter_format == "yskn" else "",
+                                                   "  PROBLEM: " + pack.drafter_problem if pack.drafter_problem else ""))
         print("  sampling   temperature %g, top_p %g, top_k %d (generation_config.json); stop ids %s"
               % (pack.sampling["temperature"], pack.sampling["top_p"], pack.sampling["top_k"], pack.stop_ids))
         print("  checksums  %d files listed in yasakani.json" % len(pack.sha256))
@@ -176,6 +179,17 @@ def cmd_verify(args) -> int:
                                                                             + (" ..." if len(tbad) > 8 else "")))
             return 1
         print("tensors: the CRC-32 of every tensor of %s matches." % pack.weights.name)
+    if pack.drafter_format == "yskn" and pack.drafter is not None:
+        try:
+            dbad = pack.check_drafter()
+        except ValueError as ex:                          # ink2_yskn.FormatError
+            print("drafter: %s cannot be read: %s" % (pack.drafter.name, ex))
+            return 1
+        if dbad:
+            print("drafter: the CRC-32 of %d tensor(s) of %s differs: %s" % (len(dbad), pack.drafter.name, ", ".join(dbad[:8])
+                                                                            + (" ..." if len(dbad) > 8 else "")))
+            return 1
+        print("drafter: the CRC-32 of every tensor of %s matches." % pack.drafter.name)
     return 0 if not bad else 1
 
 

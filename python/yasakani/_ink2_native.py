@@ -36,6 +36,8 @@ from . import _ink2_ckpt as ink2_ckpt  # numpy only
 TAKES_PACKED_DENSE = True  # load() hands packed dense matrices to a DLL that accepts them (ABI 3, CAP_PACKED_DENSE)
 CAP_PACKED_DENSE = 1       # bit of ink2_capabilities()
 CAP_DRAFTER = 2            # bit of ink2_capabilities(): the drafter calls of ink2_drafter_api.h
+CAP_DRAFTER_PACKED = 4     # bit: the drafter takes packed matrices and a packed folded head (ink2_draft_abi() >= 2)
+CAP_Q3 = 8                 # bit: the 3-bit format q3 for the drafter matrices
 PACKED_ENCODINGS = {"NVFP4": "nvfp4", "MXFP8": "mxfp8"}  # info() dtype of a packed dense matrix -> its encoding
 
 FULL_WEIGHTS = "model-00001-of-00001.safetensors"

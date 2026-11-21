@@ -22,11 +22,13 @@ xhigh, max or a number from 0 to 0.99; default 0.9).  The model card says that e
 thinking off, so ``enable_thinking: false`` sets the effort to 0 and starts the reply with an answer block
 (``<|message_model|><|content_text|>``) so that no thinking is written.
 
-The drafter (the ``drafter`` entry of yasakani.json: the model's published ``mtp.safetensors``) proposes a few tokens that the
+The drafter (the ``drafter`` entry of yasakani.json: the model's published ``mtp.safetensors``, or in a folder converted with
+``--scheme quality`` the converted drafter file ``mtp_d4.yskn``, docs/FORMAT.md section 10.6) proposes a few tokens that the
 model checks in one pass (speculative decoding).  The output does not change: greedy gives the same tokens, sampling the same
 distribution (and with a fixed seed the same tokens, see ``Sampler.seek``).  ``--draft auto | on | off`` / ``$YASAKANI_DRAFT``:
 auto (default) lets the engine use the drafter only while it makes generation faster, on always drafts, off does not load it.
-A folder without the drafter, or an engine library without the drafter calls, generates without drafting.
+A folder without the drafter, or an engine library without the drafter calls (or, for a converted drafter file, without the
+capability to multiply it as stored), generates without drafting; with ``on`` that is an error.
 
 Tool calls (OpenAI ``tools``; the parsing draws on PR #28 by @audreyt): the template declares the tools in a block
 ``<|message_system|>tool_declare<|content_xml|>[JSON specs]<|end_message|>`` and writes a call of an earlier turn as
@@ -83,7 +85,8 @@ ROLLBACK_ENV = "YASAKANI_INK2_ROLLBACK"
 # can do without a new reading of the conversation up to this many positions.  Costs GPU memory for the rings of the sliding layers.
 DEFAULT_ROLLBACK = 512
 MAX_DRAFT_DEPTH = 7
-DRAFTER_FORMATS = ("hf-safetensors",)
+DRAFTER_FORMATS = ("hf-safetensors", "yskn")   # the published mtp.safetensors, or a converted drafter file (.yskn version 2)
+CAP_DRAFTER_PACKED = 4                 # ink2_capabilities() bit: the engine multiplies a converted drafter file as stored
 DRAFT_CALLS = ("draft_load", "draft_mode", "spec_step", "spec_stats")   # what the engine wrapper needs for drafting
 # reasoning_effort values of the chat template (its effort_map); the server and the chat accept these names
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
@@ -189,6 +192,8 @@ class Ink2Pack:
         if d:
             if str(d.get("format") or "hf-safetensors") not in DRAFTER_FORMATS:
                 problem = "drafter format %r is not supported by this version of the package" % d.get("format")
+            elif d.get("format") == "yskn" and d.get("version", 2) != 2:
+                problem = "drafter file version %r is not supported by this version of the package" % d.get("version")
             elif not (root / d["file"]).is_file():
                 problem = "the drafter file %s is missing" % d["file"]
             else:
@@ -229,6 +234,19 @@ class Ink2Pack:
             return []
         from .ink2_yskn import YsknFile
         with YsknFile(self.weights) as yf:
+            return sorted({n for n, _ in yf.check(threads=threads)})
+
+    @property
+    def drafter_format(self) -> str:
+        """hf-safetensors (the published drafter) or yskn (a converted drafter file); "" without a drafter entry."""
+        return str(self.drafter_entry.get("format") or "hf-safetensors") if self.drafter_entry else ""
+
+    def check_drafter(self, threads: int = 8) -> List[str]:
+        """A converted drafter file (.yskn): the CRC-32 of every tensor part -> the names of the tensors that differ."""
+        if self.drafter is None or self.drafter_format != "yskn":
+            return []
+        from .ink2_yskn import YsknFile
+        with YsknFile(self.drafter) as yf:
             return sorted({n for n, _ in yf.check(threads=threads)})
 
 
@@ -771,6 +789,12 @@ class Ink2Engine:
             note = "drafter: %s; generation without drafting" % (pack.drafter_problem or "none in this model folder")
         elif not all(callable(getattr(self.native, n, None)) for n in DRAFT_CALLS):
             note = "drafter: drafting is not available with this engine library (no drafter calls); generation without drafting"
+        elif pack.drafter_format == "yskn" and not self.takes_converted_drafter():
+            problem = ("%s is a converted drafter file, which this engine library cannot multiply (it needs a yskn_inkling2.dll of "
+                       "0.3.1 or newer)" % pack.drafter.name)
+            if mode == "on":
+                raise YasakaniError("the drafter could not be loaded: " + problem)
+            note = "drafter: %s; generation without drafting" % problem
         else:
             try:
                 self.native.draft_load(str(pack.drafter))
@@ -788,11 +812,33 @@ class Ink2Engine:
             else:
                 self.drafting, self.draft_mode, self.draft_depth = True, str(st.get("mode", mode)), int(st.get("depth") or 0)
                 self.reset()                                 # the drafter's context starts with the next prompt
-                note = "drafter: %s loaded, mode %s, depth %d%s" % (
-                    pack.drafter.name, self.draft_mode, self.draft_depth,
+                note = "drafter: %s loaded%s, mode %s, depth %d%s" % (
+                    pack.drafter.name, self._drafter_form(pack), self.draft_mode, self.draft_depth,
                     " (used only while it makes generation faster)" if self.draft_mode == "auto" else "")
         self.draft_note = note
         return note
+
+    def takes_converted_drafter(self) -> bool:
+        """The engine library multiplies the matrices of a converted drafter file as stored (capability bit 4, drafter
+        interface version 2 or newer)."""
+        lib = getattr(self.native, "lib", None)
+        if lib is None or not int(getattr(lib, "caps", 0) or 0) & CAP_DRAFTER_PACKED:
+            return False
+        try:
+            return int(lib.ink2_draft_abi()) >= 2
+        except (AttributeError, OSError):
+            return False
+
+    def _drafter_form(self, pack: "Ink2Pack") -> str:
+        """" (converted, scheme d4, 30 matrices multiplied as stored)" for a converted drafter file, else ""."""
+        if pack.drafter_format != "yskn":
+            return ""
+        n = 0
+        try:
+            n = int(self.native.draft_packed()) if callable(getattr(self.native, "draft_packed", None)) else 0
+        except RuntimeError:
+            pass
+        return " (converted, scheme %s, %d matrices multiplied as stored)" % (pack.drafter_entry.get("scheme") or "?", n)
 
     def can_draft(self) -> bool:
         """A drafting pass fits: drafter loaded and room for the anchor and every proposed token in the context."""

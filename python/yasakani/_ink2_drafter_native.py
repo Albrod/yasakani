@@ -4,10 +4,17 @@
 
 Installed into _ink2_native.Ink2Native by install() (one line at the end of _ink2_native.py).
 
-    eng.draft_load(path)                       # mode "auto" afterwards
+    eng.draft_load(path)                       # mode "auto" afterwards; path: mtp.safetensors (BF16 as published)
+                                               # or a converted drafter file mtp_<d8|d4|d3>.yskn (tools/convert/inkling2_convert.py)
     eng.draft_mode("on", depth=4)              # / "off" / "auto"
     accepted, nxt, logits = eng.spec_step(anchor, pick=None, want_logits=False)
     eng.spec_stats(reset=False)
+    eng.draft_cut(None)                        # "auto" without the confidence cut (as in 0.3.0)
+    eng.draft_cut({"metric": "cum", "thr": [...], "max_depth": 7, "on": False})   # another rule
+
+After draft_load, "auto" uses DEFAULT_CUT (when the library has ink2_spec_pass2): CutGovernor decides on / off,
+each pass drafts up to 7 tokens and verifies only those before the first unsure one (ink2_spec_pass2, one read-back of
+9 ints after the draft call). Mode "on" keeps its fixed depth unless the rule has "on": True.
 
 The drafter context lives in the DLL and is committed by every pass of the engine, so
 feed_many / step / reset / truncate keep it in step without anything here.
@@ -22,6 +29,11 @@ import time
 import numpy as np
 
 from . import _ink2_ckpt as ink2_ckpt  # numpy only
+from . import _ink2_drafter_common as ydc
+
+CAP_DRAFTER_PACKED = 4  # ink2_capabilities(): packed drafter matrices (nvfp4 / mxfp8) and packed folded head
+CAP_Q3 = 8              # ink2_capabilities(): the 3-bit format q3
+FORMAT_CODE = {"nvfp4": 1, "mxfp8": 2, "q3": 3}
 
 DRAFT_TENSORS = (
     ("dflare", "dflare_norm.weight"), ("in_ln", "input_layernorm.weight"), ("post_ln", "post_attention_layernorm.weight"),
@@ -36,6 +48,10 @@ MAX_DEPTH = 7
 PASS_RATIO = [1.0, 8.60 / 5.98, 9.84 / 5.98, 10.84 / 5.98, 11.79 / 5.98, 12.68 / 5.98, 13.59 / 5.98, 14.63 / 5.98]
 # Acceptance by depth of the reference (8 prompts pooled): prior.
 PRIOR_ACCEPT = [0.684, 0.686, 0.711, 0.730, 0.742, 0.736, 0.733]
+# The cut rule used by "auto" after draft_load (simulated on the token walks of both model folders, RTX 5090):
+# draft up to 7 tokens, verify them while the running product of the drafter's top probabilities stays at or above
+# 0.60 (draft 1) / 0.65 (drafts 2 .. 7). draft_cut(None) gives the behaviour of 0.3.0 (Governor, fixed depths).
+DEFAULT_CUT = {"metric": "cum", "thr": [0.60, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65], "max_depth": 7}
 
 
 class Ink2DraftConfig(ctypes.Structure):
@@ -69,6 +85,16 @@ def _bind(lib):
     lib.ink2_draft_memory.argtypes = [vp]
     lib.ink2_draft_memory.restype = cll
     lib.ink2_draft_get.argtypes = [vp, ci, ci, vp, cll]
+    try:  # confidence cut (absent in older libraries)
+        lib.ink2_draft_set_cut.argtypes = [vp, ci, vp]
+        lib.ink2_spec_pass2.argtypes = [vp, ci, ci, vp, vp, ci, vp]
+        lib._has_cut = True
+    except AttributeError:
+        lib._has_cut = False
+    lib.draft_abi = int(lib.ink2_draft_abi())
+    if lib.draft_abi >= 2:
+        lib.ink2_draft_packed.argtypes = [vp]
+        lib.ink2_draft_packed.restype = ci
     lib._drafter_bound = True
     return True
 
@@ -244,6 +270,57 @@ class Governor:
         self.t_spec[d] = seconds if self.t_spec[d] is None else (1 - b) * self.t_spec[d] + b * seconds
 
 
+class CutGovernor:
+    """on / off for drafting with the confidence cut ("auto" with a cut rule; the depth is the rule's).
+
+    While on, every spec_step drafts up to D tokens and verifies only the sure ones. Rate of the cut passes: EWMA of the
+    tokens per pass over the EWMA of their wall time, against the plain step (EWMA of plain steps; the first two plain
+    steps measure it). Off when that rate falls below off_margin times the plain rate; while off one probe pass every
+    probe_every plain steps (the probe moves the averages by probe_beta); on again at on_margin. Defaults: chosen in simulations of the token walks.
+    """
+
+    def __init__(self, beta=0.15, on_margin=1.04, off_margin=1.0, probe_every=16, probe_beta=0.5):
+        self.beta, self.on_margin, self.off_margin = beta, on_margin, off_margin
+        self.probe_every, self.probe_beta = probe_every, probe_beta
+        self.t_plain, self.n_plain = None, 0
+        self.tok, self.sec = None, None
+        self.active, self.since = True, 0
+
+    def choose(self):
+        """-> draft now (bool), is_probe."""
+        if self.t_plain is None or self.n_plain < 2:
+            return False, False
+        if self.active:
+            return True, False
+        self.since += 1
+        if self.since >= self.probe_every:
+            self.since = 0
+            return True, True
+        return False, False
+
+    def update_plain(self, seconds):
+        self.n_plain += 1
+        if self.n_plain == 1:
+            return  # the first step may record its graph
+        b = self.beta
+        self.t_plain = seconds if self.t_plain is None else (1 - b) * self.t_plain + b * seconds
+
+    def update_spec(self, tokens, seconds, probe=False):
+        b = self.probe_beta if probe else self.beta
+        if self.tok is None:
+            self.tok, self.sec = float(tokens), float(seconds)
+        else:
+            self.tok = (1 - b) * self.tok + b * tokens
+            self.sec = (1 - b) * self.sec + b * seconds
+        if self.t_plain is None:
+            return
+        rate = self.tok / self.sec * self.t_plain
+        if self.active and rate < self.off_margin:
+            self.active, self.since = False, 0
+        elif not self.active and rate >= self.on_margin:
+            self.active = True
+
+
 def _lib_ok(self):
     if self.lib is None or self.h is None:
         raise RuntimeError("load the model first")
@@ -251,13 +328,27 @@ def _lib_ok(self):
         raise RuntimeError("this engine library has no drafter (ink2_draft_* missing)")
 
 
-def draft_load(self, path, config=None, fold="bf16", calibrate=True):
-    """Loads the drafter weights (mtp.safetensors) to the device. config: the mtp_config dict
-    (default: config.json of the model folder). fold: "bf16" (default), "f32" or "both".
-    Positions seen before are fed again (the drafter needs their features). Mode "auto" afterwards."""
+def _is_yskn(path):
+    with open(path, "rb") as f:
+        return f.read(4) == b"YSKN"
+
+
+def draft_load(self, path, config=None, fold="bf16", calibrate=True, check=True, cut="default"):
+    """Loads the drafter weights to the device: the published mtp.safetensors (BF16) or a converted drafter file
+    (.yskn version 2, model.arch "inkling2-drafter": matrices packed, multiplied as stored; check: the CRC-32 of every
+    part first). config: the mtp_config dict (default: config.json of the model folder). fold (published file):
+    "bf16" (default), "f32" or "both"; a converted file brings its packed folded head (used when it was made with the
+    engine's U, else the head is folded again here and sent as fold). Positions seen before are fed again (the drafter
+    needs their features). Mode "auto" afterwards. cut: the confidence cut of "auto" (see draft_cut);
+    "default" = DEFAULT_CUT when the library has ink2_spec_pass2."""
     _lib_ok(self)
     if not os.path.exists(path):
         raise RuntimeError("drafter file not found: %s" % path)
+    self.draft_format = "safetensors"
+    self.draft_fold_source = "folded at load"
+    self.draft_check_seconds = 0.0
+    if _is_yskn(path):
+        return _draft_load_yskn(self, path, config, fold, calibrate, check, cut)
     if config is None:
         with open(os.path.join(self.model_dir, "config.json"), encoding="utf-8") as f:
             config = json.load(f).get("mtp_config")
@@ -346,8 +437,15 @@ def draft_load(self, path, config=None, fold="bf16", calibrate=True):
         self.lib.ink2_draft_unload(self.h)
         raise
     self.draft_load_seconds = time.perf_counter() - t0
+    return _draft_after_load(self, path, calibrate, cut)
+
+
+def _draft_after_load(self, path, calibrate, cut):
+    """The end of both load paths: governors, mode "auto", the positions seen fed again, calibration, the cut rule."""
     self.draft_path = path
     self._gov = Governor()
+    self._cgov = CutGovernor()
+    self._cut = None
     self._d_mode, self._d_depth = "auto", 4
     self.spec_stats(reset=True)
     if self.num_seen:  # the drafter needs the features of every position seen
@@ -356,7 +454,189 @@ def draft_load(self, path, config=None, fold="bf16", calibrate=True):
         self.feed_many(keep)
     if calibrate:
         self.draft_calibrate()
+    if cut == "default":
+        cut = DEFAULT_CUT if getattr(self.lib, "_has_cut", False) else None
+    self.draft_cut(cut)
     return self
+
+
+def _draft_config(self, mc, w1_rows, H, nl, nh, nkv, D, I, r):
+    tl = list(mc["target_layer_ids"])
+    if len(tl) != 4 or tl[-1] != self.num_visits:
+        raise RuntimeError("drafter: target_layer_ids %s do not fit %d visits" % (tl, self.num_visits))
+    feat_visits = []
+    for v in tl[:3]:
+        if v < 1 or v >= self.num_visits:
+            raise RuntimeError("drafter: target visit %d out of range" % v)
+        layer, pas = self.visits[v]
+        if pas > 0 and layer == self.cfg["loop_start"]:
+            raise RuntimeError("drafter: the input of visit %d is not the output of visit %d" % (v, v - 1))
+        feat_visits.append(v - 1)
+    c = Ink2DraftConfig()
+    c.hidden, c.layers, c.heads, c.kv_heads, c.head_dim, c.inter = H, nl, nh, nkv, D, I
+    c.window, c.block, c.rank, c.w1_rows = mc["sliding_window_size"], mc["block_size"], r, w1_rows
+    for i in range(8):
+        c.local[i] = 1 if i in mc.get("local_layer_ids", []) else 0
+    for i in range(3):
+        c.feat_visits[i] = feat_visits[i]
+    c.eps, c.rope_theta, c.softcap = mc["rms_norm_eps"], mc["rope_theta"], self.cfg["final_logit_softcapping"]
+    return c
+
+
+def _expected_shapes(mc, w1_rows):
+    H, nl = mc["hidden_size"], mc["num_hidden_layers"]
+    nh, nkv, D, I, r = mc["num_attention_heads"], mc["num_key_value_heads"], mc["head_dim"], mc["intermediate_size"], mc["markov_rank"]
+    expect = {"fuse_weight": (nl + 1, 4), "norm.weight": (H,), "mask_embed": (H,),
+              "markov_head.markov_w1.weight": (w1_rows, r), "markov_head.rnn_proj.weight": (3 * r, 2 * r + 2 * H),
+              "markov_head.rnn_proj.bias": (3 * r,), "markov_head.hidden_out.weight": (H, r),
+              "markov_head.hidden_out.bias": (H,), "markov_head.dflare_norm.weight": (H,)}
+    shapes = {"dflare_norm.weight": (H,), "input_layernorm.weight": (H,), "post_attention_layernorm.weight": (H,),
+              "self_attn.q_proj.weight": (nh * D, H), "self_attn.k_proj.weight": (nkv * D, H),
+              "self_attn.v_proj.weight": (nkv * D, H), "self_attn.o_proj.weight": (H, nh * D),
+              "self_attn.q_norm.weight": (D,), "self_attn.k_norm.weight": (D,), "self_attn.k_proj_ctx.weight": (nkv * D, H),
+              "self_attn.v_proj_ctx.weight": (nkv * D, H), "self_attn.k_norm_ctx.weight": (D,),
+              "mlp.gate_proj.weight": (I, H), "mlp.up_proj.weight": (I, H), "mlp.down_proj.weight": (H, I)}
+    for i in range(nl):
+        for k, s in shapes.items():
+            expect["layers.%d.%s" % (i, k)] = s
+    return expect
+
+
+def _engine_names(nl):
+    """published name -> name of the engine tensor"""
+    m = {"norm.weight": "norm", "mask_embed": "mask", "markov_head.markov_w1.weight": "w1", "markov_head.rnn_proj.weight": "rnn_w",
+         "markov_head.rnn_proj.bias": "rnn_b", "markov_head.dflare_norm.weight": "head_norm"}
+    for i in range(nl):
+        for short, name in DRAFT_TENSORS:
+            m["layers.%d.%s" % (i, name)] = "L%d.%s" % (i, short)
+    return m
+
+
+def _draft_load_yskn(self, path, config, fold, calibrate, check, cut="default"):
+    """draft_load of a converted drafter file (.yskn version 2): every packed matrix is handed over as stored."""
+    from . import ink2_yskn as yk
+    caps = int(getattr(self.lib, "caps", 0))
+    dabi = int(getattr(self.lib, "draft_abi", 1))
+    if not (caps & CAP_DRAFTER_PACKED) or dabi < 2:
+        raise RuntimeError("this engine library (capabilities %d, drafter interface %d) cannot read a converted drafter file "
+                           "(needs capability %d and drafter interface 2); use the published mtp.safetensors" % (caps, dabi, CAP_DRAFTER_PACKED))
+    t0 = time.perf_counter()
+    try:
+        yf = yk.YsknFile(path)
+    except yk.FormatError as ex:
+        raise RuntimeError("drafter file %s: %s" % (os.path.basename(path), ex))
+    model = yf.model
+    if model.get("arch") != ydc.DRAFTER_ARCH:
+        raise RuntimeError("%s is not a drafter file (model.arch %r)" % (os.path.basename(path), model.get("arch")))
+    encs = {e["encoding"] for e in yf.tensors.values()}
+    if "q3" in encs and not (caps & CAP_Q3):
+        raise RuntimeError("drafter file %s uses the 3-bit format q3, which this engine library cannot multiply" % os.path.basename(path))
+    if check:
+        tc = time.perf_counter()
+        bad = yf.check()
+        self.draft_check_seconds = time.perf_counter() - tc
+        if bad:
+            raise RuntimeError("drafter file %s is damaged: %s %s (CRC-32 differs)" % (os.path.basename(path), bad[0][0], bad[0][1]))
+    if config is None:
+        with open(os.path.join(self.model_dir, "config.json"), encoding="utf-8") as f:
+            config = json.load(f).get("mtp_config")
+        if config is None:
+            raise RuntimeError("config.json of the model has no mtp_config")
+    mc = config
+    if mc.get("markov_head_type", "rnn_hidden") != "rnn_hidden" or mc.get("block_size", 8) != 8:
+        raise RuntimeError("drafter: unsupported head type or block size")
+    H, nl = mc["hidden_size"], mc["num_hidden_layers"]
+    nh, nkv, D, I, r = mc["num_attention_heads"], mc["num_key_value_heads"], mc["head_dim"], mc["intermediate_size"], mc["markov_rank"]
+    if "markov_head.markov_w1.weight" not in yf.tensors:
+        raise RuntimeError("drafter file: missing tensor markov_head.markov_w1.weight")
+    w1_rows = yf.entry("markov_head.markov_w1.weight")["shape"][0]
+    expect = _expected_shapes(mc, w1_rows)
+    for name, shape in expect.items():
+        if name not in yf.tensors:
+            raise RuntimeError("drafter file: missing tensor %s" % name)
+        e = yf.entry(name)
+        if tuple(e["shape"]) != tuple(shape):
+            raise RuntimeError("drafter file: %s has the shape %s, expected %s" % (name, e["shape"], shape))
+        if e["encoding"] not in ("bf16", "nvfp4", "mxfp8", "q3"):
+            raise RuntimeError("drafter file: %s has the encoding %s" % (name, e["encoding"]))
+        if len(shape) == 1 and e["encoding"] != "bf16":
+            raise RuntimeError("drafter file: the vector %s must be BF16" % name)
+    if w1_rows < self.vocab or H != self.hidden_size:
+        raise RuntimeError("drafter file does not fit the model (hidden %d, markov_w1 rows %d)" % (H, w1_rows))
+    c = _draft_config(self, mc, w1_rows, H, nl, nh, nkv, D, I, r)
+    self._check(self.lib.ink2_draft_create(self.h, ctypes.byref(c)), "draft_create")
+
+    def put(name, array):
+        array = np.ascontiguousarray(array)
+        self._check(self.lib.ink2_draft_set_tensor(self.h, name.encode(), ctypes.c_void_p(array.ctypes.data), array.nbytes), "draft " + name)
+
+    def put_matrix(ename, tname):
+        e = yf.entry(tname)
+        enc = e["encoding"]
+        if enc == "bf16":
+            put(ename, yf.part(tname, "data"))
+            return 0
+        pr = yf.parts(tname)
+        put(ename, pr["weight"].view(np.uint8))
+        put(ename + "_scale", pr["scale"].view(np.uint8))
+        if enc == "nvfp4":
+            amax = np.asarray(pr["amax"], np.float32).reshape(-1)
+            den = np.asarray(pr["denominator"], np.float32).reshape(-1)
+            put(ename + "_factor", (amax / den).astype(np.float32).reshape(1))
+        elif enc == "q3":
+            put(ename + "_factor", np.asarray(pr["factor"], np.float32).reshape(1))
+        put(ename + "_format", np.array([FORMAT_CODE[enc]], np.int32))
+        return 1
+
+    sent_packed = 0
+    try:
+        fw = ink2_ckpt.bf16_to_f32(np.asarray(yf.part("fuse_weight", "data"))).astype(np.float32)
+        ex = np.exp(fw - fw.max(axis=1, keepdims=True))
+        put("fuse_alpha", (ex / ex.sum(axis=1, keepdims=True)).astype(np.float32))
+        for pub, ename in _engine_names(nl).items():
+            sent_packed += put_matrix(ename, pub)
+        # the folded head: as stored when it was made with this engine's U, else folded again here
+        fmeta = model.get("fold") or {}
+        tf = time.perf_counter()
+        same = False
+        if getattr(self, "dense_dir", None) is None and ydc.FOLD_W in yf.tensors and int(fmeta.get("vocab", -1)) == self.vocab:
+            u_enc, u_fp = ydc.unembed_fingerprint(self.ckpt, self.vocab)
+            same = u_enc == fmeta.get("unembed_encoding") and u_fp == fmeta.get("unembed_sha256")
+        self.draft_fingerprint_seconds = time.perf_counter() - tf
+        if same and yf.entry(ydc.FOLD_W)["encoding"] != "bf16":
+            sent_packed += put_matrix("foldp", ydc.FOLD_W)
+            put("fold_b", np.asarray(yf.part(ydc.FOLD_B, "data"), np.float32))
+            self.draft_fold_source = "stored (%s, made with this U)" % yf.entry(ydc.FOLD_W)["encoding"]
+            self.draft_fold_seconds = 0.0
+        else:
+            t1 = time.perf_counter()
+            fold_w, fold_b = fold_head(unembed_rows(self), self.vocab,
+                                       ink2_ckpt.bf16_to_f32(np.asarray(yf.part("markov_head.hidden_out.weight", "data"))),
+                                       ink2_ckpt.bf16_to_f32(np.asarray(yf.part("markov_head.hidden_out.bias", "data"))))
+            self.draft_fold_seconds = time.perf_counter() - t1
+            if fold in ("bf16", "both"):
+                put("fold16", bf16_round(fold_w))
+            if fold in ("f32", "both"):
+                put("fold32", fold_w)
+            put("fold_b", fold_b)
+            self.draft_fold_source = "folded at load (the file was folded with another U)"
+        self._check(self.lib.ink2_draft_finalize(self.h), "draft_finalize")
+    except Exception:
+        self.lib.ink2_draft_unload(self.h)
+        raise
+    finally:
+        yf.close()
+    self.draft_format = "yskn %s" % ((model.get("scheme") or {}).get("name", "?"))
+    self.draft_packed_sent = sent_packed
+    self.draft_load_seconds = time.perf_counter() - t0
+    return _draft_after_load(self, path, calibrate, cut)
+
+
+def draft_packed(self):
+    """Drafter matrices the engine holds packed (0 = all BF16, or a library of drafter interface 1)."""
+    if not self.draft_loaded() or int(getattr(self.lib, "draft_abi", 1)) < 2:
+        return 0
+    return int(self.lib.ink2_draft_packed(self.h))
 
 
 def draft_calibrate(self, reps=5):
@@ -392,18 +672,22 @@ def draft_mode(self, mode=None, depth=None):
         self._d_mode = mode
         if mode == "auto":
             self._gov.active = True
+            self._cgov.active = True
     if depth is not None:
         depth = int(depth)
         if not 1 <= depth <= MAX_DEPTH:
             raise ValueError("depth must be 1 .. %d" % MAX_DEPTH)
         self._d_depth = depth
         self._gov.max_depth = depth if self._d_mode == "auto" else MAX_DEPTH
-    active = self._d_mode == "on" or (self._d_mode == "auto" and self._gov.active)
-    return {"mode": self._d_mode, "depth": self._d_depth if self._d_mode != "auto" else self._gov.depth, "active": active}
+    cut = getattr(self, "_cut", None)
+    gov_active = self._cgov.active if cut else self._gov.active
+    active = self._d_mode == "on" or (self._d_mode == "auto" and gov_active)
+    adepth = cut["max_depth"] if cut else self._gov.depth
+    return {"mode": self._d_mode, "depth": self._d_depth if self._d_mode != "auto" else adepth, "active": active}
 
 
 def draft_set(self, name, value):
-    """Drafter options: "fold" 16 / 32 (the folded head in BF16 / float32)."""
+    """Drafter options: "fold" 4 / 16 / 32 (the folded head packed / in BF16 / float32)."""
     self._check(self.lib.ink2_draft_set_option(self.h, name.encode(), int(value)), "draft_set_option")
 
 
@@ -412,6 +696,50 @@ def draft_propose(self, anchor, pos, depth=MAX_DEPTH):
     out = (ctypes.c_int * depth)()
     self._check(self.lib.ink2_draft_propose(self.h, int(anchor), int(pos), int(depth), out), "draft_propose")
     return list(out)
+
+
+def draft_conf(self):
+    """confidence of the drafts of the last draft call, float32 [7, 4]: top1 logit, top2 logit,
+    log-sum-exp (after the soft cap), running product of the top probabilities exp(top1 - lse)."""
+    out = np.empty(32, dtype=np.float32)
+    self._check(self.lib.ink2_draft_get(self.h, 3, 0, ctypes.c_void_p(out.ctypes.data), 32), "draft_get conf")
+    return out.reshape(8, 4)[:7].copy()
+
+
+def draft_propose_conf(self, anchor, pos, depth=MAX_DEPTH):
+    """draft_propose and the confidence of its drafts ([depth, 4], see draft_conf)."""
+    d = self.draft_propose(anchor, pos, depth)
+    return d, self.draft_conf()[:depth]
+
+
+CUT_METRICS = {"off": 0, "p": 1, "margin": 2, "cum": 3}
+
+
+def draft_cut(self, rule=None):
+    """the cut of the proposal list at the first unsure draft (None / "off": no cut, the old behaviour).
+    rule: {"metric": "p" | "margin" | "cum", "thr": [7 thresholds, draft 1 .. 7], "max_depth": D (1 .. 7)}.
+    With a rule, spec_step drafts up to D tokens (mode "on": min(D, depth); "auto": the governor decides only
+    on / off) and verifies only the drafts before the first one whose value is below its threshold.
+    Returns the rule in force (None = off)."""
+    if rule in (None, "off"):
+        if self.draft_loaded() and getattr(self.lib, "_has_cut", False):
+            self._check(self.lib.ink2_draft_set_cut(self.h, 0, None), "draft_set_cut")
+        self._cut = None
+        return None
+    if not getattr(self.lib, "_has_cut", False):
+        raise RuntimeError("this engine library has no confidence cut (ink2_spec_pass2 missing)")
+    m = CUT_METRICS[rule.get("metric", "p")]
+    thr = [float(x) for x in rule["thr"]]
+    thr = (thr + [thr[-1]] * 7)[:7]
+    D = int(rule.get("max_depth", MAX_DEPTH))
+    if not 1 <= D <= MAX_DEPTH:
+        raise ValueError("max_depth must be 1 .. %d" % MAX_DEPTH)
+    a = (ctypes.c_float * 7)(*thr)
+    self._check(self.lib.ink2_draft_set_cut(self.h, int(m), a), "draft_set_cut")
+    self._cut = {"metric": rule.get("metric", "p"), "thr": thr, "max_depth": D, "on": bool(rule.get("on", False))}
+    if getattr(self, "_cgov", None) is not None:
+        self._cgov.active = True
+    return dict(self._cut)
 
 
 def draft_commit_features(self, feats, p0):
@@ -437,13 +765,19 @@ def _row_logits(self, row):
 
 def spec_step(self, anchor, pick=None, want_logits=False):
     """Feeds `anchor` and, while drafting is active, up to `depth` proposed tokens in one verification pass.
-    -> (accepted drafts, next token (not fed yet), its logits if want_logits else None). See DRAFT_CONTRACT.md."""
+    -> (accepted drafts, next token (not fed yet), its logits if want_logits else None). """
     anchor = int(anchor)
     depth, probe = 0, False
+    cut = getattr(self, "_cut", None)
     if self.draft_loaded():
         mode = self._d_mode
+        if not (mode == "auto" or (cut and cut["on"])):
+            cut = None  # mode "on" keeps the fixed depth unless the rule says "on": True
         if mode == "on":
             depth = self._d_depth
+        elif mode == "auto" and cut:
+            go, probe = self._cgov.choose()
+            depth = cut["max_depth"] if go else 0
         elif mode == "auto":
             depth, probe = self._gov.choose()
         pos = self.position()
@@ -460,6 +794,7 @@ def spec_step(self, anchor, pick=None, want_logits=False):
         dt = time.perf_counter() - t0
         if self.draft_loaded():
             self._gov.update_plain(dt)
+            self._cgov.update_plain(dt)
         st["passes"] += 1
         st["tokens"] += 1
         st["verify_ms"] += 1e3 * dt
@@ -467,7 +802,15 @@ def spec_step(self, anchor, pick=None, want_logits=False):
     pos0 = self.position()
     drafts = (ctypes.c_int * depth)()
     top = (ctypes.c_int * (depth + 1))()
-    acc = self.lib.ink2_spec_pass(self.h, anchor, depth, drafts, top, 1 if pick is None else 0)
+    rows = depth
+    if cut:
+        info = (ctypes.c_int * 1)()
+        acc = self.lib.ink2_spec_pass2(self.h, anchor, depth, drafts, top, 1 if pick is None else 0, info)
+        if acc < 0:
+            self._check(acc, "spec_pass2")
+        rows = int(info[0])
+    else:
+        acc = self.lib.ink2_spec_pass(self.h, anchor, depth, drafts, top, 1 if pick is None else 0)
     if acc < 0:
         self._check(acc, "spec_pass")
     logits = None
@@ -478,10 +821,10 @@ def spec_step(self, anchor, pick=None, want_logits=False):
             logits = self._row_logits(acc)
     else:
         accepted = []
-        for r in range(depth + 1):
+        for r in range(rows + 1):
             lg = self._row_logits(r)
             y = int(pick(lg))
-            if r < depth and y == drafts[r]:
+            if r < rows and y == drafts[r]:
                 accepted.append(y)
                 continue
             nxt, logits = y, lg
@@ -493,12 +836,16 @@ def spec_step(self, anchor, pick=None, want_logits=False):
     self.num_seen += 1 + len(accepted)
     self.seen_ids.append(anchor)
     self.seen_ids.extend(accepted)
-    self._gov.update_spec(depth, len(accepted), dt, probe)
+    if cut:
+        self._cgov.update_spec(1 + len(accepted), dt, probe)
+    else:
+        self._gov.update_spec(depth, len(accepted), dt, probe)
     dms = self._gov.t_draft[depth]
     st["passes"] += 1
     st["active_passes"] += 1
     st["probe_passes"] += 1 if probe else 0
-    st["proposed"] += depth
+    st["proposed"] += rows
+    st["cut_rows"] += depth - rows
     st["accepted"] += len(accepted)
     st["tokens"] += 1 + len(accepted)
     st["draft_ms"] += dms
@@ -514,7 +861,7 @@ def spec_stats(self, reset=False):
     old = getattr(self, "_sstats", None)
     if reset or old is None:
         self._sstats = {"passes": 0, "proposed": 0, "accepted": 0, "tokens": 0, "draft_ms": 0.0, "verify_ms": 0.0,
-                        "active_passes": 0, "probe_passes": 0, "depth_hist": [0] * (MAX_DEPTH + 1)}
+                        "active_passes": 0, "probe_passes": 0, "depth_hist": [0] * (MAX_DEPTH + 1), "cut_rows": 0}
     if old is None:
         return dict(self._sstats)
     out = dict(old)
@@ -530,5 +877,6 @@ def lib_max_positions(self):
 
 def install(cls):
     for f in (draft_load, draft_calibrate, draft_time, draft_loaded, draft_unload, draft_mode, draft_set, draft_propose,
-              draft_commit_features, draft_memory, _row_logits, spec_step, spec_stats, lib_max_positions):
+              draft_commit_features, draft_memory, draft_packed, _row_logits, spec_step, spec_stats, lib_max_positions,
+              draft_conf, draft_propose_conf, draft_cut):
         setattr(cls, f.__name__, f)
