@@ -27,6 +27,18 @@ model checks in one pass (speculative decoding).  The output does not change: gr
 distribution (and with a fixed seed the same tokens, see ``Sampler.seek``).  ``--draft auto | on | off`` / ``$YASAKANI_DRAFT``:
 auto (default) lets the engine use the drafter only while it makes generation faster, on always drafts, off does not load it.
 A folder without the drafter, or an engine library without the drafter calls, generates without drafting.
+
+Tool calls (OpenAI ``tools``; the parsing draws on PR #28 by @audreyt): the template declares the tools in a block
+``<|message_system|>tool_declare<|content_xml|>[JSON specs]<|end_message|>`` and writes a call of an earlier turn as
+``<|message_model|>NAME<|content_invoke_tool_json|>{"name":NAME,"args":{...}}<|end_message|>``; a tool result is a
+``<|message_tool|>NAME`` block, NAME taken from the message's ``name`` or found through its ``tool_call_id``.  The model writes its
+calls the same way (``tool_calls`` of the response_template: ``content.name`` and ``content.args``), several in one reply when it
+calls several tools.  ``OutputStream(tools=True)`` turns each such block into a ``("tool_call", {"name", "arguments"})`` item when it
+ends; a block that is not a JSON object with a name comes back as answer text.  ``tool_choice``: "auto" as it is; "none" offers no
+tools (the server); "required" with one function (a named function) writes the call header ``<|message_model|>NAME
+<|content_invoke_tool_json|>`` for the model after its thinking, "required" with several lets the model pick the name but not a
+text block (the block openers are masked at that one position).  With ``enable_thinking: false`` and tools the reply starts after
+``<|message_model|>`` (the thinking opener masked at the first position) so that the model can open an answer or a call.
 """
 from __future__ import annotations
 
@@ -64,6 +76,7 @@ EFFORT_ALIASES = {e: e for e in EFFORTS}
 T_MODEL, T_THINKING, T_TEXT, T_END, T_STOP = ("<|message_model|>", "<|content_thinking|>", "<|content_text|>", "<|end_message|>",
                                               "<|content_model_end_sampling|>")
 ANSWER_OPENERS = ("<|content_text|>", "<|content_tool_error|>", "<|content_invoke_tool_text|>", "<|content_invoke_tool_json|>")
+T_CALL = "<|content_invoke_tool_json|>"          # the block of one tool call (JSON {"name": ..., "args": {...}})
 
 
 def architecture_of(folder) -> Optional[str]:
@@ -214,8 +227,9 @@ class Ink2Formatter:
         self.special = frozenset(int(t["id"]) for t in cfg.get("added_tokens", []) if t.get("special"))
         self.answer_prefix = [ids[T_MODEL], ids[T_TEXT]]
 
-    def render(self, messages: Sequence[dict], **template_kwargs) -> str:
-        return self.template.render(messages=list(messages), add_generation_prompt=True, tools=None, **template_kwargs)
+    def render(self, messages: Sequence[dict], tools: Optional[Sequence[dict]] = None, **template_kwargs) -> str:
+        return self.template.render(messages=list(messages), add_generation_prompt=True, tools=list(tools) if tools else None,
+                                    **template_kwargs)
 
     def encode(self, text: str) -> List[int]:
         return list(self.tok.encode(text, add_special_tokens=False).ids)
@@ -234,6 +248,37 @@ class Ink2Formatter:
         if thinking is False:
             return ids + self.answer_prefix, True
         return ids, False
+
+    def call_header(self, name: str) -> List[int]:
+        """The ids the model writes before the arguments of a call of ``name``: <|message_model|>NAME<|content_invoke_tool_json|>."""
+        return [self.ids[T_MODEL]] + self.encode(name) + [self.ids[T_CALL]]
+
+    def openers(self) -> List[int]:
+        """Ids that would open a block other than the name of a call after <|message_model|> (masked for tool_choice required)."""
+        i = self.ids
+        return sorted({i[T_THINKING], i[T_TEXT], i[T_END], i[T_STOP], i[T_MODEL]} | {i[n] for n in ANSWER_OPENERS if n != T_CALL})
+
+    def tool_prompt(self, messages: Sequence[dict], tools: Sequence[dict], template_kwargs: Optional[dict] = None,
+                    call: Optional[str] = None) -> Tuple[List[int], str, List[int]]:
+        """A request with tools -> (prompt ids, start, ids masked at the first position).  ``call``: None (tool_choice auto), the
+        name of the function that must be called, or "" (a call of any of the tools must be made).  ``start``: what the reply's first
+        id continues: "free" (nothing: the model writes its block header), "head" (after <|message_model|>), "reasoning" (inside a
+        thinking block the prompt opened) or "call" (inside the call block of ``call``; its header is in the prompt)."""
+        kw = dict(template_kwargs or {})
+        thinking = kw.pop("enable_thinking", None)
+        if thinking is False:
+            kw["reasoning_effort"] = "none"
+        ids = self.encode(self.render(messages, tools=tools, **kw))
+        i = self.ids
+        if call is None:
+            if thinking is False:
+                return ids + [i[T_MODEL]], "head", [i[T_THINKING]]
+            return ids, "free", []
+        if thinking is False:
+            if call:
+                return ids + self.call_header(call), "call", []
+            return ids + [i[T_MODEL]], "head", self.openers()
+        return ids + [i[T_MODEL], i[T_THINKING]], "reasoning", []
 
 
 class StreamDecoder:
@@ -268,29 +313,87 @@ class StreamDecoder:
         return new[len(old):]
 
 
+def parse_call(text: str, header_name: str = "") -> Optional[dict]:
+    """The inside of one call block -> {"name", "arguments"}, or None when it is not a call.  The model writes
+    ``{"name": NAME, "args": {...}}`` (the template's form); ``arguments`` instead of ``args``, arguments given as a JSON string,
+    and a block without a name (the name is then the one in its header) are taken too."""
+    try:
+        obj = json.loads(text.strip())
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    name = obj.get("name") if isinstance(obj.get("name"), str) and obj.get("name") else (header_name or "").strip()
+    if not name:
+        return None
+    if "args" in obj or "arguments" in obj:
+        args = obj.get("args", obj.get("arguments"))
+    elif "name" not in obj:
+        args = obj                                           # only the arguments, under a header with the name
+    else:
+        args = {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except ValueError:
+            return None
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return None
+    return {"name": name, "arguments": args}
+
+
 class OutputStream:
-    """Reply ids -> ``("reasoning", text)`` / ``("content", text)`` pieces, one piece per id that completes some text.
+    """Reply ids -> ``("reasoning", text)`` / ``("content", text)`` pieces, one piece per id that completes some text, and with
+    ``tools`` ``("tool_call", {"name", "arguments"})`` items.
 
     Text inside ``<|content_thinking|>`` blocks is reasoning; text inside ``<|content_text|>`` (and the other answer blocks) is the
     answer; the block headers (``<|message_model|>`` and the name after it), ``<|end_message|>``, the stop token and every other
-    special token are not shown."""
+    special token are not shown.  With ``tools`` a ``<|content_invoke_tool_json|>`` block is a call: it is read whole and becomes one
+    item when the next special id (normally ``<|end_message|>``) or the end of the reply closes it; one that cannot be read as a call
+    comes back as answer text (nothing the model wrote is lost).  Without ``tools`` it is answer text, as before.
+    ``start``: "head" / "free" (between blocks, the default), "content" (``in_answer``), "reasoning" (the prompt opened a thinking
+    block) or "call" (the prompt holds the header of a call of ``call_name``)."""
 
-    def __init__(self, fmt: Ink2Formatter, in_answer: bool = False):
+    def __init__(self, fmt: Ink2Formatter, in_answer: bool = False, tools: bool = False, start: Optional[str] = None,
+                 call_name: str = ""):
         self.fmt = fmt
         i = fmt.ids
         self.opens = {i[T_THINKING]: "reasoning"}
         self.opens.update({i[n]: "content" for n in ANSWER_OPENERS})
+        self.tools = bool(tools)
+        if self.tools:
+            self.opens[i[T_CALL]] = "call"
         self.t_model, self.t_end = i[T_MODEL], i[T_END]
-        self.mode = "content" if in_answer else "head"      # head: between blocks (headers and names are not shown)
+        start = start or ("content" if in_answer else "head")
+        self.mode = {"free": "head"}.get(start, start)      # head: between blocks (headers and names are not shown)
+        if self.mode not in ("head", "content", "reasoning", "call"):
+            raise ValueError("unknown start %r" % start)
         self.dec = StreamDecoder(fmt.tok)
         self.n = 0
         self.reasoning_tokens = 0
-        self.answer_at: Optional[int] = 0 if in_answer else None
-        self.saw_reasoning = False
+        self.answer_at: Optional[int] = 0 if self.mode in ("content", "call") else None
+        self.saw_reasoning = self.mode == "reasoning"
+        self.head: List[int] = []                            # the ids after <|message_model|> (the name of the block)
+        self.call_ids: List[int] = []
+        self.call_name = call_name if self.mode == "call" else ""
+        self.calls = 0
 
-    def feed(self, token: int) -> List[Tuple[str, str]]:
+    def _end_call(self, out: List[Tuple[str, object]]) -> None:
+        text = self.fmt.decode(self.call_ids)
+        call = parse_call(text, self.call_name)
+        if call is None:
+            if text:
+                out.append(("content", text))
+        else:
+            self.calls += 1
+            out.append(("tool_call", call))
+        self.call_ids, self.call_name = [], ""
+
+    def feed(self, token: int) -> List[Tuple[str, object]]:
         token = int(token)
-        out: List[Tuple[str, str]] = []
+        out: List[Tuple[str, object]] = []
         k = self.n
         self.n += 1
         if token in self.fmt.special:
@@ -298,7 +401,12 @@ class OutputStream:
                 tail = self.dec.flush()
                 if tail:
                     out.append((self.mode, tail))
+            elif self.mode == "call":
+                self._end_call(out)
             if token in self.opens:
+                if self.opens[token] == "call":
+                    self.call_name = self.fmt.decode(self.head).strip() if self.mode == "head" else ""
+                    self.call_ids = []
                 self.mode = self.opens[token]
                 if self.mode == "reasoning":
                     self.saw_reasoning = True
@@ -306,6 +414,9 @@ class OutputStream:
                     self.answer_at = k
             elif token in (self.t_model, self.t_end):
                 self.mode = "head"
+            elif self.mode == "call":
+                self.mode = "head"                           # a call block closed by another special id
+            self.head = []
             self.dec = StreamDecoder(self.fmt.tok)
             if self.answer_at is None:
                 self.reasoning_tokens = self.n
@@ -316,13 +427,22 @@ class OutputStream:
             piece = self.dec.push((token,))
             if piece:
                 out.append((self.mode, piece))
+        elif self.mode == "call":
+            self.call_ids.append(token)
+        elif self.mode == "head":
+            self.head.append(token)
         return out
 
-    def flush(self) -> List[Tuple[str, str]]:
+    def flush(self) -> List[Tuple[str, object]]:
         if self.mode in ("reasoning", "content"):
             tail = self.dec.flush()
             if tail:
                 return [(self.mode, tail)]
+        elif self.mode == "call":
+            out: List[Tuple[str, object]] = []
+            self._end_call(out)
+            self.mode = "head"
+            return out
         return []
 
     @property
@@ -819,14 +939,23 @@ def sampler_picks(sample: Sampler):
     return at
 
 
-def generate(eng: Ink2Engine, first: int, on_token, pick_at=None) -> int:
+def masked(logits: np.ndarray, ids) -> np.ndarray:
+    """The logits with ``ids`` made impossible (a copy; the engine's array is not changed)."""
+    x = np.array(logits, np.float32, copy=True)
+    x[list(ids)] = -np.inf
+    return x
+
+
+def generate(eng: Ink2Engine, first: int, on_token, pick_at=None, ban=None) -> int:
     """Emit tokens from ``first`` (chosen from the logits of the prompt) on, with the drafter when the engine has one.
 
     ``on_token(tok)`` emits a token and returns None (go on), END (the reply ends with it), DROP (the reply ends before it; it is
     not emitted) or a list of tokens that must come next (the thinking budget).  ``pick_at``: None = greedy, else ``k -> pick``
     (sampler_picks).  The engine state always matches what was emitted: every emitted token is fed except the last one, as in
-    plain stepping, and the rest of a burst after the end is truncated away.  Returns the passes of the model (the prompt's last
-    pass counts as the one that gave ``first``)."""
+    plain stepping, and the rest of a burst after the end is truncated away.  ``ban``: None, or a function that returns the ids that
+    may not be picked next (asked after each on_token; while it returns some, the next token comes from a plain step whose logits
+    have them masked, not from a drafting pass).  Returns the passes of the model (the prompt's last pass counts as the one that
+    gave ``first``)."""
     k, tok, forced, passes = 0, int(first), [], 1
     while True:
         r = on_token(tok)
@@ -835,7 +964,8 @@ def generate(eng: Ink2Engine, first: int, on_token, pick_at=None) -> int:
         k += 1
         if r:
             forced = list(r)
-        if not forced and eng.can_draft():
+        banned = ban() if ban is not None else None
+        if not forced and not banned and eng.can_draft():
             base = len(eng.fed)
             accepted, nxt = eng.spec_step(tok, pick_at(k) if pick_at else None)
             passes += 1
@@ -861,6 +991,8 @@ def generate(eng: Ink2Engine, first: int, on_token, pick_at=None) -> int:
         if forced:
             tok = forced.pop(0)
         else:
+            if banned:
+                logits = masked(logits, banned)
             tok = pick_at(k)(logits) if pick_at else int(np.argmax(logits))
 
 
@@ -902,29 +1034,46 @@ class Ink2Runner:
         self.engine.reset()
 
     def prepare(self, p):
+        """-> (prompt ids, the reply starts inside the answer) for a request without tools, as before; with ``p.tools``
+        (prompt ids, start, plan) where plan says which call must be made and which ids are masked first (Ink2Formatter.tool_prompt)."""
         from .chat import RequestError
-        if p.tools:
-            raise RequestError("tools are not supported for this model yet (Inkling-2: text chat only)")
         for i, m in enumerate(p.messages):
-            if m.get("role") == "tool" or m.get("tool_calls"):
-                raise RequestError("messages[%d]: tool calls and tool results are not supported for this model yet" % i)
             if isinstance(m.get("content"), list):
                 if any(isinstance(q, dict) and q.get("type") not in ("text", None) for q in m["content"]):
                     raise RequestError("messages[%d]: only text content is supported for this model" % i)
                 m = dict(m, content="".join(str(q.get("text", "")) for q in m["content"] if isinstance(q, dict)))
                 p.messages[i] = m
+            if m.get("tool_calls"):                          # the template reads the arguments as an object, not as JSON text
+                calls = []
+                for k, c in enumerate(m["tool_calls"]):
+                    f = c.get("function") if isinstance(c, dict) else None
+                    args = f.get("arguments") if isinstance(f, dict) else None
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args) if args.strip() else {}
+                        except ValueError:
+                            raise RequestError("messages[%d].tool_calls[%d]: arguments is not valid JSON" % (i, k))
+                        c = dict(c, function=dict(f, arguments=args))
+                    calls.append(c)
+                p.messages[i] = m = dict(m, tool_calls=calls)
         try:
             from jinja2.exceptions import TemplateError
-            return self.fmt.prompt(p.messages, p.template_kwargs)
+            if not p.tools:
+                return self.fmt.prompt(p.messages, p.template_kwargs)
+            call = None
+            if getattr(p, "tool_choice", None) == "required":
+                call = p.tools[0]["function"]["name"] if len(p.tools) == 1 else ""
+            ids, start, ban_first = self.fmt.tool_prompt(p.messages, p.tools, p.template_kwargs, call)
+            return ids, start, dict(call=call, ban_first=ban_first)
         except TemplateError as ex:
             raise RequestError("the chat template does not accept these messages: %s" % ex)
 
     def prepare_checked(self, p):
         from .chat import context_length_error
-        prompt, in_answer = self.prepare(p)
-        if len(prompt) >= self.engine.max_ctx - CONTEXT_MARGIN:
-            raise context_length_error(len(prompt), self.engine.max_ctx)
-        return prompt, in_answer
+        prepared = self.prepare(p)
+        if len(prepared[0]) >= self.engine.max_ctx - CONTEXT_MARGIN:
+            raise context_length_error(len(prepared[0]), self.engine.max_ctx)
+        return prepared
 
     def close(self) -> None:
         pass
@@ -933,19 +1082,30 @@ class Ink2Runner:
         """Generate the reply, calling ``emit("reasoning" | "content", text)``; returns yasakani.chat.Usage."""
         from .chat import StopFilter, Usage
         eng = self.engine
-        prompt, in_answer = prepared if prepared is not None else self.prepare_checked(p)
+        prepared = prepared if prepared is not None else self.prepare_checked(p)
+        prompt, in_answer = prepared[0], prepared[1]
+        plan = prepared[2] if len(prepared) > 2 else None    # a request with tools (prepare)
         eng._cancel.clear()
         seed = p.seed if p.seed is not None else self.next_seed()
         sample = Sampler(p.temperature, p.top_p, p.top_k, p.min_p, seed)
         stops = frozenset() if p.ignore_eos else self.stop_ids
         max_new = max(1, int(p.max_tokens))
         usage = Usage(prompt_tokens=len(prompt))
-        stream = OutputStream(self.fmt, in_answer)
+        ids = self.fmt.ids
+        if plan is None:
+            stream = OutputStream(self.fmt, in_answer)
+        else:
+            stream = OutputStream(self.fmt, tools=True, start=in_answer, call_name=plan["call"] or "")
         stopf = StopFilter(p.stop)
         budget = max(0, int(getattr(p, "thinking_budget", 0) or 0))
+        ban_state = dict(pending=None, now=None)             # ids masked at the pick after a forced <|message_model|>
 
         def deliver(events):
             for kind, text in events:
+                if kind == "tool_call":
+                    usage.tool_calls += 1
+                    emit("tool_call", text)
+                    continue
                 if kind == "content":
                     text = stopf.push(text)
                 if text:
@@ -957,25 +1117,41 @@ class Ink2Runner:
         usage.prefill_ms = usage.prompt_ms = (t1 - t0) * 1000.0
         st0 = eng.draft_stats()
         pick_at = None if sample.t <= 0.0 else sampler_picks(sample)     # greedy: arg-max on the device, no logits copied
+        if plan is not None and plan["ban_first"]:
+            logits = masked(logits, plan["ban_first"])
         first = int(np.argmax(logits)) if pick_at is None else pick_at(0)(logits)
         state = dict(finish="length", n=0)
-        force = [self.fmt.ids[T_END], self.fmt.ids[T_MODEL], self.fmt.ids[T_TEXT]]
+        force = [ids[T_END], ids[T_MODEL], ids[T_TEXT]]
+        if plan is not None:                                 # after the thinking: a call (tool_choice required) or any block
+            call = plan["call"]
+            after_thinking = self.fmt.call_header(call) if call else [ids[T_MODEL]]
+            after_ban = None if call else (self.fmt.openers() if call == "" else [ids[T_THINKING]])
+            force = [ids[T_END]] + after_thinking
 
         def on_token(tok: int):
             if eng._cancel.is_set():
                 return DROP
             state["n"] += 1
+            was = stream.mode
+            ban_state["now"] = None
+            if tok == ids[T_MODEL] and ban_state["pending"] is not None:
+                ban_state["now"], ban_state["pending"] = ban_state["pending"], None
             deliver(stream.feed(tok))
             if tok in stops or stopf.hit:
                 state["finish"] = "stop"
                 return END
             if state["n"] >= max_new:
                 return END
+            if plan is not None and plan["call"] is not None and was == "reasoning" and tok == ids[T_END] and not stream.calls:
+                ban_state["pending"] = after_ban             # tool_choice required: the thinking has ended, the call comes next
+                return list(after_thinking)
             if budget and stream.mode == "reasoning" and stream.answer_at is None and stream.n >= budget:
-                return force
+                if plan is not None:
+                    ban_state["pending"] = after_ban
+                return list(force)
             return None
 
-        passes = generate(eng, first, on_token, pick_at)
+        passes = generate(eng, first, on_token, pick_at, ban=(lambda: ban_state["now"]) if plan is not None else None)
         n_out, finish = state["n"], state["finish"]
         deliver(stream.flush())
         tail = stopf.flush()
@@ -990,7 +1166,7 @@ class Ink2Runner:
             usage.spec = dict(draft_mode=eng.draft_mode, draft_passes=passes,
                               tokens_per_pass=round(n_out / passes, 3) if passes else 0.0)
         usage.reasoning_tokens = stream.reasoning_count
-        usage.finish = finish
+        usage.finish = "tool_calls" if (finish == "stop" and usage.tool_calls) else finish
         return usage
 
 

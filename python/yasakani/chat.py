@@ -52,6 +52,9 @@ class ChatParams:
     thinking_budget: int = 0                   # > 0: cut the thinking after this many tokens and go on to the answer (0 = no limit)
     template_kwargs: Dict[str, object] = field(default_factory=dict)
     tools: Optional[List[dict]] = None            # OpenAI-style tool definitions; None = a plain chat request
+    tool_choice: Optional[str] = None             # "required": a call must be made (tool_choice "required" or a named function; the
+                                                  # server then offers only that function).  Read by the Inkling-2 runner; the Qwen3.8
+                                                  # runner has no constrained decoding and runs such a request as "auto"
 
 
 @dataclass
@@ -131,8 +134,9 @@ def _clean_content(c, i: int, images: bool = False):
     return c
 
 
-def _clean_tool_calls(calls, i: int) -> List[dict]:
-    """The tool calls of an assistant message, in the form the chat template reads: the arguments as an object."""
+def _clean_tool_calls(calls, i: int, *, tool_ids: bool = False) -> List[dict]:
+    """The tool calls of an assistant message, in the form the chat template reads: the arguments as an object.  ``tool_ids``: the
+    call's ``id`` is kept (a chat template that finds the function of a tool result through its ``tool_call_id`` needs it)."""
     if not isinstance(calls, list):
         raise RequestError("messages[%d]: tool_calls must be a list" % i)
     out = []
@@ -150,14 +154,19 @@ def _clean_tool_calls(calls, i: int) -> List[dict]:
             args = {}
         if not isinstance(args, dict):
             raise RequestError("messages[%d].tool_calls[%d]: arguments must be a JSON object" % (i, k))
-        out.append({"type": "function", "function": {"name": f["name"], "arguments": args}})
+        item = {"type": "function", "function": {"name": f["name"], "arguments": args}}
+        if tool_ids and isinstance(c.get("id"), str) and c["id"]:
+            item["id"] = c["id"]
+        out.append(item)
     return out
 
 
-def clean_messages(messages, *, images: bool = False) -> List[dict]:
+def clean_messages(messages, *, images: bool = False, tool_ids: bool = False) -> List[dict]:
     """Validate OpenAI-style messages and return plain dicts.  ``developer`` is read as
     ``system``; an assistant message may carry ``tool_calls`` and a ``tool`` message carries the result of one call.
-    ``image_url`` parts are kept only with ``images`` (image input configured); otherwise they are refused as in 0.1.1."""
+    ``image_url`` parts are kept only with ``images`` (image input configured); otherwise they are refused as in 0.1.1.
+    ``tool_ids`` (Inkling-2 model folders): the ``id`` of each tool call, and ``tool_call_id`` and ``name`` of a tool message, are
+    kept for the chat template (the Qwen3.8 template does not read them, so they are left out there as before)."""
     if not isinstance(messages, list) or not messages:
         raise RequestError("messages must be a non-empty list")
     out = []
@@ -174,7 +183,11 @@ def clean_messages(messages, *, images: bool = False) -> List[dict]:
             if isinstance(m.get("reasoning_content"), str):
                 msg["reasoning_content"] = m["reasoning_content"]
             if m.get("tool_calls"):
-                msg["tool_calls"] = _clean_tool_calls(m["tool_calls"], i)
+                msg["tool_calls"] = _clean_tool_calls(m["tool_calls"], i, tool_ids=tool_ids)
+        elif role == "tool" and tool_ids:
+            for key in ("tool_call_id", "name"):
+                if isinstance(m.get(key), str) and m[key]:
+                    msg[key] = m[key]
         out.append(msg)
     return out
 

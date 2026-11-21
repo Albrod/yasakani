@@ -321,6 +321,7 @@ def cmd_serve(args) -> int:
                        default_max_tokens=args.default_max_tokens, max_tokens_cap=args.max_tokens_cap)
     cfg.sampling_defaults = dict(pack.sampling)
     cfg.effort_aliases = dict(ink.EFFORT_ALIASES)
+    cfg.keep_tool_ids = True                     # the chat template finds the function of a tool result through its tool_call_id
     state = ApiState(cfg)
     state.version = __version__
     try:
@@ -337,7 +338,7 @@ def cmd_serve(args) -> int:
     try:
         pack, eng, fmt, runner = open_stack(args, warm=not args.no_warmup)
         state.runner = runner
-        _say("ready: OpenAI-compatible API at %s/v1   (model id %r%s; one request at a time, text only)"
+        _say("ready: OpenAI-compatible API at %s/v1   (model id %r%s; one request at a time, text and tool calls)"
              % (base, cfg.model_id, ", API key required" if cfg.api_key else ""))
         _say("stop with Ctrl+C")
         while True:

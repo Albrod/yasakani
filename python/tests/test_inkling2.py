@@ -511,8 +511,10 @@ class HostEngineTests(unittest.TestCase):
     def test_requests_that_are_refused(self):
         from yasakani.chat import ChatParams, ContextLengthError, RequestError
         tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
-        with self.assertRaisesRegex(RequestError, "tools are not supported"):
-            self.runner.prepare_checked(ChatParams(messages=[{"role": "user", "content": "x"}], tools=tools))
+        prepared = self.runner.prepare_checked(ChatParams(messages=[{"role": "user", "content": "x"}], tools=tools))
+        self.assertEqual(len(prepared), 3)                     # tools are taken now (tests/test_inkling2_tools.py)
+        with self.assertRaises(RequestError):
+            self.runner.prepare_checked(ChatParams(messages=[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]))
         with self.assertRaises(ContextLengthError):
             self.runner.prepare_checked(ChatParams(messages=[{"role": "user", "content": "word " * 400}]))
 
@@ -567,10 +569,9 @@ class HostServerTests(unittest.TestCase):
         self.assertIn("length", [c.get("finish_reason") for e in events for c in e.get("choices", [])])
 
     def test_refused_requests(self):
-        st, data = self._req("POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}],
+        st, data = self._req("POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}], "max_tokens": 2,
                                                               "tools": [{"type": "function", "function": {"name": "f"}}]})
-        self.assertEqual(st, 400)
-        self.assertIn("tools are not supported", json.loads(data)["error"]["message"])
+        self.assertEqual(st, 200)                              # tools are taken now (tests/test_inkling2_tools.py)
         st, data = self._req("POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "huge"})
         self.assertEqual(st, 400)
         self.assertIn("none, minimal, low, medium, high, xhigh, max", json.loads(data)["error"]["message"])

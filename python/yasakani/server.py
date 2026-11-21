@@ -10,8 +10,8 @@
 * A stream carries one chunk per token (several chunks arrive together, about 64 times a second on Windows).
 * Tool calling: ``tools`` (functions) with ``tool_choice`` "auto" or "none".  The model's own chat template describes the tools to
   the model; the calls it writes come back as ``tool_calls`` (in a stream: one chunk per finished call, with the whole arguments).
-  ``tool_choice`` "required" or a named function is accepted but not enforced (no constrained decoding): it runs as "auto", with
-  only the named function offered when one is named.
+  ``tool_choice`` "required" or a named function is accepted but not enforced for Qwen3.8 models (no constrained decoding): it runs
+  as "auto", with only the named function offered when one is named.  Inkling-2 model folders enforce it (yasakani/inkling2.py).
 * ``thinking_budget`` (a request field; the default comes from the environment variable YASAKANI_THINKING_BUDGET, 0 = no limit):
   when the thinking has taken that many tokens it is closed and the model goes on to the answer.
 * Optional still-image input through ``image_url`` (configure --mmproj, --llama-dir and --vision-model).
@@ -53,6 +53,7 @@ class ServerConfig:
         self.default_thinking_budget = max(0, int(default_thinking_budget))
         self.sampling_defaults = {}                       # the model's defaults (temperature, top_p, top_k); empty: those of Qwen3.8
         self.effort_aliases = None                        # accepted reasoning_effort values; None: REASONING_EFFORT_ALIASES
+        self.keep_tool_ids = False                        # keep tool_call ids / tool_call_id / name of tool messages (Inkling-2)
 
 
 class ApiState:
@@ -121,7 +122,7 @@ def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> C
     rf = body.get("response_format")
     if isinstance(rf, dict) and rf.get("type") not in (None, "text"):
         raise RequestError("response_format %r is not supported" % rf.get("type"))
-    messages = clean_messages(body.get("messages"), images=images)
+    messages = clean_messages(body.get("messages"), images=images, tool_ids=bool(getattr(cfg, "keep_tool_ids", False)))
     mt = body.get("max_completion_tokens", body.get("max_tokens"))
     max_tokens = cfg.default_max_tokens if mt is None else _num({"v": mt}, "v", None, 1, None, int)
     if cfg.max_tokens_cap:
@@ -158,7 +159,8 @@ def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> C
         min_p=_num(body, "min_p", 0.0, 0.0, 1.0),
         seed=None if seed is None else _num(body, "seed", 0, None, None, int),
         stop=list(stop), ignore_eos=bool(body.get("ignore_eos", False)), loop_guard=body.get("loop_guard", True) is not False,
-        thinking_budget=thinking_budget, template_kwargs=kw, tools=tools)
+        thinking_budget=thinking_budget, template_kwargs=kw, tools=tools,
+        tool_choice="required" if tools and (choice == "required" or forced) else None)
 
 
 def tool_call_json(call: dict, index: Optional[int] = None) -> dict:
