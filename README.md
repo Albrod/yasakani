@@ -206,11 +206,12 @@ start (in our run the checks and the start of the page took 35 to 40 s with the 
 ```bat
 python C:\src\yasakani-0.3.0\tools\convert\inkling2_convert.py --source D:\models\Inkling-2-Mini-hf --out D:\models\inkling2-mini-quality --scheme quality
 yasakani verify --model-dir D:\models\inkling2-mini-quality
+yasakani selfcheck --model-dir D:\models\inkling2-mini-quality
 yasakani chat --model-dir D:\models\inkling2-mini-quality
-START.cmd --model-dir D:\models\inkling2-mini-quality --skip-checks
+START.cmd --model-dir D:\models\inkling2-mini-quality
 ```
 
-`verify` compares every file with its SHA-256 and every tensor with its CRC-32. `selfcheck` has nothing to compare for a folder you convert this way: the expected tokens of converted weights are made by a reference implementation that is not part of this repository, so the converter leaves `selfcheck.json` without cases, and `START.cmd --model-dir` needs `--skip-checks` for this folder (it stops at the self-check otherwise).
+`verify` compares every file with its SHA-256 and every tensor with its CRC-32. `selfcheck` runs three short prompts (the one of the official test, one in Japanese, one asking for code) and compares 48 greedy tokens of each with the tokens that a reference implementation of the model gave on these converted weights. The conversion on the CPU gives the same file every time: when the `.yskn` file has the SHA-256 of our conversion of revision `ed40e7da625f594fc9c4990f5f66be24873c22d7` (`44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d`, 15,052,423,172 bytes), the converter writes those tokens into `selfcheck.json`, and `START.cmd --model-dir` runs its checks on this folder as on the published weights. A file that differs (for example one made from another revision) gets a `selfcheck.json` without cases: `selfcheck` then has nothing to compare, and `START.cmd --model-dir` needs `--skip-checks` for that folder (it stops at the self-check otherwise).
 
 **Limits.** Experimental in 0.3.0.
 

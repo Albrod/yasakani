@@ -541,7 +541,7 @@ One RTX 5090, Windows 11, November 21, 2026, the published weights, one request 
   starts like the one before (the next turn of a chat) reads only the new part.
 * Loading: 6 to 8 s with the files in the Windows file cache (10 to 15 s for the converted weights, whose tensors are checked at load).
 
-`yasakani bench --model-dir <folder>` measures it on your PC (greedy, thinking off, 256 tokens per test). Other cards are slower.
+`yasakani bench --model-dir <folder>` measures it on your PC (greedy, thinking off, 256 tokens per test). We have not measured other cards.
 
 ### How were the answers checked against the published model?
 
@@ -558,8 +558,11 @@ instead of 19.5 GB ([FORMAT](FORMAT.md)). Against the published model on 43 text
 answers, English and Japanese prose, code) the KL divergence was 0.0110, and the most likely next token was the same at 96.0 % of the
 positions. The engine allocates 20.2 GB instead of 22.1 GB, but it is not faster yet: 0.3.0 decodes these matrices when it loads them
 (`yasakani bench` 168.4 against 166.3 tokens/s in the same run on the RTX 5090). The conversion takes about 4 minutes on the CPU.
-`yasakani selfcheck` cannot check such a folder (its expected tokens come from a reference implementation that is not part of this
-repository); `yasakani verify` checks every file and every tensor, and `START.cmd --model-dir <folder> --skip-checks` opens it.
+`yasakani verify` checks every file and every tensor. `yasakani selfcheck` compares the greedy output of three short prompts with
+the tokens that a reference implementation of the model gave on the same converted weights: the conversion on the CPU gives the same
+file every time, and the converter writes these tokens into `selfcheck.json` when its file has the SHA-256 of ours
+(`44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d`). `START.cmd --model-dir <folder>` then opens it after the
+same checks as for the published weights. A file that differs gets no expected tokens; open that folder with `--skip-checks`.
 
 ### How do thinking on and off work for this model?
 

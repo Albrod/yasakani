@@ -587,6 +587,9 @@ Nothing is downloaded, and nothing in the source folder is run or changed. With 
 the published one: a hard link when both folders are on the same drive, else a copy (`--copy` always copies). The image part and the
 drafter of the download are not used. With `--scheme quality` it writes the weights again in fewer bits, in one `.yskn` file of
 15.05 GB (`"format": "yskn"` in the `weights` entry; [FORMAT](../docs/FORMAT.md)); the numbers are in the [README](../README.md#inkling-2-mini).
+Its `selfcheck.json` gets the expected tokens of three prompts when the `.yskn` file has the SHA-256 of a conversion we checked
+([`tools/convert/data/inkling2_selfcheck.json`](../tools/convert/data/inkling2_selfcheck.json): the conversion on the CPU gives the
+same file every time); for any other file it has no cases.
 The converter imports the package from the `python/` folder next to it and needs numpy, tokenizers and jinja2 (installed with the package);
 in a quickstart folder run it with the quickstart's Python after `yasakani_env.cmd`.
 
@@ -609,7 +612,7 @@ itself or a folder that holds it, and `YASAKANI_INK2_DLL` names it directly. Its
 |---|---|
 | `yasakani info --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | Python and its three libraries, the engine library and its binding, the GPU, and the folder: source and revision, weights, sampling, stop token, the tokenizer and the chat template |
 | `yasakani verify --model-dir D:\models\inkling2-mini` | compares every file with the SHA-256 in `yasakani.json` (reads about 20 GB), and for a `.yskn` file every tensor with its CRC-32 |
-| `yasakani selfcheck --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | the prompt of the official text test of the model's code in the transformers library, greedy, compared with the 30 tokens that test expects (a folder of `--scheme quality` has no expected tokens unless the converter was given them) |
+| `yasakani selfcheck --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | the prompt of the official text test of the model's code in the transformers library, greedy, compared with the 30 tokens that test expects (a folder of `--scheme quality`: three prompts, 48 tokens each, compared with the tokens that the converter writes when its `.yskn` file equals our conversion; a file that differs gets none) |
 | `yasakani chat --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | chat in the terminal. `/think on\|off`, `/effort none\|minimal\|low\|medium\|high\|xhigh\|max`, `/reset`, `/exit`; `--no-think`, `--effort low\|medium\|xhigh` at start |
 | `yasakani serve --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | the OpenAI-compatible server, model id `inkling-2-mini`; `reasoning_effort` and `chat_template_kwargs` `{"enable_thinking": false}` as for the Qwen models |
 | `yasakani bench --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | generation speed: greedy, thinking off, 256 tokens per test (`--n` changes it, `--think` turns thinking on), `--json` |

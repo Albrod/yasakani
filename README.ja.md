@@ -201,11 +201,12 @@ START.cmd --model-dir D:\models\inkling2-mini
 ```bat
 python C:\src\yasakani-0.3.0\tools\convert\inkling2_convert.py --source D:\models\Inkling-2-Mini-hf --out D:\models\inkling2-mini-quality --scheme quality
 yasakani verify --model-dir D:\models\inkling2-mini-quality
+yasakani selfcheck --model-dir D:\models\inkling2-mini-quality
 yasakani chat --model-dir D:\models\inkling2-mini-quality
-START.cmd --model-dir D:\models\inkling2-mini-quality --skip-checks
+START.cmd --model-dir D:\models\inkling2-mini-quality
 ```
 
-`verify` は、各ファイルを SHA-256 で、各テンソルを CRC-32 で比べます。こうして変換したフォルダーでは、`selfcheck` に比べる物がありません。変換した重みの期待値は参照の実装で作りますが、その実装はこのリポジトリに入っていないからです。そのため変換のプログラムは `selfcheck.json` を空のまま書きます。このフォルダーを `START.cmd --model-dir` で開く時は `--skip-checks` を付けてください（付けないと自己確認で止まります）。
+`verify` は、各ファイルを SHA-256 で、各テンソルを CRC-32 で比べます。`selfcheck` は短い入力 3 つ（公式の試験の入力・日本語・コード）で、貪欲法の 48 トークンずつを期待値と比べます。期待値は、このモデルの参照の実装が、変換したこの重みで出したトークンです。CPU での変換は、毎回同じファイルになります。`.yskn` のファイルが私たちの変換（版 `ed40e7da625f594fc9c4990f5f66be24873c22d7` から。SHA-256 は `44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d`、15,052,423,172 バイト）と同じなら、変換のプログラムは期待値を `selfcheck.json` に書きます。`START.cmd --model-dir` も、公開の重みと同じようにこのフォルダーを確認します。ファイルが違う時（たとえば別の版から変換した時）は、`selfcheck.json` を空のまま書きます。その時は `selfcheck` に比べる物がありません。`START.cmd --model-dir` で開く時は `--skip-checks` を付けてください（付けないと自己確認で止まります）。
 
 **制限。** 0.3.0 では試験的な対応です。
 
