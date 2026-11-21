@@ -40,8 +40,10 @@ tools (the server); "required" with one function (a named function) writes the c
 then lets it pick only ids that spell one of the offered names (``NameTrie``: the ids of each name as the template writes them, at
 every position of the name) and, where a name is complete, ``<|content_invoke_tool_json|>``; so the header is always that of a call
 of an offered function (masking the block openers only at the first position after ``<|message_model|>`` was not enough: the model
-wrote another id there and its answer as the block's name, and no call came).  The arguments are the model's; after its first
-call the rest of the reply is free, as the template allows (more calls, or text).  With ``enable_thinking: false`` and tools the effort is 0 and the
+wrote another id there and its answer as the block's name, and no call came).  The arguments are the model's.  After a call
+(required or named) only another call header of an offered function or the stop token may follow, as in the template (which
+writes the thinking and the text before the calls): where the model would open another block after <|message_model|> the reply
+ends there (without that, a forced call was followed by thinking, text and in some runs by calls until max_tokens).  With ``enable_thinking: false`` and tools the effort is 0 and the
 model writes its own block header: it may think briefly (the model card: the lowest effort does not turn the thinking fully off),
 then answers or calls.  The answer block is not opened for it as without tools (that would rule out a call); masking only the
 thinking opener after ``<|message_model|>`` was tried and made the model call a tool for 1 + ... + 5 in 1 of 7 runs (greedy and
@@ -1171,11 +1173,12 @@ class Ink2Runner:
         stopf = StopFilter(p.stop)
         budget = max(0, int(getattr(p, "thinking_budget", 0) or 0))
         ban_state = dict(pending=None, now=None)             # the mask of the pick after a forced <|message_model|>, and of the next
-        trie = None                                          # tool_choice required among several: the names of the call header
-        name = dict(node=None)                               # the node of the trie while the model writes the name of the call
-        if plan is not None and plan["call"] == "":
-            trie = plan.get("trie") or self.fmt.name_trie(p.tools)
-            if in_answer == "head":                          # thinking off: the prompt ends with <|message_model|>
+        trie = None                                          # tool_choice required / a named function: the names a call may take
+        name = dict(node=None)                               # the node of the trie while the model writes the name of a call
+        more = dict(stage=None)                              # after a call: "end" (its <|end_message|>), "head" (then <|message_model|>)
+        if plan is not None and plan["call"] is not None:
+            trie = plan.get("trie") or (self.fmt.name_trie(p.tools) if plan["call"] == "" else NameTrie(self.fmt, [plan["call"]]))
+            if in_answer == "head":                          # thinking off, several: the prompt ends with <|message_model|>
                 name["node"] = trie.root
 
         def deliver(events):
@@ -1209,6 +1212,11 @@ class Ink2Runner:
         def on_token(tok: int):
             if eng._cancel.is_set():
                 return DROP
+            if more["stage"] == "head":                      # after a call and <|message_model|>: another call, or the reply ends
+                more["stage"] = None                         # (the template writes text and thinking before the calls, not after)
+                if tok not in trie.root:
+                    state["finish"] = "stop"
+                    return DROP
             state["n"] += 1
             was = stream.mode
             ban_state["now"] = None
@@ -1225,11 +1233,21 @@ class Ink2Runner:
                     ban_state["now"] = ban_state["pending"]
                 ban_state["pending"] = None
             deliver(stream.feed(tok))
+            if more["stage"] == "end":
+                more["stage"] = None
+                if tok == ids[T_MODEL]:
+                    more["stage"] = "head"
+                    name["node"] = trie.root
+                    ban_state["now"] = Allow(set(trie.root) | self.fmt.special)
             if tok in stops or stopf.hit:
                 state["finish"] = "stop"
                 return END
             if state["n"] >= max_new:
                 return END
+            if trie is not None and was == "call" and tok == ids[T_END]:
+                more["stage"] = "end"                        # a call ended: only another call header or the stop token
+                ban_state["now"] = Allow({ids[T_MODEL], ids[T_STOP]})
+                return None
             if plan is not None and plan["call"] is not None and was == "reasoning" and tok == ids[T_END] and not stream.calls:
                 ban_state["pending"] = after_ban             # tool_choice required: the thinking has ended, the call comes next
                 return list(after_thinking)

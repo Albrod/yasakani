@@ -446,18 +446,41 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((calls(got), u.finish), ([{"name": "run_command", "arguments": {}}], "tool_calls"))
         self.assertEqual(eng.fed[eng.n_prompt:], reply[:-1])
 
-    def test_after_the_call_the_reply_is_free(self):
-        """required is met by the first call; a second call and a text block after it are the model's (the template allows them)."""
+    def test_after_a_call_only_calls_or_the_end(self):
+        """After a call another call of an offered function may follow; a text or thinking block after it ends the reply there
+        (the template writes them before the calls).  Thinking on and off, several functions and a named one."""
         f = fmt()
+        two = ('<|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}<|end_message|>'
+               '<|message_model|>run_command<|content_invoke_tool_json|>{"name":"run_command","args":{}}<|end_message|>')
+        cases = [("Think.<|end_message|>" + two, {}, [WEATHER, SHELL], ["get_weather", "run_command"]),
+                 (two[len("<|message_model|>"):], {"enable_thinking": False}, [WEATHER, SHELL], ["get_weather", "run_command"]),
+                 ('{"name":"get_weather","args":{}}<|end_message|>', {"enable_thinking": False}, [WEATHER], ["get_weather"]),
+                 ('Think.<|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}'
+                  '<|end_message|>', {}, [WEATHER], ["get_weather"])]
+        for lead, kw, tools, names in cases:
+            for tail in ('<|message_model|><|content_text|>51<|end_message|><|content_model_end_sampling|>',
+                         '<|message_model|><|content_thinking|>Now answer.<|end_message|><|content_model_end_sampling|>',
+                         '<|content_model_end_sampling|>'):
+                reply = self.ids(lead + tail)
+                eng = FakeEngine(f, lambda p: reply)
+                u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools(tools),
+                                                            tool_choice="required", temperature=0.0, template_kwargs=kw))
+                self.assertEqual([c["name"] for c in calls(got)], names, (lead, tail))
+                self.assertEqual((joined(got, "content"), u.finish, u.tool_calls), ("", "tool_calls", len(names)), (lead, tail))
+                n = len(self.ids(lead)) + (1 if tail.startswith("<|message_model|>") else 0)
+                self.assertEqual(eng.fed[eng.n_prompt:], reply[:n])           # a dropped block: its <|message_model|> stays fed
+                self.assertEqual(u.completion_tokens, n if tail.startswith("<|message_model|>") else n + 1)
+
+    def test_after_a_call_junk_is_held_to_calls_or_the_end(self):
+        """After a call the model would write a junk id: only <|message_model|> or the stop token may come (here the stop)."""
+        f = fmt()
+        junk = f.encode("\u4e00")[0]
         reply = self.ids('Think.<|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}'
-                         '<|end_message|><|message_model|>run_command<|content_invoke_tool_json|>{"name":"run_command","args":{}}'
-                         '<|end_message|><|message_model|><|content_text|>ok<|end_message|><|content_model_end_sampling|>')
-        eng = FakeEngine(f, lambda p: reply)
+                         '<|end_message|><|content_model_end_sampling|>')
+        eng = FakeEngine(f, lambda p: reply, decoys={len(reply) - 1: junk})
         u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools([WEATHER, SHELL]),
                                                     tool_choice="required", temperature=0.0))
-        self.assertEqual([c["name"] for c in calls(got)], ["get_weather", "run_command"])
-        self.assertEqual((joined(got, "content"), u.finish, u.tool_calls), ("ok", "tool_calls", 2))
-        self.assertEqual(eng.fed[eng.n_prompt:], reply[:-1])
+        self.assertEqual((calls(got), joined(got, "content"), u.finish), ([{"name": "get_weather", "arguments": {}}], "", "tool_calls"))
 
     def test_masked_allow(self):
         x = np.arange(6, dtype=np.float32)
