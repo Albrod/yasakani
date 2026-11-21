@@ -21,7 +21,9 @@
 // Bits of ink2_capabilities().
 enum {
   INK2_CAP_PACKED_DENSE = 1,  // dense matrices are accepted packed (nvfp4 / mxfp8), multiplied as stored
-  INK2_CAP_DRAFTER = 2        // the model's drafter (ink2_drafter_api.h: ink2_draft_abi, ink2_spec_pass, ...)
+  INK2_CAP_DRAFTER = 2,       // the model's drafter (ink2_drafter_api.h: ink2_draft_abi, ink2_spec_pass, ...)
+  INK2_CAP_DRAFTER_PACKED = 4,  // drafter matrices and folded head accepted packed (nvfp4 / mxfp8), ink2_draft_abi() >= 2
+  INK2_CAP_Q3 = 8               // the 3-bit format q3 (INK2_DFMT_Q3) for the drafter matrices
 };
 
 #ifdef INK2_BUILD

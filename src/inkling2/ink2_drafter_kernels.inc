@@ -192,19 +192,73 @@ KINL void k_dargmax_block(KCTXP float& best, float& bi, float* sv, float* si) {
   }
 }
 
+// confidence cut: the two largest values of a multiset (with multiplicity).
+KINL void k_top2_add(float x, float& m1, float& m2) {
+  if (x > m1) {
+    m2 = m1;
+    m1 = x;
+  } else if (x > m2) {
+    m2 = x;
+  }
+}
+// confidence cut: top two over the warp (lane 0 gets them).
+KINL void k_top2_warp(KCTXP float& m1, float& m2) {
+  for (int d = 16; d >= 1; d >>= 1) {
+    float o1 = KSHFL_DOWN(m1, d), o2 = KSHFL_DOWN(m2, d);
+    float lo = fminf(m1, o1);
+    m1 = fmaxf(m1, o1);
+    m2 = fmaxf(lo, fmaxf(m2, o2));
+  }
+}
+
+// Value j of row r of a packed matrix [rows, cols] (INK2_DFMT_NVFP4 / MXFP8 / Q3; fac as GemvJob.fac, 0 = none):
+// the value the packed matrix kernels multiply, times fac.
+KINL float k_delem(const u8* w, const u8* sc, int fmt, float fac, size_t r, int cols, int j) {
+  float v;
+  if (fmt == INK2_DFMT_NVFP4) {
+    unsigned b = w[r * (size_t)(cols >> 1) + (size_t)(j >> 1)];
+    v = k_fp4x2((j & 1) ? (b >> 4) : b) * k_e4m3v(sc[r * (size_t)(cols >> 4) + (size_t)(j >> 4)]);
+  } else if (fmt == INK2_DFMT_MXFP8) {
+    v = k_e4m3v(w[r * (size_t)cols + (size_t)j]) * k_exp2v(sc[r * (size_t)(cols >> 5) + (size_t)(j >> 5)]);
+  } else {
+    unsigned c = k_q3word(w, r, cols, j & ~7);
+    v = k_q3v(c >> (3 * (j & 7))) * k_e4m3v(sc[r * (size_t)(cols >> 4) + (size_t)(j >> 4)]);
+  }
+  return fac != 0.0f ? v * fac : v;
+}
+
 // Markov head: pick of the previous step, then the input z of this step (ink2_draft.rnn_step).
+// confidence cut: also the confidence of that pick (conf) and the cut rule (ncut).
 KERNEL(dzin, DZinArgs) {
   KSHARED(float, sv, 32);
   KSHARED(float, si, 32);
-  KSHARED(int, tok, 1);
+  KSHARED(float, c1, 32);
+  KSHARED(float, c2, 32);
+  KSHARED(float, csm, 33);
+  KSHARED(int, tok, 2);
   int prev;
   if (a.step > 0) {
     float best = -3.0e38f, bi = 1.0e30f;  // indices < 2^24 are exact as floats
+    float m1 = -3.0e38f, m2 = -3.0e38f, ps = 0.0f;
     for (int g = KTID; g < a.G; g += KNT) {
       float v = a.pval[g], ix = (float)a.pidx[g];
       if (v > best || (v == best && ix < bi)) {
         best = v;
         bi = ix;
+      }
+      if (a.p2) {
+        k_top2_add(v, m1, m2);
+        k_top2_add(a.p2[g], m1, m2);
+        ps += a.psum[g];
+      }
+    }
+    float tot = 0.0f;
+    if (a.p2) {
+      tot = k_block_sum(KCTXA ps, csm);
+      k_top2_warp(KCTXA m1, m2);
+      if ((KTID & 31) == 0) {
+        c1[KTID >> 5] = m1;
+        c2[KTID >> 5] = m2;
       }
     }
     k_dargmax_block(KCTXA best, bi, sv, si);
@@ -214,11 +268,36 @@ KERNEL(dzin, DZinArgs) {
       a.drafts[a.step - 1] = t;
       a.st[a.step].token = t;
       tok[0] = t;
+      tok[1] = a.depth;
+      if (a.p2) {
+        float M1 = -3.0e38f, M2 = -3.0e38f;
+        int nw = KNT >> 5;
+        for (int w = 0; w < nw; ++w) {
+          k_top2_add(c1[w], M1, M2);
+          k_top2_add(c2[w], M1, M2);
+        }
+        int j = a.step - 1;
+        float lse = a.cap + logf(tot);
+        float p = expf(M1 - lse);
+        float cum = (j > 0 ? a.conf[(j - 1) * 4 + 3] : 1.0f) * p;
+        a.conf[j * 4 + 0] = M1;
+        a.conf[j * 4 + 1] = M2;
+        a.conf[j * 4 + 2] = lse;
+        a.conf[j * 4 + 3] = cum;
+        int mode = (int)a.cutp[0];
+        if (mode != 0 && *a.ncut == a.depth) {
+          float m = mode == 1 ? p : (mode == 2 ? M1 - M2 : cum);
+          if (m < a.cutp[1 + j]) *a.ncut = j;  // draft j + 1 is unsure: keep drafts 1 .. j
+        }
+        tok[1] = *a.ncut;
+      }
     }
     KSYNC();
     prev = tok[0];
+    if (tok[1] < a.depth) return;  // cut: the rest of the draft call is not needed
   } else {
     prev = a.st[0].token;
+    if (a.ncut && KTID == 0) *a.ncut = a.depth;
   }
   if (a.step >= a.depth) return;
   int R = a.rank, H = a.H;
@@ -231,7 +310,7 @@ KERNEL(dzin, DZinArgs) {
   for (int i = KTID; i < n; i += KNT) {
     float v;
     if (i < R) v = a.step > 0 ? a.s[i] : 0.0f;
-    else if (i < 2 * R) v = k_bf(e[i - R]);
+    else if (i < 2 * R) v = a.w1fmt == INK2_DFMT_BF16 ? k_bf(e[i - R]) : k_delem((const u8*)a.w1, a.w1sc, a.w1fmt, a.w1fac, (size_t)prev, R, i - R);
     else if (i < 2 * R + H) v = hrow[i - 2 * R];
     else v = fr[i - 2 * R - H];
     a.z[i] = v;
@@ -244,6 +323,10 @@ KERNEL(dfold, DFoldArgs) {
   KSHARED(float, lat, 256);
   KSHARED(float, sv, 32);
   KSHARED(float, si, 32);
+  KSHARED(float, wb, 32);
+  KSHARED(float, ws, 32);
+  KSHARED(float, we, 32);
+  if (a.ncut && *a.ncut < a.depth) return;  // confidence cut: cut before this step
   int R = a.rank;
   for (int j = KTID; j < R; j += KNT) {
     lat[j] = tanhf(a.zz[2 * R + j] + k_bf(a.rnn_b[2 * R + j]));
@@ -258,11 +341,18 @@ KERNEL(dfold, DFoldArgs) {
   int lane = KTID & 31, wid = KTID >> 5, nwb = KNT >> 5;
   float l8[8];
   for (int e = 0; e < 8; ++e) l8[e] = lat[lane * 8 + e];
-  float best = -3.0e38f, bi = 1.0e30f;
+  float best = -3.0e38f, bi = 1.0e30f, sec = -3.0e38f, se = 0.0f;
   int stride = a.G * nwb;
   for (int v = KBID * nwb + wid; v < a.V; v += stride) {
     float d;
-    if (a.f16) {
+    if (a.fp) {  // packed folded head: the 8 values of this lane as the packed kernels decode them, then the block scale
+      K_PKW pw = k_pkload(a.fp, a.fpsc, a.fpfmt, (size_t)v, R, lane * 8);
+      float f[8];
+      float scl = k_pkdec(pw, a.fpfmt, f);
+      d = KFMA(f[0], l8[0], 0.0f);
+      for (int e = 1; e < 8; ++e) d = KFMA(f[e], l8[e], d);
+      d = d * scl;
+    } else if (a.f16) {
       const u16* p = a.f16 + (size_t)v * (size_t)R + lane * 8;
       u64 c0 = KLOAD64(p), c1 = KLOAD64(p + 4);
       float f[8];
@@ -282,15 +372,35 @@ KERNEL(dfold, DFoldArgs) {
       d = KFMA(x1.w, l8[7], d);
     }
     d = k_warp_sum(KCTXA d);
+    if (a.fp && a.fpfac != 0.0f) d = d * a.fpfac;
     float val = k_softcap(a.base[v] + (a.fb[v] + d), a.cap);
+    if (a.psum) se += expf(val - a.cap);
     if (val > best) {
+      sec = best;
       best = val;
       bi = (float)v;
+    } else if (val > sec) {
+      sec = val;
     }
+  }
+  if (a.p2 && lane == 0) {  // every lane of a warp holds the same values
+    wb[wid] = best;
+    ws[wid] = sec;
+    we[wid] = se;
   }
   k_dargmax_block(KCTXA best, bi, sv, si);
   if (KTID == 0) {
     a.pval[KBID] = best;
     a.pidx[KBID] = bi < 1.0e29f ? (int)bi : 0;
+    if (a.p2) {
+      float M1 = -3.0e38f, M2 = -3.0e38f, E = 0.0f;
+      for (int w = 0; w < nwb; ++w) {
+        k_top2_add(wb[w], M1, M2);
+        k_top2_add(ws[w], M1, M2);
+        E += we[w];
+      }
+      a.p2[KBID] = M2;
+      a.psum[KBID] = E;
+    }
   }
 }

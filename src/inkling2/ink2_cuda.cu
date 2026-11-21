@@ -13,6 +13,8 @@
 #include "ink2_kargs.h"
 
 #define KERNEL(name, A) __global__ void kk_##name(A a)
+// the same with a bound on the block size and the blocks per SM it must fit (registers)
+#define KERNELB(name, A, nthr, nblk) __global__ void __launch_bounds__(nthr, nblk) kk_##name(A a)
 #define KINL __device__ __forceinline__
 #define KCTXP
 #define KCTXA

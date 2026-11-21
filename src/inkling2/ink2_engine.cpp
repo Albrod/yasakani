@@ -164,6 +164,13 @@ struct Engine {
   // rows use the single-row kernels once per row (faster for 2 .. 5 rows: A/B in README.md).
   int pgemvcm_rows = 0;
   int pgemvcm_min_rows = 6;
+  // Passes of 2 .. small_rows rows (verification passes; 0 = off): experts through exp13s / exp2s, packed
+  // dense products through pgemvcm with 2 / 4 / 8 right-hand sides per block (as many as the pass needs);
+  // small_dense_rows = rows per block of those (0: the size rule of pgemvc, else 2, 4, 8, 16).
+  int small_rows = 4;  // measured (A/B in one process): exp13s pays at R = 2 .. 4; 0 = the grouped kernels always
+  bool use_small_experts = true, use_small_dense = false, use_small_w2 = false;  // (measured: exp2s and the h2 / h4 dense
+  // products are not faster than exp2m and the single-row products on the RTX 5090; kept as options)
+  int small_dense_rows = 0;
   void* graph[2] = {nullptr, nullptr};  // without / with the output projection
   std::map<int, void*> mgraph;          // multi-row passes: key 2 * R + with_logits
   int graphs_built = 0;
@@ -623,11 +630,29 @@ struct Engine {
       for (int j = 0; j < a.njobs; ++j) b += (a.job[j].rows + n - 1) / n;
       return b;
     };
+    bool explicit_nr = nr != 0;
     if (nr == 0) {
       nr = 16;
       while (nr > 4 && nblocks(nr) < pgemvc_min_blocks) nr >>= 1;
     }
     a.blocks = nblocks(nr);
+    if (R > 1 && R <= small_rows && R <= 8 && use_small_dense) {  // few rows: as many right-hand sides per block as the pass has
+      int nh = R <= 2 ? 2 : R <= 4 ? 4 : 8;
+      int mr = nr;
+      if (!explicit_nr && small_dense_rows > 0) mr = small_dense_rows;
+      auto skid = [nh](int n) {
+        if (nh == 2) return n == 2 ? KID_pgcm2h2 : n == 4 ? KID_pgcm4h2 : n == 8 ? KID_pgcm8h2 : KID_pgcm16h2;
+        if (nh == 4) return n == 2 ? KID_pgcm2h4 : n == 4 ? KID_pgcm4h4 : n == 8 ? KID_pgcm8h4 : KID_pgcm16h4;
+        return n == 2 ? KID_pgemvcm2 : n == 4 ? KID_pgemvcm4 : n == 8 ? KID_pgemvcm8 : KID_pgemvcm;
+      };
+      while (mr > 2 && be->max_block(skid(mr)) < a.job[0].cols / 8) mr >>= 1;  // fewer rows: fewer registers
+      if (be->max_block(skid(mr)) >= a.job[0].cols / 8) {
+        a.blocks = nblocks(mr);
+        a.nrhs = R;
+        run(skid(mr), &a, a.blocks * ((R + nh - 1) / nh), a.job[0].cols / 8, cat);
+        return;
+      }
+    }
     if (R > 1 && use_pgemvcm && R >= pgemvcm_min_rows) {  // 8 rows of the pass per block (same sums as R single blocks, for any rows per block)
       int mr = pgemvcm_rows > 0 ? pgemvcm_rows : R <= 8 ? 2 : 16;
       auto mkid = [](int n) { return n == 2 ? KID_pgemvcm2 : n == 4 ? KID_pgemvcm4 : n == 8 ? KID_pgemvcm8 : KID_pgemvcm; };
@@ -990,6 +1015,59 @@ struct Engine {
     // Blocks for about 1.3 times the distinct experts expected (about k + 0.38 k per further row
     // on real text, at most R * k and E); with more, the blocks take several items each.
     int slots = R * k < c.experts ? R * k : c.experts;
+    if (R <= small_rows && use_small_experts && use_exp13c && H / 16 <= 1024 && (I / 16 + 15) / 16 <= 5 /* K_EXP2S_U */ &&
+        I % 16 == 0) {
+      // few rows: one block per possible item (slots = the most distinct experts R rows can have)
+      ExpMArgs s{};
+      s.e4m3 = e4m3;
+      s.exp2t = exp2t;
+      s.gcount = gcount;
+      s.gexp = gexp;
+      s.goff = goff;
+      s.gpairs = gpairs;
+      s.k = k;
+      s.gate_cap = c.gate_cap;
+      s.up_cap = c.up_cap;
+      s.w = L.w13;
+      s.sc = L.w13s;
+      s.factor = L.f13;
+      s.fmt = L.fmt13;
+      s.rows = 2 * I;
+      s.cols = H;
+      s.x = xmn;
+      s.y = act;
+      s.nchunk = (I + 7) / 8;  // K_EXPC_PAIRS row pairs per item, as exp13c
+      s.grid = slots * s.nchunk;
+      run(L.fmt13 == INK2_FMT_NVFP4 ? KID_exp13s : KID_exp13sx, &s, s.grid, (H / 16 + 31) / 32 * 32, INK2_PROF_EXPERTS);
+      if (use_small_w2) {
+        s.w = L.w2;
+        s.sc = L.w2s;
+        s.factor = L.f2;
+        s.fmt = L.fmt2;
+        s.rows = H;
+        s.cols = I;
+        s.x = act;
+        s.y = ydots;
+        s.nchunk = (H + 15) / 16;  // K_EXP2M_H output rows per item
+        s.grid = slots * s.nchunk;
+        run(L.fmt2 == INK2_FMT_NVFP4 ? KID_exp2s : KID_exp2sx, &s, s.grid, 256, INK2_PROF_EXPERTS);
+      } else {
+        s.w = L.w2;
+        s.sc = L.w2s;
+        s.factor = L.f2;
+        s.fmt = L.fmt2;
+        s.rows = H;
+        s.cols = I;
+        s.x = act;
+        s.y = ydots;
+        s.nchunk = (H + 15) / 16;  // K_EXP2M_H
+        int ex = (int)ceil(1.3 * (k + 0.38 * k * (R - 1)));
+        s.grid = (ex < slots ? ex : slots) * s.nchunk;
+        run(KID_exp2m, &s, s.grid, 256, INK2_PROF_EXPERTS);
+      }
+      experts_comb(V, L, R);
+      return;
+    }
     int expect = (int)ceil(1.3 * (k + 0.38 * k * (R - 1)));
     if (expect < slots) slots = expect;
     ExpMArgs a{};
@@ -1026,6 +1104,11 @@ struct Engine {
     a.nchunk = (H + 15) / 16;  // K_EXP2M_H
     a.grid = slots * a.nchunk;
     run(KID_exp2m, &a, a.grid, 256, INK2_PROF_EXPERTS);
+    experts_comb(V, L, R);
+  }
+  // ecomb: the k products of every row in slot order, convolution, residual
+  void experts_comb(Visit& V, const Layer& L, int R) {
+    const int H = c.hidden, k = c.top_k;
     ECombArgs e{};
     e.dots = ydots;
     e.wt = V.rwt;
@@ -1259,7 +1342,9 @@ INK2_API const char* ink2_build_info(void) {
 
 INK2_API int ink2_abi_version(void) { return INK2_ABI_VERSION; }
 
-INK2_API int ink2_capabilities(void) { return INK2_CAP_PACKED_DENSE | INK2_CAP_DRAFTER; }
+INK2_API int ink2_capabilities(void) {
+  return INK2_CAP_PACKED_DENSE | INK2_CAP_DRAFTER | INK2_CAP_DRAFTER_PACKED | INK2_CAP_Q3;
+}
 
 INK2_API int ink2_packed_dense(void* h) {
   Engine* e = (Engine*)h;
@@ -1422,6 +1507,11 @@ INK2_API int ink2_set_option(void* h, const char* name, int value) {
   else if (n == "pgemvcm_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->pgemvcm_rows = value;
   else if (n == "pgemvcm_min_rows" && value >= 2) e->pgemvcm_min_rows = value;
   else if (n == "exp13c") e->use_exp13c = value != 0;
+  else if (n == "small_rows" && value >= 0 && value <= 8) e->small_rows = value;
+  else if (n == "small_experts") e->use_small_experts = value != 0;
+  else if (n == "small_dense") e->use_small_dense = value != 0;
+  else if (n == "small_w2") e->use_small_w2 = value != 0;
+  else if (n == "small_dense_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->small_dense_rows = value;
   else if (n == "max_rows" || n == "rollback") {
     if (e->finalized) fail("option " + n + " must be set before finalize");
     if (value < (n == "max_rows" ? 1 : 0)) fail("option " + n + " out of range");

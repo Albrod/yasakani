@@ -114,11 +114,15 @@ What is in `src/inkling2/`:
 * The dense (non-expert) matrices are multiplied either from bfloat16 (the published weights) or as they are stored in a converted
   `.yskn` file (4-bit NVFP4 and 8-bit MXFP8 rows, `--scheme quality`); `ink2_capabilities()` says so (bit 1).
 * `ink2_drafter.inc`, `ink2_drafter_kernels.inc`, `ink2_drafter_kargs.h`, `ink2_drafter_api.h`: the model's drafter
-  (`mtp.safetensors`) inside the same library, and the pass that checks its guesses (`ink2_capabilities()` bit 2).
+  (`mtp.safetensors`) inside the same library, and the pass that checks its guesses (`ink2_capabilities()` bit 2). Its matrices
+  can also be given as they are stored in a converted drafter file (`mtp_d4.yskn`, [docs/FORMAT.md](docs/FORMAT.md) section 10.6;
+  bit 4, drafter interface version 2). The pass checks the guesses only up to the first one the drafter is unsure of (the
+  confidence cut of `--draft auto`).
 * `build.cmd`: the build. There is no CMake file for this library.
 
-The released `yskn_inkling2.dll` has SHA-256 `61eec80a1c39c11f3e13a115b5cfcc44653b160d74cb84bad429a4cac3a5436e` (4,067,328 bytes): the
-engine with the drafter and with the products for packed dense matrices, built from `src/inkling2/` of this release. It was built with the tools of
+The released `yskn_inkling2.dll` has SHA-256 `b10248cddc7b2bceb9a26d0d28b9446db57bf71c24db4772a3829f8e66b1c078` (6,157,824 bytes): the
+engine with the drafter (also from a converted drafter file, `mtp_d4.yskn`) and with the products for packed dense matrices, built
+from `src/inkling2/` of this release. It was built with the tools of
 the table above (Visual C++ 19.44, CUDA Toolkit 13.2) by `build.cmd cuda`. Like `yskn.dll` it has machine code for compute capability 8.6
 (RTX 30 series), 8.9 (RTX 40 series) and 12.0 (RTX 50 series), plus PTX for `compute_120`, and the CUDA runtime is linked statically. It
 also uses the OpenMP library of Visual C++ (`vcomp140.dll`, part of the Visual C++ 2015-2022 x64 runtime). Only the RTX 5090 has been
@@ -133,7 +137,7 @@ src\inkling2\build.cmd cuda
 yasakani info --model-dir D:\models\inkling2-mini --dll build\inkling2\yskn_inkling2.dll
 ```
 
-The build takes a few minutes and writes `build\inkling2\yskn_inkling2.dll` (about 4 MB). `set INK2_ARCHS=-gencode
+The build takes a few minutes and writes `build\inkling2\yskn_inkling2.dll` (about 6 MB). `set INK2_ARCHS=-gencode
 arch=compute_120,code=sm_120` before it builds for the RTX 50 series only. `src\inkling2\build.cmd host` builds
 `build\inkling2\ink2_host.dll`, the kernels on the CPU only: it is not released and serves the unit tests of the package
 (`YASAKANI_TEST_INK2_DLL`, with the tiny test checkpoint in `YASAKANI_TEST_INK2_SOURCE`; see `python/tests/test_inkling2.py`). The library

@@ -239,6 +239,7 @@ inline float emu_bits2f(unsigned u) {
 }
 
 #define KERNEL(name, A) static void kk_##name(EmuT& _t, const A& a)
+#define KERNELB(name, A, nthr, nblk) static void kk_##name(EmuT& _t, const A& a)
 #define KINL static inline
 #define KCTXP EmuT& _t,
 #define KCTXA _t,

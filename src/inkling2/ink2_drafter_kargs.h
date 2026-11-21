@@ -93,11 +93,24 @@ struct DZinArgs {
   int* drafts;        // [8]
   StepState* st;
   const float* s;     // [rank]
-  const u16* w1;      // [w1_rows, rank]
+  const u16* w1;      // [w1_rows, rank]: bfloat16, or the codes of a packed table (w1fmt != INK2_DFMT_BF16)
+  const u8* w1sc;     // packed: its block scales; w1fac its row-sum factor (as GemvJob.fac)
+  float w1fac;
+  int w1fmt;
   const float* hn;    // [8, H]
   const float* frnn;  // [fring, H]
   float* z;           // [2 rank + 2 H]
   int G, step, depth, rank, H, fring, w1_rows;
+  // Confidence of the drafts (NULL p2 = off): per block second-best value and sum of
+  // exp(value - cap) from dfold; conf [8][4] = top1, top2, log-sum-exp, running product of the
+  // top probability of drafts 1 .. j; ncut = drafts kept (depth = no cut); cutp [16] = rule
+  // (cutp[0]: 0 off, 1 top probability, 2 top1 - top2, 3 running product; cutp[j] = threshold of draft j).
+  const float* p2;
+  const float* psum;
+  float* conf;
+  int* ncut;
+  const float* cutp;
+  float cap;
 };
 // Markov head, the rest of a step: gates from zz = rnn_proj z (+ bias): s (block 0
 // writes it), latent = tanh(out); then logit_v = softcap(base_v + (fold_b_v +
@@ -109,12 +122,20 @@ struct DFoldArgs {
   float* s;           // [rank]
   const float* base;  // [V] row of this step
   const u16* f16;     // [V, rank] or NULL
-  const float* f32;   // [V, rank] (used when f16 is NULL)
+  const float* f32;   // [V, rank] (used when f16 and fp are NULL)
+  const u8* fp;       // [V, rank] packed (INK2_DFMT_*: fpfmt, scales fpsc, factor fpfac as GemvJob.fac) or NULL
+  const u8* fpsc;
+  float fpfac;
+  int fpfmt;
   const float* fb;    // [V]
   float* pval;        // [G]
   int* pidx;
   int V, rank, step, G;  // G = blocks of the launch
   float cap;
+  float* p2;        // [G] second-best value per block (NULL = off)
+  float* psum;      // [G] sum of exp(value - cap) per block
+  const int* ncut;  // drafts kept so far (< depth: cut, the step is skipped)
+  int depth;
 };
 
 #define INK2_DRAFT_KERNEL_LIST(X) \

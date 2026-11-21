@@ -32,6 +32,16 @@ KINL float k_softcap(float x, float cap) { return tanhf(x / cap) * cap; }
 KINL float k_fp4x2(unsigned c) { return KBITS2F(((c & 7u) << 22) | ((c & 8u) << 28)) * KBITS2F(0x7F000000u); }
 KINL float k_e4m3v(unsigned b) { return KBITS2F(((b & 0x7Fu) << 20) | ((b & 0x80u) << 24)) * KBITS2F(0x7B800000u); }
 KINL float k_exp2v(unsigned b) { return KBITS2F(b ? (b << 23) : 0x00400000u); }
+// 3-bit code (bits 0-2 of c) of INK2_DFMT_Q3 -> q3[code] = +-1, +-3, +-5, +-7 (exact as float32).
+KINL float k_q3v(unsigned c) {
+  float m = (float)(((c & 3u) << 1) | 1u);
+  return (c & 4u) ? -m : m;
+}
+// The 24-bit word of the 8 codes of columns c0 .. c0+7 (c0 % 8 == 0) of row r of a q3 matrix (three byte loads).
+KINL unsigned k_q3word(const u8* wb, size_t r, int cols, int c0) {
+  const u8* p = wb + r * (size_t)((cols >> 3) * 3) + (size_t)((c0 >> 3) * 3);
+  return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16);
+}
 
 // Sum over the warp, returned to every lane.
 KINL float k_warp_sum(KCTXP float v) {
@@ -1575,6 +1585,191 @@ KERNEL(ecomb, ECombArgs) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Experts of a pass of few rows (R <= 8: verification passes). There most distinct experts serve one or
+// two (row, slot) pairs, and exp13cm / exp2m (made for up to 128 rows: inputs staged slice by slice in
+// shared memory, a barrier per slice) spend their time on the staging. exp13s / exp2s keep the block and
+// the arithmetic of the single-row kernels exp13c / exp2 per (distinct expert, chunk of matrix rows):
+// every thread first loads the code words and scales of all its rows (all loads in flight at once), then
+// for each pair of the expert multiplies the input row of that pair with exactly the sums of exp13c /
+// exp2 (same unit per thread, same FMA chains, same warp trees, warps added in order). So a pass gives
+// bit for bit the single steps. NV = 1: nvfp4 experts, 0: mxfp8 (the decode tables live in shared memory,
+// with the values of the device tables).
+// ---------------------------------------------------------------------------
+// exp13s: exp13c for the distinct experts of a pass of few rows. The block of exp13c (H / 16 threads
+// rounded up to whole warps; thread t the 16-element unit t; K_EXPC_PAIRS row pairs per item) and its loop
+// over the rows, once for every (row, slot) pair that chose the expert: the first pair reads the weights
+// from device memory, the further pairs of the same expert find them in the caches. Item = (distinct
+// expert it / nchunk, row pairs (it % nchunk) * K_EXPC_PAIRS ..). Per pair the sums of exp13c exactly.
+template <int NV>
+KINL void k_exp13s(KCTXP const ExpMArgs& a, float* sm) {
+  int lane = KTID & 31, warp = KTID >> 5, nw = KNT >> 5;
+  int npair = a.rows >> 1;
+  int u = KTID;
+  int act = u < (a.cols >> 4);
+  const float* e4m3 = a.e4m3;
+  size_t wbytes = NV ? (size_t)(a.cols >> 1) : (size_t)a.cols;
+  size_t sbytes = NV ? (size_t)(a.cols >> 4) : (size_t)(a.cols >> 5);
+  int items = a.gcount[0] * a.nchunk;
+  for (int it = KBID; it < items; it += a.grid) {
+    int ue = it / a.nchunk;
+    int p0 = (it - ue * a.nchunk) * K_EXPC_PAIRS;
+    int np = npair - p0;
+    if (np > K_EXPC_PAIRS) np = K_EXPC_PAIRS;
+    int id = a.gexp[ue];
+    int pb = a.goff[ue], pe = a.goff[ue + 1];
+    size_t row0 = (size_t)id * a.rows + (size_t)(2 * p0);
+    const u8* wp = a.w + row0 * wbytes + (act ? (NV ? ((size_t)u << 3) : ((size_t)u << 4)) : 0);
+    const u8* sp = a.sc + row0 * sbytes + (act ? (NV ? (size_t)u : (size_t)(u >> 1)) : 0);
+    for (int q = pb; q < pe; ++q) {
+      int pr = a.gpairs[q];
+      KF4 x0 = KF4ZERO, x1 = KF4ZERO, x2 = KF4ZERO, x3 = KF4ZERO;
+      if (act) {
+        const float* xx = a.x + (size_t)(pr / a.k) * a.cols + (u << 4);
+        x0 = KLOADF4(xx);
+        x1 = KLOADF4(xx + 4);
+        x2 = KLOADF4(xx + 8);
+        x3 = KLOADF4(xx + 12);
+      }
+      for (int r = 0; r < 2 * np; ++r) {  // the loop of exp13c
+        float part = 0.0f;
+        if (act) {
+          float s = 0.0f;
+          if (NV) {
+            u64 c = KLOAD64(wp + (size_t)r * wbytes);
+            K_NV4(c, 0, x0)
+            K_NV4(c, 16, x1)
+            K_NV4(c, 32, x2)
+            K_NV4(c, 48, x3)
+            part = s * e4m3[sp[(size_t)r * sbytes]];
+          } else {
+            u64 c0 = KLOAD64(wp + (size_t)r * wbytes), c1 = KLOAD64(wp + (size_t)r * wbytes + 8);
+            K_MX4(c0, 0, x0)
+            K_MX4(c0, 32, x1)
+            K_MX4(c1, 0, x2)
+            K_MX4(c1, 32, x3)
+            part = s * a.exp2t[sp[(size_t)r * sbytes]];
+          }
+        }
+        float rs = k_warp_sum(KCTXA part);
+        if (lane == 0) sm[r * 32 + warp] = rs;
+      }
+      KSYNC();
+      if (KTID < np) {
+        float g = 0.0f, up = 0.0f;
+        for (int w = 0; w < nw; ++w) {
+          g += sm[(2 * KTID) * 32 + w];
+          up += sm[(2 * KTID + 1) * 32 + w];
+        }
+        if (NV) {
+          g = g * a.factor[id];
+          up = up * a.factor[id];
+        }
+        a.y[(size_t)pr * npair + p0 + KTID] = k_softcap(g, a.gate_cap) * k_sigmoid(g) * k_softcap(up, a.up_cap);
+      }
+      KSYNC();  // sm is written again by the next pair
+    }
+  }
+}
+KERNEL(exp13s, ExpMArgs) {
+  KSHARED(float, sm, 2 * K_EXPC_PAIRS * 32);
+  k_exp13s<1>(KCTXA a, sm);
+}
+KERNEL(exp13sx, ExpMArgs) {
+  KSHARED(float, sm, 2 * K_EXPC_PAIRS * 32);
+  k_exp13s<0>(KCTXA a, sm);
+}
+
+// exp2s: the w2 products of exp2 for the experts of a pass of few rows. Item = (distinct expert,
+// K_EXP2M_H output rows), 256 threads: the 16-lane group gi takes output row h = K_EXP2M_H * chunk + gi,
+// lane l the units l, l + 16, ... of that row (as the 16 lanes of a slot in exp2). Their code words and
+// scales go to shared memory first (all loads in flight; each thread reads back only its own), then for
+// every pair of the expert the FMA chain of exp2 over the units in order, k_half_sum, the expert factor
+// -> y [pair, h] (ecomb adds the k products in slot order as exp2 does).
+#define K_EXP2S_U 5  // units per lane: cols <= 16 * 16 * K_EXP2S_U (the engine allows I <= 1280)
+template <int NV>
+KINL void k_exp2s(KCTXP const ExpMArgs& a, float* ctab, float* stab, u64* wsh, u64* wsh1, float* ssh) {
+  int l16 = KTID & 15, gi = KTID >> 4;
+  int nunit = a.cols >> 4;
+  for (int b = KTID; b < 256; b += KNT) {
+    stab[b] = NV ? a.e4m3[b] : a.exp2t[b];
+    ctab[b] = a.e4m3[b];
+  }
+  KSYNC();
+  const float* e4m3 = ctab;
+  size_t wbytes = NV ? (size_t)(a.cols >> 1) : (size_t)a.cols;
+  size_t sbytes = NV ? (size_t)(a.cols >> 4) : (size_t)(a.cols >> 5);
+  int items = a.gcount[0] * a.nchunk;
+  KNOUNROLL for (int it = KBID; it < items; it += a.grid) {
+    int ue = it / a.nchunk;
+    int h = (it - ue * a.nchunk) * K_EXP2M_H + gi;
+    int liveh = h < a.rows;
+    int id = a.gexp[ue];
+    int pb = a.goff[ue], pe = a.goff[ue + 1];
+    size_t row = (size_t)id * a.rows + (size_t)(liveh ? h : 0);
+    const u8* wrow = a.w + row * wbytes;
+    const u8* srow = a.sc + row * sbytes;
+    KUNROLL for (int i = 0; i < K_EXP2S_U; ++i) {  // all loads of the item in flight at once
+      int un = l16 + 16 * i;
+      if (liveh && un < nunit) {
+        if (NV) {
+          wsh[i * 256 + KTID] = KLOAD64(wrow + ((size_t)un << 3));
+          ssh[i * 256 + KTID] = stab[srow[un]];
+        } else {
+          wsh[i * 256 + KTID] = KLOAD64(wrow + ((size_t)un << 4));
+          wsh1[i * 256 + KTID] = KLOAD64(wrow + ((size_t)un << 4) + 8);
+          ssh[i * 256 + KTID] = stab[srow[un >> 1]];
+        }
+      }
+    }
+    KNOUNROLL for (int q = pb; q < pe; ++q) {
+      int pr = a.gpairs[q];
+      const float* xr = a.x + (size_t)pr * a.cols;
+      float acc = 0.0f;
+      KNOUNROLL for (int i = 0; i < K_EXP2S_U; ++i) {
+        int un = l16 + 16 * i;
+        if (liveh && un < nunit) {
+          const float* xx = xr + (un << 4);
+          KF4 x0 = KLOADF4(xx), x1 = KLOADF4(xx + 4), x2 = KLOADF4(xx + 8), x3 = KLOADF4(xx + 12);
+          float s = 0.0f;
+          u64 c = wsh[i * 256 + KTID];
+          if (NV) {
+            K_NV4(c, 0, x0)
+            K_NV4(c, 16, x1)
+            K_NV4(c, 32, x2)
+            K_NV4(c, 48, x3)
+          } else {
+            u64 cb = wsh1[i * 256 + KTID];
+            K_MX4(c, 0, x0)
+            K_MX4(c, 32, x1)
+            K_MX4(cb, 0, x2)
+            K_MX4(cb, 32, x3)
+          }
+          acc = KFMA(s, ssh[i * 256 + KTID], acc);
+        }
+      }
+      float s = k_half_sum(KCTXA acc);
+      if (NV) s = s * a.factor[id];
+      if (liveh && l16 == 0) a.y[(size_t)pr * a.rows + h] = s;
+    }
+  }
+}
+KERNEL(exp2s, ExpMArgs) {
+  KSHARED(float, ctab, 256);
+  KSHARED(float, stab, 256);
+  KSHARED(u64, wsh, K_EXP2S_U * 256);
+  KSHARED(float, ssh, K_EXP2S_U * 256);
+  k_exp2s<1>(KCTXA a, ctab, stab, wsh, wsh, ssh);
+}
+KERNEL(exp2sx, ExpMArgs) {
+  KSHARED(float, ctab, 256);
+  KSHARED(float, stab, 256);
+  KSHARED(u64, wsh, K_EXP2S_U * 256);
+  KSHARED(u64, wsh1, K_EXP2S_U * 256);
+  KSHARED(float, ssh, K_EXP2S_U * 256);
+  k_exp2s<0>(KCTXA a, ctab, stab, wsh, wsh1, ssh);
+}
+
 // argmax: largest logit of a row and its index (the first on ties).
 KERNEL(argmax, ArgmaxArgs) {
   KSHARED(float, sv, 32);
@@ -1662,6 +1857,18 @@ KINL float k_pk8(const u8* wb, const u8* sb, int fmt, size_t r, int cols, int c0
     u64 c = KLOAD64(wb + r * (size_t)cols + (size_t)c0);
     K_E4M3_8(c, xa, xb)
     return s * k_exp2v(sb[r * (size_t)(cols >> 5) + (size_t)(c0 >> 5)]);
+  }
+  if (fmt == INK2_DFMT_Q3) {
+    unsigned c = k_q3word(wb, r, cols, c0);
+    s = KFMA(k_q3v(c), xa.x, s);
+    s = KFMA(k_q3v(c >> 3), xa.y, s);
+    s = KFMA(k_q3v(c >> 6), xa.z, s);
+    s = KFMA(k_q3v(c >> 9), xa.w, s);
+    s = KFMA(k_q3v(c >> 12), xb.x, s);
+    s = KFMA(k_q3v(c >> 15), xb.y, s);
+    s = KFMA(k_q3v(c >> 18), xb.z, s);
+    s = KFMA(k_q3v(c >> 21), xb.w, s);
+    return s * k_e4m3v(sb[r * (size_t)(cols >> 4) + (size_t)(c0 >> 4)]);
   }
   const u16* p = (const u16*)wb + r * (size_t)cols + (size_t)c0;
   u64 w0 = KLOAD64(p), w1 = KLOAD64(p + 4);
@@ -1767,6 +1974,8 @@ KINL void k_pgemvc(KCTXP const GemvArgs& a, float* sm) {
       KUNROLL for (int r = 0; r < NR; ++r) if (r < nrows) part[r] = k_pk8(wb, sb, INK2_DFMT_NVFP4, (size_t)(row0 + r), cols, c0, xa, xb);
     } else if (J.fmt == INK2_DFMT_MXFP8) {
       KUNROLL for (int r = 0; r < NR; ++r) if (r < nrows) part[r] = k_pk8(wb, sb, INK2_DFMT_MXFP8, (size_t)(row0 + r), cols, c0, xa, xb);
+    } else if (J.fmt == INK2_DFMT_Q3) {
+      KUNROLL for (int r = 0; r < NR; ++r) if (r < nrows) part[r] = k_pk8(wb, sb, INK2_DFMT_Q3, (size_t)(row0 + r), cols, c0, xa, xb);
     } else {
       KUNROLL for (int r = 0; r < NR; ++r) if (r < nrows) part[r] = k_pk8(wb, sb, INK2_DFMT_BF16, (size_t)(row0 + r), cols, c0, xa, xb);
     }
@@ -1842,7 +2051,7 @@ KERNEL(pgemvn, GemvArgs) {
 // block are loaded before the first is used.
 // ---------------------------------------------------------------------------
 struct K_PKW {
-  u64 a, b;    // code bytes (nvfp4: 4 in a, mxfp8: 8 in a, bfloat16: 16 in a and b)
+  u64 a, b;    // code bytes (nvfp4: 4 in a, mxfp8: 8 in a, q3: 3 in a, bfloat16: 16 in a and b)
   unsigned s;  // block scale byte (packed formats)
 };
 KINL K_PKW k_pkload(const u8* wb, const u8* sb, int fmt, size_t r, int cols, int c0) {
@@ -1855,6 +2064,9 @@ KINL K_PKW k_pkload(const u8* wb, const u8* sb, int fmt, size_t r, int cols, int
   } else if (fmt == INK2_DFMT_MXFP8) {
     w.a = KLOAD64(wb + r * (size_t)cols + (size_t)c0);
     w.s = sb[r * (size_t)(cols >> 5) + (size_t)(c0 >> 5)];
+  } else if (fmt == INK2_DFMT_Q3) {
+    w.a = (u64)k_q3word(wb, r, cols, c0);
+    w.s = sb[r * (size_t)(cols >> 4) + (size_t)(c0 >> 4)];
   } else {
     const u16* p = (const u16*)wb + r * (size_t)cols + (size_t)c0;
     w.a = KLOAD64(p);
@@ -1873,10 +2085,31 @@ KINL float k_pkdec(const K_PKW& w, int fmt, float* f) {
     for (int e = 0; e < 8; ++e) f[e] = k_e4m3v((unsigned)(w.a >> (8 * e)));
     return k_exp2v(w.s);
   }
+  if (fmt == INK2_DFMT_Q3) {
+    unsigned c = (unsigned)w.a;
+    for (int e = 0; e < 8; ++e) f[e] = k_q3v(c >> (3 * e));
+    return k_e4m3v(w.s);
+  }
   K_BF8(w.a, w.b, f)
   return 1.0f;
 }
-template <int NR>
+// k_warp_sum of NH values at once (NH = 8, 4, 2): value i ends in the lanes i * 32 / NH .. (each bit for bit
+// k_warp_sum: the pairs of its tree, a + b == b + a).
+KINL float k_warp_sum2t(KCTXP const float* v) {
+  int lane = KTID & 31;
+  int b4 = lane & 16;
+  float t = (b4 ? v[1] : v[0]) + KSHFL(b4 ? v[0] : v[1], lane ^ 16);
+  t = t + KSHFL(t, lane ^ 8);
+  t = t + KSHFL(t, lane ^ 4);
+  t = t + KSHFL(t, lane ^ 2);
+  t = t + KSHFL(t, lane ^ 1);
+  return t;
+}
+template <int NH>
+KINL float k_warp_sumt(KCTXP const float* v) {
+  return NH == 8 ? k_warp_sum8t(KCTXA v) : NH == 4 ? k_warp_sum4t(KCTXA v) : k_warp_sum2t(KCTXA v);
+}
+template <int NR, int NH>
 KINL void k_pgemvcm(KCTXP const GemvArgs& a, float* sm) {
   int lane = KTID & 31, warp = KTID >> 5, nw = KNT >> 5;
   int grp = KBID / a.blocks;
@@ -1888,9 +2121,9 @@ KINL void k_pgemvcm(KCTXP const GemvArgs& a, float* sm) {
     ++j;
   }
   const GemvJob& J = a.job[j];
-  int r0 = grp * K_NRHS;
+  int r0 = grp * NH;
   int nr = a.nrhs - r0;
-  if (nr > K_NRHS) nr = K_NRHS;
+  if (nr > NH) nr = NH;
   int cols = J.cols;
   int row0 = b * NR;
   int nrows = J.rows - row0;
@@ -1898,8 +2131,8 @@ KINL void k_pgemvcm(KCTXP const GemvArgs& a, float* sm) {
   int c0 = KTID * 8;
   int act = c0 < cols;
   int fmt = J.fmt;
-  float x[K_NRHS][8];
-  for (int i = 0; i < K_NRHS; ++i) {
+  float x[NH][8];
+  for (int i = 0; i < NH; ++i) {
     for (int e = 0; e < 8; ++e) x[i][e] = 0.0f;
     if (act && i < nr) {
       const float* xx = k_xrow(J, r0 + i, c0);
@@ -1923,12 +2156,12 @@ KINL void k_pgemvcm(KCTXP const GemvArgs& a, float* sm) {
   }
   KUNROLL for (int r = 0; r < NR; ++r) {
     if (r < nrows) {
-      float acc[K_NRHS];
-      for (int i = 0; i < K_NRHS; ++i) acc[i] = 0.0f;
+      float acc[NH];
+      for (int i = 0; i < NH; ++i) acc[i] = 0.0f;
       if (act) {
         float f[8];
         float scl = k_pkdec(wr[r], fmt, f);
-        for (int i = 0; i < K_NRHS; ++i) {
+        for (int i = 0; i < NH; ++i) {
           if (i < nr) {
             float s = KFMA(f[0], x[i][0], 0.0f);
             s = KFMA(f[1], x[i][1], s);
@@ -1942,33 +2175,45 @@ KINL void k_pgemvcm(KCTXP const GemvArgs& a, float* sm) {
           }
         }
       }
-      float t = k_warp_sum8t(KCTXA acc);
-      if ((lane & 3) == 0) sm[(r * K_NRHS + (lane >> 2)) * 32 + warp] = t;
+      float t = k_warp_sumt<NH>(KCTXA acc);  // the sum of value i in lanes i * 32 / NH ..
+      if ((lane & (32 / NH - 1)) == 0) sm[(r * NH + lane / (32 / NH)) * 32 + warp] = t;
     }
   }
   KSYNC();
   for (int t = KTID; t < nrows * nr; t += KNT) {
     int r = t / nr, i = t - r * nr;
     float s = 0.0f;
-    for (int w = 0; w < nw; ++w) s += sm[(r * K_NRHS + i) * 32 + w];
+    for (int w = 0; w < nw; ++w) s += sm[(r * NH + i) * 32 + w];
     J.y[(size_t)(r0 + i) * J.rows + row0 + r] = k_jout(J, s);
   }
 }
 KERNEL(pgemvcm, GemvArgs) {
   KSHARED(float, sm, 16 * K_NRHS * 32);
-  k_pgemvcm<16>(KCTXA a, sm);
+  k_pgemvcm<16, K_NRHS>(KCTXA a, sm);
 }
 KERNEL(pgemvcm8, GemvArgs) {
   KSHARED(float, sm, 8 * K_NRHS * 32);
-  k_pgemvcm<8>(KCTXA a, sm);
+  k_pgemvcm<8, K_NRHS>(KCTXA a, sm);
 }
 KERNEL(pgemvcm4, GemvArgs) {
   KSHARED(float, sm, 4 * K_NRHS * 32);
-  k_pgemvcm<4>(KCTXA a, sm);
+  k_pgemvcm<4, K_NRHS>(KCTXA a, sm);
 }
 KERNEL(pgemvcm2, GemvArgs) {
   KSHARED(float, sm, 2 * K_NRHS * 32);
-  k_pgemvcm<2>(KCTXA a, sm);
+  k_pgemvcm<2, K_NRHS>(KCTXA a, sm);
 }
+
+// pgemvcm for passes of 2 (h2) or 3 .. 4 (h4) rows: NH right-hand sides per block, so that the inputs held
+// in registers and the sums match the rows of the pass (same arithmetic as pgemvcm, i.e. as pgemvc).
+#define K_PGCM(NR, NH)                                       KERNEL(pgcm##NR##h##NH, GemvArgs) {                          KSHARED(float, sm, NR * NH * 32);                          k_pgemvcm<NR, NH>(KCTXA a, sm);                          }
+K_PGCM(16, 2)
+K_PGCM(8, 2)
+K_PGCM(4, 2)
+K_PGCM(2, 2)
+K_PGCM(16, 4)
+K_PGCM(8, 4)
+K_PGCM(4, 4)
+K_PGCM(2, 4)
 
 #include "ink2_drafter_kernels.inc"  // drafter hook

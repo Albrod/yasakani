@@ -16,11 +16,14 @@
 
 namespace {
 
-// A product job over a BF16 drafter matrix (written field by field, so that this file also fits an
-// engine whose GemvJob has more fields, e.g. packed dense matrices: they stay zero = BF16).
-GemvJob drf_job(const u16* w, const float* x, float* y, int rows, int cols) {
+// A product job over a drafter matrix: BF16 as published, or packed (nvfp4 / mxfp8 / q3 of the converted
+// drafter file, multiplied straight from the stored bytes by the packed kernels of the engine).
+GemvJob drf_job(const DMat& m, const float* x, float* y, int rows, int cols) {
   GemvJob j{};
-  j.w = w;
+  j.w = (const u16*)m.w;
+  j.sc = m.sc;
+  j.fac = m.fac;
+  j.fmt = m.fmt;
   j.x = x;
   j.split = cols;
   j.y = y;
@@ -50,13 +53,14 @@ struct Drafter {
   size_t bytes = 0;
   bool finalized = false;
   struct DL {
-    const u16 *dflare = nullptr, *in_ln = nullptr, *post_ln = nullptr, *wq = nullptr, *wk = nullptr, *wv = nullptr,
-              *wo = nullptr, *qn = nullptr, *kn = nullptr, *wkc = nullptr, *wvc = nullptr, *knc = nullptr, *wg = nullptr,
-              *wu = nullptr, *wd = nullptr;
+    const u16 *dflare = nullptr, *in_ln = nullptr, *post_ln = nullptr, *qn = nullptr, *kn = nullptr, *knc = nullptr;
+    DMat wq, wk, wv, wo, wkc, wvc, wg, wu, wd;
     int local = 0, cap = 0;
     float *ck = nullptr, *cv = nullptr;
   } L[3];
-  const u16 *norm = nullptr, *mask = nullptr, *w1 = nullptr, *rnn_w = nullptr, *rnn_b = nullptr, *head_norm = nullptr;
+  const u16 *norm = nullptr, *mask = nullptr, *rnn_b = nullptr, *head_norm = nullptr;
+  DMat w1, rnn_w, fp;  // fp: packed folded head (fp.w == NULL: none)
+  int packed = 0;      // matrices held packed
   const u16* f16 = nullptr;
   const float *f32 = nullptr, *fb = nullptr;
   float alpha[4][4] = {};
@@ -65,10 +69,15 @@ struct Drafter {
   float *gb = nullptr, *ub = nullptr, *mb = nullptr, *base = nullptr, *z = nullptr, *zz = nullptr, *s = nullptr;
   float *pval = nullptr, *scratch = nullptr;
   int *pidx = nullptr, *drafts = nullptr;
+  // confidence cut: confidence of the drafts and the cut rule (see DZinArgs). drafts[8] = ncut.
+  float *p2 = nullptr, *psum = nullptr, *conf = nullptr, *cut_off = nullptr, *cut_on = nullptr;
+  float cut_host[16] = {};
   int fring = 0, smax = 0, G = 1024;
-  bool use16 = true, dbg_feat = false, prof = false;
+  int fold = 16;  // folded head used: 16 = BF16, 32 = float32, 4 = packed (fp)
+  int mrows = 0;  // rows per block of the packed products of the draft call (pgemvcm*): 0 = the engine's rule
+  bool dbg_feat = false, prof = false;
   int pending = 0;                // depth of a draft call to run before the next pass
-  std::map<int, void*> graphs;    // draft calls: key = 2 * depth + use16
+  std::map<int, void*> graphs;    // draft calls: key = 2 * (64 * depth + fold) + cut
   double part_t[3] = {};          // profile: block, base logits, Markov head (seconds)
   long long launches = 0;
 };
@@ -105,6 +114,52 @@ const void* drf_need(Drafter& d, const std::string& name, long long nbytes) {
   return it->second.p;
 }
 
+bool drf_has(Drafter& d, const std::string& name) { return d.ten.count(name) != 0; }
+float drf_host_f32(Drafter& d, const std::string& name) {
+  drf_need(d, name, 4);
+  float v;
+  memcpy(&v, d.ten[name].host.data(), 4);
+  return v;
+}
+// A drafter matrix [rows, cols]: "name" alone = BF16; with "name_scale" = packed: "name_format" (int32: 1 nvfp4,
+// 2 mxfp8, 3 q3) names the encoding (without it: nvfp4 when "name_factor" is there, else mxfp8, as the engine's
+// dense matrices); "name_factor" float32 [1] = the matrix factor (nvfp4: amax / denominator; q3: factor).
+DMat drf_mat(Drafter& d, const std::string& name, long long rows, long long cols) {
+  DMat m;
+  long long n = rows * cols;
+  if (!drf_has(d, name + "_scale")) {
+    m.w = drf_need(d, name, n * 2);
+    return m;
+  }
+  int f = 0;
+  if (drf_has(d, name + "_format")) {
+    drf_need(d, name + "_format", 4);
+    memcpy(&f, d.ten[name + "_format"].host.data(), 4);
+  } else {
+    f = drf_has(d, name + "_factor") ? INK2_DFMT_NVFP4 : INK2_DFMT_MXFP8;
+  }
+  if (f == INK2_DFMT_NVFP4) {
+    if (cols % 16) fail("drafter: nvfp4 matrix " + name + ": columns must be a multiple of 16");
+    m.w = drf_need(d, name, n / 2);
+    m.sc = (const u8*)drf_need(d, name + "_scale", n / 16);
+    m.fac = drf_host_f32(d, name + "_factor") * 0.5f;  // the kernels decode the codes as twice the E2M1 value
+  } else if (f == INK2_DFMT_MXFP8) {
+    if (cols % 32) fail("drafter: mxfp8 matrix " + name + ": columns must be a multiple of 32");
+    m.w = drf_need(d, name, n);
+    m.sc = (const u8*)drf_need(d, name + "_scale", n / 32);
+  } else if (f == INK2_DFMT_Q3) {
+    if (cols % 16) fail("drafter: q3 matrix " + name + ": columns must be a multiple of 16");
+    m.w = drf_need(d, name, n * 3 / 8);
+    m.sc = (const u8*)drf_need(d, name + "_scale", n / 16);
+    m.fac = drf_host_f32(d, name + "_factor");
+  } else {
+    fail(fmt("drafter: matrix %s has the unknown format %d", name.c_str(), f));
+  }
+  m.fmt = f;
+  ++d.packed;
+  return m;
+}
+
 void drf_finalize(Engine* e) {
   Drafter& d = *e->drf;
   const Ink2DraftConfig& c = d.c;
@@ -120,36 +175,41 @@ void drf_finalize(Engine* e) {
   for (int j = 0; j < 3; ++j)
     if (c.feat_visits[j] < 0 || c.feat_visits[j] >= (int)e->visits.size()) fail("drafter: feature visit out of range");
   auto bf = [&](const std::string& n, long long count) { return (const u16*)drf_need(d, n, count * 2); };
+  d.packed = 0;
   for (int l = 0; l < 3; ++l) {
     Drafter::DL& Lr = d.L[l];
     std::string p = fmt("L%d.", l);
     Lr.dflare = bf(p + "dflare", H);
     Lr.in_ln = bf(p + "in_ln", H);
     Lr.post_ln = bf(p + "post_ln", H);
-    Lr.wq = bf(p + "wq", A * H);
-    Lr.wk = bf(p + "wk", C * H);
-    Lr.wv = bf(p + "wv", C * H);
-    Lr.wo = bf(p + "wo", H * A);
+    Lr.wq = drf_mat(d, p + "wq", A, H);
+    Lr.wk = drf_mat(d, p + "wk", C, H);
+    Lr.wv = drf_mat(d, p + "wv", C, H);
+    Lr.wo = drf_mat(d, p + "wo", H, A);
     Lr.qn = bf(p + "qn", 128);
     Lr.kn = bf(p + "kn", 128);
-    Lr.wkc = bf(p + "wkc", C * H);
-    Lr.wvc = bf(p + "wvc", C * H);
+    Lr.wkc = drf_mat(d, p + "wkc", C, H);
+    Lr.wvc = drf_mat(d, p + "wvc", C, H);
     Lr.knc = bf(p + "knc", 128);
-    Lr.wg = bf(p + "wg", I * H);
-    Lr.wu = bf(p + "wu", I * H);
-    Lr.wd = bf(p + "wd", H * I);
+    Lr.wg = drf_mat(d, p + "wg", I, H);
+    Lr.wu = drf_mat(d, p + "wu", I, H);
+    Lr.wd = drf_mat(d, p + "wd", H, I);
     Lr.local = c.local[l] != 0;
   }
   d.norm = bf("norm", H);
   d.mask = bf("mask", H);
-  d.w1 = bf("w1", (long long)c.w1_rows * R);
-  d.rnn_w = bf("rnn_w", 3 * R * (2 * R + 2 * H));
+  d.w1 = drf_mat(d, "w1", (long long)c.w1_rows, R);
+  d.rnn_w = drf_mat(d, "rnn_w", 3 * R, 2 * R + 2 * H);
   d.rnn_b = bf("rnn_b", 3 * R);
   d.head_norm = bf("head_norm", H);
   d.f16 = d.ten.count("fold16") ? bf("fold16", V * R) : nullptr;
   d.f32 = d.ten.count("fold32") ? (const float*)drf_need(d, "fold32", V * R * 4) : nullptr;
-  if (!d.f16 && !d.f32) fail("drafter: needs fold16 or fold32");
-  d.use16 = d.f16 != nullptr;
+  if (drf_has(d, "foldp")) {
+    if (!drf_has(d, "foldp_scale")) fail("drafter: foldp needs foldp_scale (a packed folded head)");
+    d.fp = drf_mat(d, "foldp", V, R);
+  }
+  if (!d.f16 && !d.f32 && !d.fp.w) fail("drafter: needs foldp, fold16 or fold32");
+  d.fold = d.fp.w ? 4 : d.f16 ? 16 : 32;
   d.fb = (const float*)drf_need(d, "fold_b", V * 4);
   drf_need(d, "fuse_alpha", 64);
   memcpy(d.alpha, d.ten["fuse_alpha"].host.data(), 64);
@@ -183,7 +243,20 @@ void drf_finalize(Engine* e) {
   d.s = drf_alloc<float>(e, (size_t)R);
   d.pval = drf_alloc<float>(e, (size_t)d.G);
   d.pidx = drf_alloc<int>(e, (size_t)d.G);
-  d.drafts = drf_alloc<int>(e, 8);
+  d.drafts = drf_alloc<int>(e, 16);
+  d.p2 = drf_alloc<float>(e, (size_t)d.G);
+  d.psum = drf_alloc<float>(e, (size_t)d.G);
+  d.conf = drf_alloc<float>(e, 32);
+  d.cut_off = drf_alloc<float>(e, 16);
+  d.cut_on = drf_alloc<float>(e, 16);
+  {
+    std::vector<float> zf(32, 0.0f);
+    std::vector<int> zi(16, 0);
+    e->be->upload(d.conf, zf.data(), 32 * 4);
+    e->be->upload(d.cut_off, zf.data(), 16 * 4);
+    e->be->upload(d.cut_on, zf.data(), 16 * 4);
+    e->be->upload(d.drafts, zi.data(), 16 * 4);
+  }
   d.smax = (int)MP + 8;
   d.scratch = drf_alloc<float>(e, (size_t)8 * c.heads * d.smax);
   // RoPE tables (rotate-half, theta of the drafter), double precision as ink2_draft.rope
@@ -259,7 +332,7 @@ void Engine::drf_commit(int R) {
 namespace {
 
 // The kernels of one draft call for the anchor st[0] (ink2_draft.Ink2Drafter.propose).
-void drf_kernels(Engine* e, int depth) {
+void drf_kernels(Engine* e, int depth, bool cut) {
   Drafter& d = *e->drf;
   const Ink2DraftConfig& c = d.c;
   const int H = c.hidden, A = c.heads * 128, C = c.kv_heads * 128, I = c.inter, R = c.rank, V = e->c.vocab;
@@ -272,6 +345,14 @@ void drf_kernels(Engine* e, int depth) {
     t_last = t;
   };
   long long n0 = e->n_launch;
+  struct KeepRows {  // the draft call's own rows per block of the packed 8-row products (same sums for any value)
+    Engine* e;
+    int old;
+    KeepRows(Engine* x, int v) : e(x), old(x->pgemvcm_rows) {
+      if (v) e->pgemvcm_rows = v;
+    }
+    ~KeepRows() { e->pgemvcm_rows = old; }
+  } keep_rows(e, d.mrows);
   mark(-1);
   {  // row 0: RMSNorm(embed[anchor]) * embed_norm, the engine's own embedding kernel
     NormArgs n0{};
@@ -388,7 +469,10 @@ void drf_kernels(Engine* e, int depth) {
     zi.drafts = d.drafts;
     zi.st = e->st;
     zi.s = d.s;
-    zi.w1 = d.w1;
+    zi.w1 = (const u16*)d.w1.w;
+    zi.w1sc = d.w1.sc;
+    zi.w1fac = d.w1.fac;
+    zi.w1fmt = d.w1.fmt;
     zi.hn = d.hn;
     zi.frnn = d.frnn;
     zi.z = d.z;
@@ -399,6 +483,12 @@ void drf_kernels(Engine* e, int depth) {
     zi.H = H;
     zi.fring = d.fring;
     zi.w1_rows = c.w1_rows;
+    zi.p2 = d.p2;
+    zi.psum = d.psum;
+    zi.conf = d.conf;
+    zi.ncut = d.drafts + 8;
+    zi.cutp = cut ? d.cut_on : d.cut_off;
+    zi.cap = c.softcap;
     e->run(KID_dzin, &zi, 1, 256, INK2_PROF_GATES);
     if (i == depth) break;
     GemvArgs rp{};
@@ -410,8 +500,14 @@ void drf_kernels(Engine* e, int depth) {
     f.rnn_b = d.rnn_b;
     f.s = d.s;
     f.base = d.base + (size_t)i * V;
-    f.f16 = d.use16 ? d.f16 : nullptr;
-    f.f32 = d.f32;
+    f.f16 = d.fold == 16 ? d.f16 : nullptr;
+    f.f32 = d.fold == 32 ? d.f32 : nullptr;
+    if (d.fold == 4) {
+      f.fp = (const u8*)d.fp.w;
+      f.fpsc = d.fp.sc;
+      f.fpfac = d.fp.fac;
+      f.fpfmt = d.fp.fmt;
+    }
     f.fb = d.fb;
     f.pval = d.pval;
     f.pidx = d.pidx;
@@ -420,23 +516,27 @@ void drf_kernels(Engine* e, int depth) {
     f.step = i;
     f.G = d.G;
     f.cap = c.softcap;
+    f.p2 = d.p2;
+    f.psum = d.psum;
+    f.ncut = d.drafts + 8;
+    f.depth = depth;
     e->run(KID_dfold, &f, d.G, 256, INK2_PROF_OUTPUT);
   }
   mark(2);
   d.launches = e->n_launch - n0;
 }
 
-void drf_draft(Engine* e, int depth) {
+void drf_draft(Engine* e, int depth, bool cut = false) {
   Drafter& d = *e->drf;
   bool direct = !(e->use_graph && e->be->graph_supported()) || e->prof || e->bench_reps > 0 || d.prof;
   if (direct) {
-    drf_kernels(e, depth);
+    drf_kernels(e, depth, cut);
     return;
   }
-  void*& g = d.graphs[2 * depth + (d.use16 ? 1 : 0)];
+  void*& g = d.graphs[2 * (64 * depth + d.fold) + (cut ? 1 : 0)];
   if (!g) {
     e->be->graph_begin();
-    drf_kernels(e, depth);
+    drf_kernels(e, depth, cut);
     g = e->be->graph_end();
     e->check_backend();
   }
@@ -529,10 +629,17 @@ INK2_API int ink2_draft_set_option(void* h, const char* name, int value) {
   if (n == "fold") {
     if (value == 16 && !d.f16) fail("drafter: no BF16 folded head loaded");
     if (value == 32 && !d.f32) fail("drafter: no float32 folded head loaded");
-    if (value != 16 && value != 32) fail("drafter: fold must be 16 or 32");
-    d.use16 = value == 16;
+    if (value == 4 && !d.fp.w) fail("drafter: no packed folded head loaded");
+    if (value != 16 && value != 32 && value != 4) fail("drafter: fold must be 4 (packed), 16 or 32");
+    d.fold = value;
   } else if (n == "profile") {
     d.prof = value != 0;
+  } else if (n == "mrows") {
+    if (value != 0 && value != 2 && value != 4 && value != 8 && value != 16) fail("drafter: mrows must be 0, 2, 4, 8 or 16");
+    d.mrows = value;
+    for (auto& kv : d.graphs)
+      if (kv.second) x->be->graph_free(kv.second);
+    d.graphs.clear();
   } else fail("drafter: unknown option " + n);
   return 0;
   API_END
@@ -631,6 +738,11 @@ INK2_API int ink2_draft_time(void* h, int depth, int reps, double* out5) {
   API_END
 }
 
+INK2_API int ink2_draft_packed(void* h) {
+  Engine* e = (Engine*)h;
+  return e && e->drf && e->drf->finalized ? e->drf->packed : 0;
+}
+
 INK2_API long long ink2_draft_memory(void* h) {
   Engine* e = (Engine*)h;
   return e && e->drf ? (long long)e->drf->bytes : 0;
@@ -647,6 +759,8 @@ INK2_API int ink2_draft_get(void* h, int what, int index, float* out, long long 
   else if (what == 1) {
     if (index < 1 || index > 7) fail("drafter: index = depth 1 .. 7");
     src = d.base, n = index * V;
+  } else if (what == 3) {  // confidence cut: confidence of the drafts of the last draft call [8][4]
+    src = d.conf, n = 32;
   } else if (what == 2) {
     if (index < 0) fail("drafter: position out of range");
     src = d.frnn + (size_t)(index % d.fring) * H, n = H;
@@ -655,5 +769,66 @@ INK2_API int ink2_draft_get(void* h, int what, int index, float* out, long long 
   e->be->download(out, src, (size_t)n * 4);
   e->check_backend();
   return 0;
+  API_END
+}
+
+// ---- confidence cut: the cut of the proposal list at the first unsure draft -------------------------------------------------------
+INK2_API int ink2_draft_set_cut(void* h, int mode, const float* thr7) {
+  API_BEGIN(h)
+  drf_engine(h);
+  Drafter& d = *e->drf;
+  if (mode < 0 || mode > 3) fail("drafter: cut mode 0 .. 3");
+  float v[16] = {};
+  v[0] = (float)mode;
+  for (int j = 0; j < 7; ++j) v[1 + j] = thr7 ? thr7[j] : 0.0f;
+  memcpy(d.cut_host, v, sizeof v);
+  e->be->upload(d.cut_on, v, sizeof v);
+  e->be->sync();
+  e->check_backend();
+  return 0;
+  API_END
+}
+
+// One draft call of up to `depth` tokens with the cut rule of ink2_draft_set_cut (graph of its own), one read-back of
+// the drafts and the kept count k (info_out[0]), then the verification pass of k + 1 rows (k = 0: one step of the anchor,
+// arg-max on the host). Otherwise as ink2_spec_pass (argmax_out [k + 1], drafts_out [k]).
+INK2_API int ink2_spec_pass2(void* h, int anchor, int depth, int* drafts_out, int* argmax_out, int truncate, int* info_out) {
+  API_BEGIN(h)
+  drf_engine(h);
+  Drafter& d = *e->drf;
+  if (depth < 1 || depth > 7) fail("drafter: depth must be 1 .. 7");
+  if (e->pos < 1) fail("drafter: no context yet (feed the prompt first)");
+  if (anchor < 0 || anchor >= e->c.embed_rows) fail("token id out of range");
+  if (depth + 1 > e->logit_rows || depth + 1 > e->max_rows) fail("drafter: pass of depth + 1 rows is too large for this engine");
+  if (e->pos + depth + 1 > e->c.max_positions) fail("context full");
+  StepState s = e->state_at(anchor, e->pos);
+  e->be->upload(e->st, &s, sizeof s);
+  drf_draft(e, depth, true);
+  int buf[9];
+  e->be->download(buf, d.drafts, sizeof buf);
+  e->check_backend();
+  int k = d.cut_host[0] != 0.0f ? buf[8] : depth;
+  if (k < 0) k = 0;
+  if (k > depth) k = depth;
+  if (info_out) info_out[0] = k;
+  for (int j = 0; j < k; ++j) drafts_out[j] = buf[j];
+  if (k == 0) {
+    e->step(anchor, nullptr, true);
+    const float* lg = e->logits_host.data();
+    int best = 0;
+    for (int v = 1; v < e->c.vocab; ++v)
+      if (lg[v] > lg[best]) best = v;
+    argmax_out[0] = best;
+    return 0;
+  }
+  std::vector<int> ids((size_t)k + 1);
+  ids[0] = anchor;
+  for (int j = 0; j < k; ++j) ids[(size_t)j + 1] = buf[j];
+  d.pending = 0;
+  e->pass(ids.data(), k + 1, true, nullptr, argmax_out, nullptr);
+  int acc = 0;
+  while (acc < k && drafts_out[acc] == argmax_out[acc]) ++acc;
+  if (truncate) e->truncate(e->pos - (k - acc));
+  return acc;
   API_END
 }

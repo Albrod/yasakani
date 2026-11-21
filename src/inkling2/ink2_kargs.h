@@ -12,7 +12,9 @@ typedef unsigned long long u64;
 enum { INK2_EPI_NONE = 0, INK2_EPI_SIGMOID = 1, INK2_EPI_SOFTCAP = 2, INK2_EPI_TANH = 3 };
 enum { INK2_FMT_NVFP4 = 0, INK2_FMT_MXFP8 = 1 };
 // Storage of a dense (non-expert) matrix: GemvJob.fmt, NormArgs.efmt.
-enum { INK2_DFMT_BF16 = 0, INK2_DFMT_NVFP4 = 1, INK2_DFMT_MXFP8 = 2 };
+// INK2_DFMT_Q3: 3-bit codes (the converted drafter files): value = (q3[code] * e4m3[block scale]) * factor,
+// q3[c] = (2 (c & 3) + 1) * (c & 4 ? -1 : 1); 8 values of a row in 3 bytes, one E4M3 scale per 16 values.
+enum { INK2_DFMT_BF16 = 0, INK2_DFMT_NVFP4 = 1, INK2_DFMT_MXFP8 = 2, INK2_DFMT_Q3 = 3 };
 
 // What changes from token to token. The kernels read it from the backend
 // memory, so that the argument blocks of a step are the same for every token
@@ -46,7 +48,9 @@ struct GemvJob {
   float cap;
   // Packed dense rows (kernels pgemv, pgemvw, pgemvc; fmt INK2_DFMT_*):
   //   nvfp4: w = codes [rows, cols/2] (even element in the low nibble), sc = E4M3 block scales [rows, cols/16];
-  //   mxfp8: w = E4M3 bytes [rows, cols], sc = exponent bytes [rows, cols/32] (value * 2 ** (byte - 127)).
+  //   mxfp8: w = E4M3 bytes [rows, cols], sc = exponent bytes [rows, cols/32] (value * 2 ** (byte - 127));
+  //   q3:    w = codes [rows, 3 cols/8] (8 values in 3 bytes, value e in bits 3e .. 3e+2 of the little-endian
+  //          24-bit word), sc = E4M3 block scales [rows, cols/16]; fac = the matrix factor.
   // fac != 0: factor of every row sum before the epilogue (nvfp4: amax / 2688 / 2, the codes being
   // decoded as twice the E2M1 value); also applied by gemv, gemvw and gemvc to bfloat16 rows.
   const u8* sc;
@@ -280,6 +284,9 @@ struct ArgmaxArgs {
   X(exp2m, ExpMArgs) \
   X(ecomb, ECombArgs) \
   X(argmax, ArgmaxArgs)   X(pgemv, GemvArgs)   X(pgemvw, GemvArgs)   X(pgemvc, GemvArgs)   X(pgemvc8, GemvArgs)   X(pgemvc4, GemvArgs)   X(pgemvc2, GemvArgs)   X(pgemvn, GemvArgs)   X(pgemvcm, GemvArgs)   X(pgemvcm8, GemvArgs)   X(pgemvcm4, GemvArgs)   X(pgemvcm2, GemvArgs) \
+  X(exp13s, ExpMArgs) X(exp13sx, ExpMArgs) X(exp2s, ExpMArgs) X(exp2sx, ExpMArgs) \
+  X(pgcm16h2, GemvArgs) X(pgcm8h2, GemvArgs) X(pgcm4h2, GemvArgs) X(pgcm2h2, GemvArgs) \
+  X(pgcm16h4, GemvArgs) X(pgcm8h4, GemvArgs) X(pgcm4h4, GemvArgs) X(pgcm2h4, GemvArgs) \
   INK2_DRAFT_KERNEL_LIST(X)  // drafter hook
 
 enum {

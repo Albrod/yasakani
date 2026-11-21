@@ -472,8 +472,9 @@ void t_gemv_multi(TB& t) {
 }
 
 // The experts of a 20-row pass: grouping, w13, w2, sum + convolution.
-void t_exp_multi(TB& t, int fmtv, float* e4m3, float* exp2t) {
-  const int E = 16, k = 8, H = 2304, I = 1152, K = 4, R = 20, hr = 24;  // about 10 pairs per expert
+// small = 1: the kernels of passes of few rows (exp13s / exp2s), R = 6 rows over 24 experts (1 .. 6 pairs per expert)
+void t_exp_multi(TB& t, int fmtv, float* e4m3, float* exp2t, int small = 0) {
+  const int E = small ? 24 : 16, k = 8, H = 2304, I = 1152, K = 4, R = small ? 6 : 20, hr = 24;  // about 10 pairs per expert
   std::vector<int> idx;
   for (int r = 0; r < R; ++r) {  // k distinct experts per row, increasing
     std::vector<int> pick;
@@ -527,10 +528,11 @@ void t_exp_multi(TB& t, int fmtv, float* e4m3, float* exp2t) {
   a.x = t.f((size_t)R * H, -1, 1);
   float* actv = t.zf((size_t)R * k * I);
   a.y = actv;
-  a.nchunk = (I + 15) / 16;
+  a.nchunk = small ? (I + 7) / 8 : (I + 15) / 16;
   a.grid = 200;  // fewer blocks than items: every block takes several
   t.out("w13 activations", actv, (size_t)R * k * I);
-  t.b->run(KID_exp13cm, &a, a.grid, 256);
+  if (small) t.b->run(fmtv == INK2_FMT_NVFP4 ? KID_exp13s : KID_exp13sx, &a, a.grid, (H / 16 + 31) / 32 * 32);
+  else t.b->run(KID_exp13cm, &a, a.grid, 256);
   a.rows = H;
   a.cols = I;
   size_t n2 = (size_t)E * a.rows * a.cols;
@@ -548,7 +550,8 @@ void t_exp_multi(TB& t, int fmtv, float* e4m3, float* exp2t) {
   a.nchunk = (H + 15) / 16;
   a.grid = 300;  // fewer blocks than items: every block takes several
   t.out("w2 products", dots, (size_t)R * k * H);
-  t.b->run(KID_exp2m, &a, a.grid, 256);
+  if (small) t.b->run(fmtv == INK2_FMT_NVFP4 ? KID_exp2s : KID_exp2sx, &a, a.grid, 256);
+  else t.b->run(KID_exp2m, &a, a.grid, 256);
   ECombArgs c{};
   c.dots = dots;
   c.wt = t.f((size_t)R * k, 0.5f, 1.5f);
@@ -593,6 +596,9 @@ void pk_job(TB& t, GemvJob& J, int fmtv, int rows, int cols, int split, int epi,
   } else if (fmtv == INK2_DFMT_MXFP8) {
     J.w = (const u16*)t.bytes(n, 0, 255, true);
     J.sc = t.bytes(n / 32, 110, 118, false);
+  } else if (fmtv == INK2_DFMT_Q3) {
+    J.w = (const u16*)t.bytes(n * 3 / 8, 0, 255, false);
+    J.sc = t.bytes(n / 16, 0x28, 0x40, false);
   } else {
     J.w = t.bf(n, -0.05f, 0.05f);
   }
@@ -764,8 +770,8 @@ void t_packed_multi(TB& t) {
 }
 
 // pgemvcm (packed column owner, 8 right-hand sides per block): R = 11 rows (a full and a partial group)
-void t_pgemvcm(TB& t, int kid, int nr) {
-  const int R = 11, cols = 2304;
+void t_pgemvcm(TB& t, int kid, int nr, int nh = 8, int R = 11) {
+  const int cols = 2304;
   GemvArgs a{};
   pk_job(t, a.job[0], INK2_DFMT_NVFP4, 300, cols, cols, INK2_EPI_NONE, 0.004f);
   pk_job(t, a.job[1], INK2_DFMT_MXFP8, 37, cols, 1024, INK2_EPI_SIGMOID, 0.0f);
@@ -789,7 +795,139 @@ void t_pgemvcm(TB& t, int kid, int nr) {
   }
   a.nrhs = R;
   a.blocks = chunks;
-  t.b->run(kid, &a, chunks * ((R + 7) / 8), cols / 8);
+  t.b->run(kid, &a, chunks * ((R + nh - 1) / nh), cols / 8);
+}
+
+// q3 (the converted drafter files): column owner with mixed formats, 8-row passes (pgemvcm), long rows
+// with 3 right-hand sides (pgemv), narrow rows (pgemvn)
+void t_q3(TB& t) {
+  {
+    GemvArgs a{};
+    const int cols = 2304;
+    pk_job(t, a.job[0], INK2_DFMT_Q3, 3072, cols, cols, INK2_EPI_NONE, 0.004f);
+    pk_job(t, a.job[1], INK2_DFMT_NVFP4, 40, cols, cols, INK2_EPI_NONE, 0.003f);
+    pk_job(t, a.job[2], INK2_DFMT_Q3, 37, cols, 1024, INK2_EPI_SIGMOID, 0.002f);
+    a.njobs = 3;
+    int chunks = 0;
+    const char* names[3] = {"q3 pgemvc", "nvfp4 next to q3", "q3 pgemvc sigmoid split"};
+    for (int j = 0; j < a.njobs; ++j) {
+      a.total_rows += a.job[j].rows;
+      chunks += (a.job[j].rows + 15) / 16;
+      t.out(names[j], a.job[j].y, a.job[j].rows);
+    }
+    t.b->run(KID_pgemvc, &a, chunks, cols / 8);
+  }
+  {
+    const int R = 11, cols = 2304;
+    GemvArgs a{};
+    pk_job(t, a.job[0], INK2_DFMT_Q3, 300, cols, cols, INK2_EPI_NONE, 0.004f);
+    pk_job(t, a.job[1], INK2_DFMT_Q3, 37, cols, 1024, INK2_EPI_SOFTCAP, 0.002f);
+    a.njobs = 2;
+    int chunks = 0;
+    const char* names[2] = {"q3 pgemvcm8 11 rows", "q3 pgemvcm8 softcap split"};
+    for (int j = 0; j < a.njobs; ++j) {
+      GemvJob& J = a.job[j];
+      if (J.split < cols) {
+        J.x = t.f((size_t)R * J.split, -1, 1);
+        J.x2 = t.f((size_t)R * (cols - J.split), -1, 1);
+      } else {
+        J.x = t.f((size_t)R * cols, -1, 1);
+      }
+      J.y = t.zf((size_t)R * J.rows);
+      a.total_rows += J.rows;
+      chunks += (J.rows + 7) / 8;
+      t.out(names[j], J.y, (size_t)R * J.rows);
+    }
+    a.nrhs = R;
+    a.blocks = chunks;
+    t.b->run(KID_pgemvcm8, &a, chunks * ((R + 7) / 8), cols / 8);
+  }
+  {
+    const int R = 3;
+    GemvArgs b{};
+    pk_job(t, b.job[0], INK2_DFMT_Q3, 64, 9216, 9216, INK2_EPI_NONE, 0.003f);
+    b.job[0].x = t.f((size_t)R * 9216, -1, 1);
+    b.job[0].y = t.zf((size_t)R * 64);
+    b.njobs = 1;
+    b.total_rows = 64;
+    b.nrhs = R;
+    b.blocks = 64 / 8;
+    t.out("q3 pgemv 9216 columns 3 rows", b.job[0].y, (size_t)R * 64);
+    t.b->run(KID_pgemv, &b, b.blocks * R, 256);
+  }
+  {
+    GemvArgs a{};
+    pk_job(t, a.job[0], INK2_DFMT_Q3, 1001, 256, 256, INK2_EPI_TANH, 0.004f);
+    a.njobs = 1;
+    a.total_rows = 1001;
+    a.blocks = (1001 + 7) / 8;
+    t.out("q3 pgemvn 256 columns", a.job[0].y, 1001);
+    t.b->run(KID_pgemvn, &a, a.blocks, 256);
+  }
+}
+
+// The drafter's Markov head with a packed table (dzin) and a packed folded head (dfold): fmtv = INK2_DFMT_*
+void t_dhead(TB& t, int fmtv) {
+  const int R = 256, H = 256, V = 5003, G = 64, rows = 300;
+  size_t n = (size_t)rows * R, nf = (size_t)V * R;
+  auto codes = [&](size_t m) -> const u8* {
+    if (fmtv == INK2_DFMT_NVFP4) return t.bytes(m / 2, 0, 255, false);
+    if (fmtv == INK2_DFMT_MXFP8) return t.bytes(m, 0, 255, true);
+    return t.bytes(m * 3 / 8, 0, 255, false);
+  };
+  auto scales = [&](size_t m) -> const u8* {
+    if (fmtv == INK2_DFMT_MXFP8) return t.bytes(m / 32, 110, 118, false);
+    return t.bytes(m / 16, 0x28, 0x40, false);
+  };
+  float fac = fmtv == INK2_DFMT_MXFP8 ? 0.0f : 0.004f;
+  DZinArgs z{};
+  std::vector<StepState> s(8);
+  for (int i = 0; i < 8; ++i) s[i] = StepState{17 + i, 40 + i, 1.0f, 0};
+  z.st = (StepState*)t.up(s.data(), s.size() * sizeof(StepState));
+  z.s = t.f(R, -1, 1);
+  z.w1 = (const u16*)codes(n);
+  z.w1sc = scales(n);
+  z.w1fac = fac;
+  z.w1fmt = fmtv;
+  z.hn = t.f((size_t)8 * H, -1, 1);
+  z.frnn = t.f((size_t)16 * H, -1, 1);
+  z.z = t.zf((size_t)(2 * R + 2 * H));
+  z.drafts = (int*)t.zf(8);
+  z.pval = t.f(G, -5, 5);
+  std::vector<int> pi(G);
+  for (int g = 0; g < G; ++g) pi[g] = (g * 37) % rows;
+  z.pidx = t.ints(pi);
+  z.G = G;
+  z.step = 1;
+  z.depth = 3;
+  z.rank = R;
+  z.H = H;
+  z.fring = 16;
+  z.w1_rows = rows;
+  t.out("dzin packed table z", z.z, (size_t)(2 * R + 2 * H));
+  t.out("dzin pick", z.drafts, 8, true);
+  t.b->run(KID_dzin, &z, 1, 256);
+  DFoldArgs f{};
+  f.zz = t.f(3 * R, -1, 1);
+  f.rnn_b = t.bf(3 * R, -0.1f, 0.1f);
+  f.s = t.f(R, -1, 1);
+  f.base = t.f(V, -10, 10);
+  f.fp = codes(nf);
+  f.fpsc = scales(nf);
+  f.fpfac = fac;
+  f.fpfmt = fmtv;
+  f.fb = t.f(V, -1, 1);
+  f.pval = t.zf(G);
+  f.pidx = (int*)t.zf(G);
+  f.V = V;
+  f.rank = R;
+  f.step = 1;
+  f.G = G;
+  f.cap = 30.0f;
+  t.out("dfold packed head max", f.pval, G);
+  t.out("dfold packed head index", f.pidx, G, true);
+  t.out("dfold state s", f.s, R);
+  t.b->run(KID_dfold, &f, G, 256);
 }
 
 }  // namespace
@@ -799,7 +937,10 @@ int ink2_run_selftest(Backend* ref, Backend* dut, std::string& report) {
                          "attn sliding", "attn full", "experts nvfp4", "experts mxfp8", "gemvw", "topk", "gemvc", "exp13c",
                          "gemv multi-row", "experts multi nvfp4", "experts multi mxfp8", "argmax", "pgemvc", "pgemv", "pgemvw",
                          "bf16 with factor", "norm packed table", "packed multi-row", "pgemvc8", "pgemvc4", "pgemvc2", "pgemvn",
-                         "pgemvcm", "pgemvcm8", "pgemvcm4", "pgemvcm2"};
+                         "pgemvcm", "pgemvcm8", "pgemvcm4", "pgemvcm2",
+                         "experts small nvfp4", "experts small mxfp8", "pgcm h2 (16 8 4 2 rows, R 2 and 5)",
+                         "pgcm h4 (16 8 4 2 rows, R 3 and 4)", "pgemvcm8 R 6", "q3 products", "drafter head nvfp4",
+                         "drafter head mxfp8", "drafter head q3"};
   const int ntests = (int)(sizeof names / sizeof names[0]);
   int failures = 0;
   float t1[256], t2[256];
@@ -848,6 +989,25 @@ int ink2_run_selftest(Backend* ref, Backend* dut, std::string& report) {
         case 29: t_pgemvcm(*t, KID_pgemvcm8, 8); break;
         case 30: t_pgemvcm(*t, KID_pgemvcm4, 4); break;
         case 31: t_pgemvcm(*t, KID_pgemvcm2, 2); break;
+        case 32: t_exp_multi(*t, INK2_FMT_NVFP4, e4, ex, 1); break;
+        case 33: t_exp_multi(*t, INK2_FMT_MXFP8, e4, ex, 1); break;
+        case 34:
+          t_pgemvcm(*t, KID_pgcm16h2, 16, 2, 2);
+          t_pgemvcm(*t, KID_pgcm8h2, 8, 2, 2);
+          t_pgemvcm(*t, KID_pgcm4h2, 4, 2, 5);
+          t_pgemvcm(*t, KID_pgcm2h2, 2, 2, 2);
+          break;
+        case 35:
+          t_pgemvcm(*t, KID_pgcm16h4, 16, 4, 4);
+          t_pgemvcm(*t, KID_pgcm8h4, 8, 4, 3);
+          t_pgemvcm(*t, KID_pgcm4h4, 4, 4, 4);
+          t_pgemvcm(*t, KID_pgcm2h4, 2, 4, 3);
+          break;
+        case 36: t_pgemvcm(*t, KID_pgemvcm8, 8, 8, 6); break;
+        case 37: t_q3(*t); break;
+        case 38: t_dhead(*t, INK2_DFMT_NVFP4); break;
+        case 39: t_dhead(*t, INK2_DFMT_MXFP8); break;
+        case 40: t_dhead(*t, INK2_DFMT_Q3); break;
       }
       t->b->sync();
     }
