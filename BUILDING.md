@@ -341,5 +341,6 @@ Add `-DCMAKE_CUDA_ARCHITECTURES=120` to the first command for a faster build tha
 * `src/`: the engine (C++ and CUDA); `include/`: the C interface that the Python package binds to; `third_party/`: nlohmann/json (MIT).
 * `src/inkling2/`: the engine for Inkling-2 Mini (`yskn_inkling2.dll`), with its own C interface and build script (see above).
 * The Python package is built and installed separately (`pip install .` in its folder).
-* `tools/convert/`: the program that made the released model files from the original weights (Qwen3.8-27B only). See
+* `tools/convert/`: the program that made the released model files from the original weights (Qwen3.8-27B), and the converter for
+  Inkling-2 Mini (`inkling2_convert.py`, `inkling2_quant.py`). See
   [tools/convert/README.md](tools/convert/README.md).
