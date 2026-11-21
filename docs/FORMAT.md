@@ -8,6 +8,7 @@ original weights, or write one.
 * A reader that follows this text and nothing else: [`tools/yskn_decode.py`](../tools/yskn_decode.py) (Python and numpy, no GPU).
 * A small test file and the values a reader must get from it: [`tools/testdata/`](../tools/testdata/).
 * The reader of the engine: [`src/format.hpp`](../src/format.hpp) and [`src/loader.cpp`](../src/loader.cpp).
+* Version 2, for Inkling-2 models (NVFP4, MXFP8 and bfloat16 tensors): [section 10](#10-version-2-inkling-2-files).
 
 The program that made the released files from the original weights is in [`tools/convert/`](../tools/convert/) (added on
 November 14, 2026); its method is described in [TECHNOLOGY.md](TECHNOLOGY.md), section 3.2. See [section 9](#9-writing-a-file).
@@ -275,3 +276,93 @@ the data it needs; its method is described in [TECHNOLOGY.md](TECHNOLOGY.md), se
 released files, it gave the same codes for every matrix of the body and for the embedding table, and with the output matrix
 taken from a released file it gave the released files byte for byte. Whether another PC gives the same codes depends on its
 arithmetic ([`tools/convert/README.md`](../tools/convert/README.md), "What we got" and "Limits").
+
+## 10. Version 2: Inkling-2 files
+
+Version 2 holds the weights of an Inkling-2 model (Inkling-2 Mini) as they are stored by the model's own formats: bfloat16 and
+float32 tensors as published, and matrices in the two block formats of the published experts, NVFP4 and MXFP8. It has nothing
+to decode beyond these formats (no trellis code, no rotation). The program that writes it is
+[`tools/convert/inkling2_convert.py`](../tools/convert/inkling2_convert.py) (`--scheme quality`); the reader of the package is
+[`python/yasakani/ink2_yskn.py`](../python/yasakani/ink2_yskn.py).
+
+A reader of version 1 refuses a version 2 file at the version field (`tools/yskn_decode.py` and `src/format.hpp` take version
+`1` only), so it never misreads one.
+
+### 10.1 File layout
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | the bytes `YSKN` |
+| 4 | 4 | version, unsigned 32-bit: `2` |
+| 8 | 8 | length of the JSON header in bytes, unsigned 64-bit |
+| 16 | 8 | offset of the first data block, unsigned 64-bit |
+| 24 | 8 | length of the whole file in bytes, unsigned 64-bit (a reader compares it with the file) |
+| 32 | 4 | CRC-32 (the one of zlib) of the JSON header |
+| 36 | 4 | zero |
+| 40 | (length) | the header: one JSON object, ASCII |
+
+The first 32 bytes mean what they mean in version 1. Every data block (a **part**, section 10.3) starts at a multiple of the
+`alignment` of the header (4,096 bytes: a memory page), so that the file can be memory-mapped and every part handed on without
+copying. The bytes between the parts are zero.
+
+### 10.2 The header
+
+| Member | Meaning |
+|---|---|
+| `format`, `version` | `"yskn"`, `2` |
+| `alignment` | 4096 |
+| `checksum` | how the parts are checked: `crc32 (zlib) of every part` |
+| `model` | `arch` (`inkling2`), `model_id`, `source` (the Hugging Face repository and revision, the name and SHA-256 of the published weights file, the licence and the acceptable-use policy), `scheme` (its name, the rules in words, the search settings, the quantiser), `text_config` (the `text_config` of the model's config.json), `converter` |
+| `tensors` | a list, section 10.3 |
+
+### 10.3 Tensors and parts
+
+Each entry of `tensors` has `name`, `encoding`, `shape` (the logical shape: the values the tensor stands for), `role` (`dense`,
+`vector` or `experts`), `source` (a text: copied or quantised) and `parts`. Each part has `part`, `dtype` (`bf16`, `f32`, `u8`
+or `e4m3`, all little-endian), `shape`, `offset` (absolute), `nbytes` and `crc32` (8 hexadecimal digits of the CRC-32 of its
+bytes).
+
+| `encoding` | Parts (shape for a logical shape `[..., R, C]`) | Value |
+|---|---|---|
+| `bf16` | `data` bf16, the shape | as stored |
+| `f32` | `data` f32, the shape | as stored |
+| `nvfp4` | `weight` u8 `[..., R, C/2]`; `scale` e4m3 `[..., R, C/16]`; `amax` f32 `[n]`; `denominator` f32 `[1]` | `(e2m1[code] * e4m3[scale]) * (amax / denominator)` |
+| `mxfp8` | `weight` e4m3 `[..., R, C]`; `scale` u8 `[..., R, C/32]` | `e4m3[weight] * 2^(scale - 127)` |
+
+* NVFP4: each byte of `weight` holds two 4-bit codes, the element with the even column number in the low four bits. A code
+  is an E2M1 number: bit 3 the sign, the others the magnitudes 0, 0.5, 1, 1.5, 2, 3, 4, 6. `scale` holds one E4M3 number for
+  every 16 consecutive values of a row. `amax` holds one number per matrix: `n` = 1 for a matrix, the number of experts for an
+  expert tensor; `denominator` is 2688 (6 times 448). The products are float32, in the order of the formula.
+* MXFP8: `weight` holds one E4M3 number per value, `scale` one byte for every 32 consecutive values of a row.
+* E4M3 (`float8_e4m3fn`): sign, 4 exponent bits with bias 7, 3 mantissa bits; exponent 0 is subnormal (`m / 8 * 2^-6`); the
+  largest value is 448; `0x7F` and `0xFF` are not numbers and are not written.
+
+These are the formats of the experts of the published Inkling-2 Mini checkpoint, and the parts are laid out as there, so the
+engine's expert kernels read them as they are: an expert tensor (`role` `experts`, logical shape `[experts, R, C]`) is stored
+exactly like the published one, the rows of `w13` interleaved as published (gate row `i` at `2i`, up row `i` at `2i + 1`). A
+dense matrix in NVFP4 or MXFP8 has the same layout as a single expert.
+
+The names are the parameter names of the published checkpoint; an expert tensor is named without the suffix
+(`model.llm.layers.N.mlp.experts.w13`; its parts are the published `..._weight`, `..._weight_scale`, `..._weight_amax` and
+`..._weight_outer_scale_denominator`). `model.llm.unembed.weight` holds only the rows of the unpadded vocabulary. The vision
+tower and the drafter are not in the file.
+
+### 10.4 The quality scheme
+
+| Tensors | Encoding |
+|---|---|
+| `attn.wq_du`, `attn.gate_attn`, `unembed` | NVFP4, one factor per matrix |
+| `attn.wk_dv`, `attn.wv_dv`, `attn.wo_ud`, `attn.wr_du`, `attn.attn_sink_proj`, the `weight_proj` of the key and value convolutions, `controllers.*`, `embed` | MXFP8 |
+| the experts | NVFP4: as published where the published file has NVFP4; re-packed from MXFP8 (layers 20 to 23) with one factor per expert |
+| everything else: the router, the norms, the convolutions, the clip scales, `rel_logits_proj`, the attention-residual queries | as published (bf16 or f32) |
+
+The quantiser ([`tools/convert/inkling2_quant.py`](../tools/convert/inkling2_quant.py)) chooses the block scale of NVFP4 among
+eight E4M3 codes around the plain rule, and the exponent of MXFP8 among two, by the smallest squared error of the decoded block.
+Against the published model, on 43 text windows (14,024 positions), measured on the decoded values of the written file: KL
+0.0110, top-1 agreement 96.0 %. The file of Inkling-2 Mini has 15.05 GB; the published file has 19.5 GB (with the vision tower,
+0.64 GB).
+
+### 10.5 Checking a file
+
+`yasakani verify` compares the SHA-256 of every file of the model folder with yasakani.json and then the CRC-32 of every part.
+The package checks the CRC-32 of every part before it loads the file, and names the tensor whose bytes differ.

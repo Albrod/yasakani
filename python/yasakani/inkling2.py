@@ -7,6 +7,12 @@ Text only, one request at a time.  The engine library is a separate DLL with its
 binding module (``ink2_native.py``); both are found through ``--dll`` / ``$YASAKANI_INK2_DLL`` (the binding next to the DLL or one
 folder up, or ``$YASAKANI_INK2_BINDING``).  Model folders are made by ``tools/convert/inkling2_convert.py``.
 
+Two weights formats (the ``weights`` entry of yasakani.json): ``hf-safetensors`` (the published file, read by the binding) and
+``yskn`` (a re-quantised ``.yskn`` file of version 2, yasakani/ink2_yskn.py).  For a ``.yskn`` file the CRC-32 of every tensor is
+checked first (``YASAKANI_INK2_SKIP_TENSOR_CHECK=1`` skips it), and the binding is given the file through an object with the interface of its safetensors reader: the experts as
+stored, the dense matrices that are stored packed decoded to bfloat16 (what the engine multiplies today), unless the engine says
+through its capability query that it takes them packed.
+
 How the model writes a reply (``response_template`` of its tokenizer_config.json): blocks ``<|message_model|>[name]<|content_X|>
 text<|end_message|>``, where X is ``thinking`` (reasoning) or ``text`` (the answer), and ``<|content_model_end_sampling|>`` (the
 stop token) at the end of the turn.  The prompt ends after the messages, without an assistant header: the model writes it.
@@ -19,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -35,6 +42,7 @@ from ._native import YasakaniError
 
 ARCHITECTURE = "inkling2"
 MANIFEST = "yasakani.json"
+WEIGHTS_FORMATS = ("hf-safetensors", "yskn")
 CONTEXT_MARGIN = 16                    # positions kept free at the end of the context
 # reasoning_effort values of the chat template (its effort_map); the server and the chat accept these names
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
@@ -89,7 +97,7 @@ class Ink2Pack:
         if not isinstance(w, dict) or not w.get("file"):
             raise YasakaniError("%s has no weights entry" % MANIFEST)
         fmt = str(w.get("format") or "hf-safetensors")
-        if fmt != "hf-safetensors":
+        if fmt not in WEIGHTS_FORMATS or (fmt == "yskn" and int(w.get("version") or 2) != 2):
             raise YasakaniError("weights format %r is not supported by this version of the package" % fmt)
         need = [w["file"], "config.json", "tokenizer.json", "chat_template.jinja"]
         missing = [n for n in need if not (root / n).is_file()]
@@ -120,6 +128,14 @@ class Ink2Pack:
             if progress:
                 progress(name, ok)
         return res
+
+    def check_tensors(self, threads: int = 8) -> List[str]:
+        """A .yskn weights file: the CRC-32 of every tensor part -> the names of the tensors that differ (empty: all match)."""
+        if self.weights_format != "yskn":
+            return []
+        from .ink2_yskn import YsknFile
+        with YsknFile(self.weights) as yf:
+            return sorted({n for n, _ in yf.check(threads=threads)})
 
 
 # ---- chat template and tokenizer ---------------------------------------------------------------------------------------------------
@@ -392,10 +408,18 @@ class Ink2Engine:
         self.max_ctx = int(max_ctx)
         self._cancel = threading.Event()
         t0 = time.perf_counter()
+        self.weights_note = pack.weights_format
+        self._yskn = None
         try:
-            self.native = self.mod.Ink2Native().load(str(pack.root), backend=self.backend, max_positions=self.max_ctx, dll=str(self.dll),
-                                                     weights=pack.weights.name, log=log)
+            if pack.weights_format == "yskn":
+                self.native = self._load_yskn(pack, lib, log)
+            else:
+                self.native = self.mod.Ink2Native().load(str(pack.root), backend=self.backend, max_positions=self.max_ctx,
+                                                         dll=str(self.dll), weights=pack.weights.name, log=log)
         except (RuntimeError, OSError, AssertionError, KeyError, ValueError) as ex:
+            if self._yskn is not None:
+                self._yskn.close()
+                self._yskn = None
             raise YasakaniError("the Inkling-2 engine could not load the model: %s" % ex) from ex
         if graph and self.backend == "cuda":
             try:
@@ -406,6 +430,50 @@ class Ink2Engine:
         self.vocab = int(self.native.vocab)
         self.fed: List[int] = []
         self.last_logits: Optional[np.ndarray] = None
+
+    def _load_yskn(self, pack: "Ink2Pack", lib, log):
+        """Check the tensors of the .yskn file, then let the binding load it through a CheckpointView: the binding opens its weights
+        with ``ink2_ckpt.Checkpoint(path)``, which is pointed at the view for this one path while ``load`` runs."""
+        from . import ink2_yskn as Y
+        t0 = time.perf_counter()
+        yf = Y.YsknFile(pack.weights)
+        self._yskn = yf
+        if os.environ.get("YASAKANI_INK2_SKIP_TENSOR_CHECK") != "1":
+            bad = yf.check(threads=8)
+            if bad:
+                raise ValueError("%s is damaged: the CRC-32 of %d tensor part(s) differs, first %s (%s); convert the folder again"
+                                 % (pack.weights.name, len(bad), bad[0][0], bad[0][1]))
+        t_check = time.perf_counter() - t0
+        # packed dense matrices only when the engine says it takes them AND the binding says it hands them over
+        packed = Y.engine_takes_packed_dense(lib) and bool(getattr(self.mod, "TAKES_PACKED_DENSE", False))
+        view = Y.CheckpointView(yf, dense="packed" if packed else "bf16")
+        kw = dict(backend=self.backend, max_positions=self.max_ctx, dll=str(self.dll), weights=pack.weights.name, log=log)
+        try:
+            takes_reader = "checkpoint" in inspect.signature(self.mod.Ink2Native.load).parameters
+        except (TypeError, ValueError):
+            takes_reader = False
+        if takes_reader:                                     # a binding that accepts a reader object
+            native = self.mod.Ink2Native().load(str(pack.root), checkpoint=view, **kw)
+        else:                                                # else: its ink2_ckpt.Checkpoint gives the view for this one path
+            ckpt_mod = getattr(self.mod, "ink2_ckpt", None)
+            if ckpt_mod is None or not hasattr(ckpt_mod, "Checkpoint"):
+                raise RuntimeError("this binding has no ink2_ckpt.Checkpoint to give the .yskn file to")
+            original = ckpt_mod.Checkpoint
+            target = os.path.normcase(os.path.abspath(str(pack.weights)))
+
+            def checkpoint(path, *a, **k):
+                if os.path.normcase(os.path.abspath(str(path))) == target:
+                    return view
+                return original(path, *a, **k)
+
+            ckpt_mod.Checkpoint = checkpoint
+            try:
+                native = self.mod.Ink2Native().load(str(pack.root), **kw)
+            finally:
+                ckpt_mod.Checkpoint = original
+        self.weights_note = "yskn %s; tensor check %.1f s; dense matrices %s" % (
+            (pack.meta.get("weights") or {}).get("scheme", "?"), t_check, "packed" if packed else "decoded to bfloat16")
+        return native
 
     # -- state --------------------------------------------------------------------------------------------------------------------
     def reset(self) -> None:
@@ -454,6 +522,12 @@ class Ink2Engine:
         if n is not None:
             n.close()
             self.native = None
+        y = getattr(self, "_yskn", None)
+        if y is not None:
+            if n is not None:
+                n.ckpt = None
+            y.close()
+            self._yskn = None
 
 
 def bytes_per_position(config: dict) -> int:

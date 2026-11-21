@@ -77,6 +77,8 @@ def open_stack(args, warm: bool = True):
     if dm:
         mem += "; device %s used of %s" % (_gb(dm[1] - dm[0]), _gb(dm[1]))
     _say("model ready in %.1f s (engine load %.1f s, %s backend; %s)" % (time.time() - t0, eng.load_seconds, eng.backend, mem))
+    if pack.weights_format == "yskn":
+        _say("weights: %s" % eng.weights_note)
     return pack, eng, fmt, runner
 
 
@@ -112,7 +114,10 @@ def cmd_info(args) -> int:
         print("model    %s  (id %s, architecture inkling2, context up to %d tokens, %d by default)"
               % (pack.root.name, pack.model_id, pack.max_ctx, pack.default_ctx))
         print("  source     %s @ %s, licence %s" % (src.get("repository"), str(src.get("revision"))[:12], src.get("license")))
-        print("  weights    %-36s %s  (%s)" % (pack.weights.name, _human(pack.weights.stat().st_size), pack.weights_format))
+        wmeta = pack.meta.get("weights") or {}
+        print("  weights    %-36s %s  (%s%s)" % (pack.weights.name, _human(pack.weights.stat().st_size), pack.weights_format,
+                                                ", version %s, scheme %s" % (wmeta.get("version", 2), wmeta.get("scheme"))
+                                                if pack.weights_format == "yskn" else ""))
         print("  sampling   temperature %g, top_p %g, top_k %d (generation_config.json); stop ids %s"
               % (pack.sampling["temperature"], pack.sampling["top_p"], pack.sampling["top_k"], pack.stop_ids))
         print("  checksums  %d files listed in yasakani.json" % len(pack.sha256))
@@ -136,6 +141,17 @@ def cmd_verify(args) -> int:
     res = pack.verify(progress=lambda n, ok: print("  %-36s %s" % (n, "OK" if ok else "DIFFERENT"), flush=True))
     bad = [n for n, ok in res.items() if not ok]
     print("all files match." if not bad else "%d file(s) differ: %s  (convert the folder again)" % (len(bad), ", ".join(bad)))
+    if pack.weights_format == "yskn" and pack.weights.is_file():
+        try:
+            tbad = pack.check_tensors()
+        except ValueError as ex:                          # ink2_yskn.FormatError: the header itself is damaged
+            print("tensors: %s cannot be read: %s" % (pack.weights.name, ex))
+            return 1
+        if tbad:
+            print("tensors: the CRC-32 of %d tensor(s) of %s differs: %s" % (len(tbad), pack.weights.name, ", ".join(tbad[:8])
+                                                                            + (" ..." if len(tbad) > 8 else "")))
+            return 1
+        print("tensors: the CRC-32 of every tensor of %s matches." % pack.weights.name)
     return 0 if not bad else 1
 
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Inkling-2 Mini path: converter, manifest and verify, chat template, output stream, sampling, the engine on its host backend,
-the server, and the dispatch of the commands.
+"""Inkling-2 Mini path: converter (published and quality schemes), the .yskn file of version 2, manifest and verify, chat
+template, output stream, sampling, the engine on its host backend, the server, and the dispatch of the commands.
 
 Needs (else the tests skip):
   YASAKANI_TEST_INK2_SOURCE  the downloaded hf-internal-testing/tiny-inkling2-mini folder (config.json, model.safetensors, tokenizer)
@@ -48,10 +48,21 @@ def tiny_folder() -> Path:
     return _FOLDER["dir"] / "tiny"
 
 
+def tiny_quality_folder() -> Path:
+    """The tiny checkpoint converted once per test run with --scheme quality (no reference run: selfcheck.json has no cases)."""
+    if "qdir" not in _FOLDER:
+        d = Path(tempfile.mkdtemp(prefix="ink2_tinyq_"))
+        conv.convert(Path(SOURCE), d / "tinyq", repo="hf-internal-testing/tiny-inkling2-mini",
+                     revision=conv.hf_metadata(Path(SOURCE), "model.safetensors")[0] or "test", scheme="quality", threads=4)
+        _FOLDER["qdir"] = d
+    return _FOLDER["qdir"] / "tinyq"
+
+
 def tearDownModule():
-    d = _FOLDER.pop("dir", None)
-    if d is not None:
-        shutil.rmtree(d, ignore_errors=True)
+    for k in ("dir", "qdir"):
+        d = _FOLDER.pop(k, None)
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 @unittest.skipUnless(HAVE_SOURCE, NEED_SOURCE)
@@ -109,6 +120,173 @@ class ConverterTests(unittest.TestCase):
             self.assertFalse(ink.is_inkling2(t))
             (Path(t) / "yasakani.json").write_text(json.dumps({"model_id": "qwen3.8-27b"}), encoding="utf-8")
             self.assertFalse(ink.is_inkling2(t))
+
+
+# greedy tokens of the PyTorch reference implementation of the model on the decoded weights of the tiny checkpoint converted with
+# --scheme quality (official prompt; dense matrices rounded to bfloat16 as the engine is given them)
+TINY_QUALITY_TOKENS = [165105, 147669, 95722, 153201, 34066, 31311, 193569, 41817, 169626, 169626, 169626, 169626]
+
+
+def flip_byte(path: Path, offset: int) -> None:
+    with open(path, "r+b") as f:
+        f.seek(offset)
+        b = f.read(1)
+        f.seek(offset)
+        f.write(bytes([b[0] ^ 0x10]))
+
+
+@unittest.skipUnless(HAVE_SOURCE, NEED_SOURCE)
+class QualitySchemeTests(unittest.TestCase):
+    """--scheme quality on the tiny checkpoint: the .yskn file read back bit for bit, the manifest, the refusals, damage."""
+
+    @classmethod
+    def setUpClass(cls):
+        from yasakani import ink2_yskn
+        cls.Y = ink2_yskn
+        cls.root = tiny_quality_folder()
+        cls.meta = json.loads((cls.root / "yasakani.json").read_text(encoding="utf-8"))
+        cls.path = cls.root / cls.meta["weights"]["file"]
+
+    def test_read_back_bit_exact(self):
+        """Every tensor: copied ones equal to the published bytes, quantised ones equal to the quantiser on the published values,
+        the MXFP8 experts re-packed expert by expert; the decode gives the values of the formula."""
+        import inkling2_quant as NQ
+        st = conv.SafeTensors(Path(SOURCE) / "model.safetensors")
+        counts = dict(copied=0, quantised=0, experts_copied=0, experts_repacked=0)
+        with self.Y.YsknFile(self.path) as yf:
+            self.assertEqual(yf.check(), [])
+            for name, e in yf.tensors.items():
+                enc = e["encoding"]
+                if e["role"] == "experts":
+                    if name + "_weight_amax" in st.entries:
+                        for suf, part in conv.EXPERT_PARTS.items():
+                            self.assertTrue(np.array_equal(np.asarray(yf.part(name, part)).ravel(),
+                                                           np.asarray(st.view(name + suf)).ravel()), name)
+                        counts["experts_copied"] += 1
+                    else:
+                        w, sc = st.view(name + "_weight"), st.view(name + "_weight_scale")
+                        for j in range(e["shape"][0]):
+                            q = NQ.nvfp4_quant(self.Y.decode_mxfp8(np.asarray(w[j]), np.asarray(sc[j])), conv.NVFP4_SEARCH, 1)
+                            self.assertTrue(np.array_equal(q["weight"], yf.part(name, "weight")[j]), (name, j))
+                            self.assertTrue(np.array_equal(q["scale"], yf.part(name, "scale")[j]), (name, j))
+                            self.assertEqual(q["amax"][0], yf.part(name, "amax")[j])
+                        counts["experts_repacked"] += 1
+                elif enc in ("nvfp4", "mxfp8"):
+                    x = st.f32(name)[:e["shape"][0]]
+                    q = NQ.nvfp4_quant(x, conv.NVFP4_SEARCH) if enc == "nvfp4" else NQ.mxfp8_quant(x, conv.MXFP8_SEARCH)
+                    for k, v in q.items():
+                        self.assertTrue(np.array_equal(v.ravel(), np.asarray(yf.part(name, k)).ravel()), (name, k))
+                    counts["quantised"] += 1
+                else:
+                    self.assertTrue(np.array_equal(np.asarray(yf.part(name, "data")).ravel(), np.asarray(st.view(name)).ravel()), name)
+                    counts["copied"] += 1
+            self.assertEqual(counts["experts_copied"] + counts["experts_repacked"], 2 * 18)
+            self.assertEqual(counts["experts_repacked"], 8)                     # layers 14 to 17 of the tiny model are MXFP8
+            self.assertGreater(counts["quantised"], 100)
+            self.assertFalse(any(n.startswith("model.visual.") for n in yf.tensors))
+            self.assertEqual(yf.entry("model.llm.unembed.weight")["shape"], [200058, 256])
+            # the decode follows the formula of docs/FORMAT.md, section 10.3: element (3, 10) is in the low nibble of byte (3, 5)
+            pr = yf.parts("model.llm.layers.0.attn.wq_du.weight")
+            code = int(pr["weight"][3, 5]) & 0xF
+            factor = np.float32(pr["amax"][0]) / np.float32(pr["denominator"][0])
+            want = np.float32(self.Y.E2M1[code] * self.Y.E4M3[pr["scale"][3, 0]]) * factor
+            self.assertEqual(yf.decode("model.llm.layers.0.attn.wq_du.weight")[3, 10], want)
+            for p in (p for e in yf.tensors.values() for p in e["parts"]):
+                self.assertEqual(p["offset"] % 4096, 0)
+
+    def test_manifest_notice_and_verify(self):
+        w = self.meta["weights"]
+        self.assertEqual((w["format"], w["version"], w["scheme"], w["file"]), ("yskn", 2, "quality", self.path.name))
+        self.assertEqual(w["size"], self.path.stat().st_size)
+        self.assertEqual(w["sha256"], self.meta["sha256"][self.path.name])
+        self.assertEqual(self.meta["model_id"], "tiny-inkling2-mini-quality")
+        self.assertNotIn("model.safetensors", self.meta["sha256"])
+        notice = (self.root / "NOTICE").read_text(encoding="utf-8")
+        for text in ("re-quantised by this tool", "https://thinkingmachines.ai/model-acceptable-use-policy/", "Apache License 2.0",
+                     "hf-internal-testing/tiny-inkling2-mini", "revision"):
+            self.assertIn(text, notice)
+        pack = ink.Ink2Pack.load(self.root)
+        self.assertEqual(pack.weights_format, "yskn")
+        self.assertTrue(all(pack.verify().values()))
+        self.assertEqual(pack.check_tensors(), [])
+        sc = json.loads((self.root / "selfcheck.json").read_text(encoding="utf-8"))
+        self.assertEqual((sc["architecture"], sc["cases"]), ("inkling2", []))      # no reference run in this test
+
+    def test_old_readers_refuse(self):
+        """The reader of version 1 stops at the version field; the version 2 reader refuses a version 1 file; the package refuses
+        a weights entry of another version."""
+        sys.path.insert(0, str(HERE.parent.parent / "tools"))
+        import yskn_decode
+        with self.assertRaisesRegex(yskn_decode.FormatError, "unsupported version 2"):
+            yskn_decode.Container(str(self.path))
+        v1 = HERE.parent.parent / "tools" / "testdata" / "tiny.yskn"
+        if v1.is_file():
+            with self.assertRaisesRegex(self.Y.FormatError, "version 1"):
+                self.Y.YsknFile(v1)
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "f"
+            shutil.copytree(self.root, root, ignore=shutil.ignore_patterns("*.yskn"))
+            (root / self.path.name).write_bytes(b"YSKN")
+            meta = dict(self.meta)
+            meta["weights"] = dict(self.meta["weights"], version=3)
+            (root / "yasakani.json").write_text(json.dumps(meta), encoding="utf-8")
+            with self.assertRaisesRegex(Exception, "weights format 'yskn' is not supported"):
+                ink.Ink2Pack.load(root)
+
+    def test_damage_is_found(self):
+        """A flipped byte in a tensor: verify (file hash and tensor CRC) names it; a damaged header is refused."""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "c"
+            shutil.copytree(self.root, root)
+            path = root / self.path.name
+            with self.Y.YsknFile(path) as yf:
+                p = yf.part_entry("model.llm.unembed.weight", "weight")
+                off = p["offset"] + p["nbytes"] // 2
+            flip_byte(path, off)
+            pack = ink.Ink2Pack.load(root)
+            res = pack.verify()
+            self.assertEqual([n for n, ok in res.items() if not ok], [path.name])
+            self.assertEqual(pack.check_tensors(), ["model.llm.unembed.weight"])
+            flip_byte(path, off)                                                 # back
+            self.assertEqual(pack.check_tensors(), [])
+            flip_byte(path, 200)                                                 # in the JSON header
+            with self.assertRaisesRegex(self.Y.FormatError, "header is damaged"):
+                self.Y.YsknFile(path)
+
+
+@unittest.skipUnless(HAVE_SOURCE and HAVE_DLL, NEED_SOURCE + " and " + NEED_DLL)
+class HostEngineQualityTests(unittest.TestCase):
+    """The engine on its host backend loads the .yskn folder (packed experts, decoded dense matrices): greedy tokens equal to those
+    of the reference implementation on the same decoded weights; a damaged tensor is refused by the loader."""
+
+    def test_greedy_equals_the_reference(self):
+        pack = ink.Ink2Pack.load(tiny_quality_folder())
+        fmt, eng, runner = ink.open_runner(pack, 128, dll=DLL, warm=False)
+        try:
+            ids, _ = fmt.prompt(conv.OFFICIAL_MESSAGES, conv.OFFICIAL_TEMPLATE_KWARGS)
+            logits, _ = eng.read_prompt(ids)
+            got = []
+            for k in range(len(TINY_QUALITY_TOKENS)):
+                got.append(int(np.argmax(logits)))
+                if k + 1 < len(TINY_QUALITY_TOKENS):
+                    logits = eng.step(got[-1])
+            self.assertEqual(got, TINY_QUALITY_TOKENS)
+            self.assertIn("decoded to bfloat16", eng.weights_note)
+        finally:
+            eng.close()
+
+    def test_loader_refuses_a_damaged_tensor(self):
+        from yasakani import ink2_yskn as Y
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "c"
+            shutil.copytree(tiny_quality_folder(), root)
+            pack = ink.Ink2Pack.load(root)
+            with Y.YsknFile(pack.weights) as yf:
+                p = yf.part_entry("model.llm.layers.3.attn.wo_ud.weight", "scale")
+                off = p["offset"] + 7
+            flip_byte(pack.weights, off)
+            with self.assertRaisesRegex(Exception, r"model\.llm\.layers\.3\.attn\.wo_ud\.weight"):
+                ink.open_runner(pack, 64, dll=DLL, warm=False)
 
 
 @unittest.skipUnless(HAVE_SOURCE, NEED_SOURCE)
