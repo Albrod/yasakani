@@ -602,7 +602,8 @@ Machines Lab.
 ### Does it support tool calls?
 
 Since 0.3.1, in `yasakani serve`: the server accepts `tools` and `tool_choice` (`auto`, `none`, `required` or the name of a function) and
-returns the calls as `tool_calls`, with and without streaming. Terminal chat has no tools. The limits (the context, the thinking budget and
+returns the calls as `tool_calls`, with and without streaming. With `required` (also among several tools) or a named function the model
+can only write one of the offered names as the call, and the reply ends after that one call. Terminal chat has no tools. The limits (the context, the thinking budget and
 the GPU memory for dropped replies) are in the [README](../README.md#inkling-2-mini).
 
 ### What is not supported yet?
