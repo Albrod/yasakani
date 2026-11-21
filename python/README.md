@@ -406,7 +406,7 @@ platform path separator) to mask output token IDs (`-inf` logits before greedy a
   tokens that fits the free GPU memory (a multiple of 16,384, accounting for the larger 0.2.0 prefill buffers on cards with 30,000 MiB
   or more). Passing `--max-ctx` sets the length yourself (at most 524,288) and leaves out the draft output head (`bdraft2_k8.shead`)
   when it does not fit beside that context. With the shipped `bdraft2` drafter, per-token GPU memory stays 22,400 bytes/token
-  (~11.2 GiB at 524,288 tokens); the separate built-in MTP draft path (`yskn_load_draft`, not used by this package) also allocates a
+  (~10.9 GiB at 524,288 tokens); the separate built-in MTP draft path (`yskn_load_draft`, not used by this package) also allocates a
   `max_ctx × 5,120 × 2` byte hidden-state history (~5.4 GB at 524,288).
 * `yasakani selfcheck` does not accept `--yarn2`, because `selfcheck.json` references are made with the native rotary table.
 
