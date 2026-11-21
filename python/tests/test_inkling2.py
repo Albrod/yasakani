@@ -28,7 +28,11 @@ from yasakani import inkling2 as ink
 from yasakani._native import YasakaniError
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent.parent / "tools" / "convert"))
+CONVERT_DIR = HERE.parent.parent / "tools" / "convert"
+if not (CONVERT_DIR / "inkling2_convert.py").is_file():
+    # the engine zip holds the package and its tests without tools/: these tests need the converter of the source tree
+    raise unittest.SkipTest("tools/convert is not beside the package (run these tests from the source tree)")
+sys.path.insert(0, str(CONVERT_DIR))
 import inkling2_convert as conv  # noqa: E402
 
 SOURCE = os.environ.get("YASAKANI_TEST_INK2_SOURCE")
