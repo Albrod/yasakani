@@ -345,7 +345,7 @@ dense matrix in NVFP4 or MXFP8 has the same layout as a single expert.
 The names are the parameter names of the published checkpoint; an expert tensor is named without the suffix
 (`model.llm.layers.N.mlp.experts.w13`; its parts are the published `..._weight`, `..._weight_scale`, `..._weight_amax` and
 `..._weight_outer_scale_denominator`). `model.llm.unembed.weight` holds only the rows of the unpadded vocabulary. The vision
-tower and the drafter are not in the file.
+tower and the drafter are not in the file (a converted drafter is a file of its own, section 10.6).
 
 ### 10.4 The quality scheme
 
@@ -366,3 +366,38 @@ Against the published model, on 43 text windows (14,024 positions), measured on 
 
 `yasakani verify` compares the SHA-256 of every file of the model folder with yasakani.json and then the CRC-32 of every part.
 The package checks the CRC-32 of every part before it loads the file, and names the tensor whose bytes differ.
+
+### 10.6 Drafter files
+
+A drafter file holds the drafter of an Inkling-2 model (the published `mtp.safetensors`: three transformer layers and the
+recurrent head that proposes up to seven tokens) in the layout of this version: the same prefix, header and parts. It is a
+file of its own next to the model file, named in `yasakani.json` by the `drafter` entry with `"format": "yskn"`, `"version": 2`
+and the scheme (the published file is `"format": "hf-safetensors"`). It never goes into the model file: a package that knows
+only the published drafter refuses the entry by its format and generates without drafting, and the model file stays as it was
+(its SHA-256 does not change). `tools/convert/inkling2_convert.py --scheme quality` writes `mtp_d4.yskn` (`--drafter-scheme d4`,
+the default; `d8` writes `mtp_d8.yskn`, `published` places the published file instead).
+
+* `model.arch` is `inkling2-drafter`; `model.source` names the published drafter file (name, SHA-256, size); `model.scheme`
+  names the scheme; `model.mtp_config` is the `mtp_config` of the model's config.json.
+* The tensors keep the names of the published file. Every matrix (2 axes) larger than 64 KB in bfloat16, except
+  `markov_head.hidden_out.weight`, is stored in the encoding of the scheme; everything else (norm gains, biases, `fuse_weight`,
+  `mask_embed`, and `markov_head.hidden_out.weight`) is `bf16` as published.
+* Two more tensors: `fold.weight`, the folded head `U @ markov_head.hidden_out.weight` (`[V, 256]`, `V` the unpadded vocabulary,
+  `U` the output projection of the model file as the engine multiplies it; float64 products of the decoded values, rounded to
+  float32, then encoded as the scheme's matrices), and `fold.bias` = `U @ markov_head.hidden_out.bias` (`f32`, `[V]`). `model.fold`
+  names the `U` they were made with: `unembed_encoding` (`bf16`, `nvfp4` or `mxfp8`) and `unembed_sha256`, the SHA-256 of the
+  encoding name, a zero byte, and the bytes of `U` cut to `V` rows (bfloat16: the values; packed: `weight`, `scale`, and for
+  NVFP4 the float32 number `amax / denominator`). The `drafter` entry of `yasakani.json` repeats them as `folded_with`. An
+  engine whose `U` has another fingerprint folds the head again from `markov_head.hidden_out` and does not use `fold.weight`.
+
+| Scheme | The large matrices and `fold.weight` | File (Inkling-2 Mini) |
+|---|---|---|
+| `d4` | NVFP4, one factor per matrix (the encoding and the quantiser of the quality scheme's NVFP4 matrices) | 209.7 MB |
+| `d8` | MXFP8 (the quantiser of the quality scheme's MXFP8 matrices) | 382.2 MB |
+
+The published drafter file has 635.8 MB. The drafter cannot change what the model generates: every proposed token is checked by
+the model, and greedy output is the same token for token with any drafter file; the scheme changes how many proposals are
+accepted, the time of a draft call, memory and load time. An engine library that multiplies these matrices as they are stored
+says so by bit 4 of `ink2_capabilities()` and by drafter interface version 2 (`ink2_draft_abi()`); with an older library the
+package generates without drafting. `yasakani verify` checks the SHA-256 of the file and the CRC-32 of every part, as for the
+model file.
