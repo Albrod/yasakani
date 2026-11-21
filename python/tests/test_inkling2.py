@@ -981,7 +981,9 @@ class ShippedSelfcheckTests(unittest.TestCase):
         self.assertEqual((e["file"], e["size"], e["sha256"]), ("inkling_2_mini_quality.yskn", 15052423172,
                                                                "44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d"))
         self.assertEqual(sorted(e["cases"]), sorted(c["name"] for c in conv.SELFCHECK_CASES))
-        self.assertEqual(e["cases"]["official"]["prompt_ids"], conv.OFFICIAL_PROMPT_IDS)
+        self.assertEqual(sorted(e["cases"]), ["code", "english", "japanese"])
+        for c in e["cases"].values():
+            self.assertEqual(c["prompt_ids"][:2], conv.OFFICIAL_PROMPT_IDS[:2])          # the chat template's first ids
         for c in e["cases"].values():
             self.assertEqual(len(c["tokens"]), conv.SELFCHECK_TOKENS)
         self.assertEqual(conv.known_conversions("thinkingmachines/Inkling-2-Mini", "0" * 40, "quality"), [])
@@ -1011,7 +1013,8 @@ class ShippedSelfcheckConvertTests(unittest.TestCase):
         dest.parent.mkdir(parents=True, exist_ok=True)
         data = dest.parent / "known.json"
         data.write_text(json.dumps({"format": 1, "conversions": [entry]}), encoding="utf-8")
-        with mock.patch.object(conv, "KNOWN_SELFCHECK", data):
+        official = [dict(name="official", messages=conv.OFFICIAL_MESSAGES, template_kwargs=conv.OFFICIAL_TEMPLATE_KWARGS)]
+        with mock.patch.object(conv, "KNOWN_SELFCHECK", data), mock.patch.object(conv, "SELFCHECK_CASES", official):
             conv.convert(tiny_source(), dest, repo=entry["repository"], revision=entry["revision"], scheme="quality", threads=4)
         return json.loads((dest / "selfcheck.json").read_text(encoding="utf-8"))
 

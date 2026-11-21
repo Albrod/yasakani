@@ -78,11 +78,14 @@ OFFICIAL_PROMPT_IDS = [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 
                        156021, 151661, 149876, 158808, 149884, 152978, 152778, 13, 200010]
 
 # The prompts of the self-check of a re-quantised folder (greedy, SELFCHECK_TOKENS tokens each).
+# Each prompt was chosen so that along its 48 greedy tokens the chosen token leads the next best one by at least 0.1 (logits of
+# the reference implementation and of the engine on the converted weights): a self-check that also passes on other GPUs.
 SELFCHECK_CASES = [
-    dict(name="official", messages=OFFICIAL_MESSAGES, template_kwargs=OFFICIAL_TEMPLATE_KWARGS),
+    dict(name="english", messages=[{"role": "user", "content": "How many days are there in a week? Answer in one sentence."}],
+         template_kwargs={"reasoning_effort": "none"}),
     dict(name="japanese", messages=[{"role": "user", "content": "日本で一番高い山は何ですか。理由も一文で教えてください。"}],
          template_kwargs={"reasoning_effort": "none"}),
-    dict(name="code", messages=[{"role": "user", "content": "Write a Python function that returns the n-th Fibonacci number."}],
+    dict(name="code", messages=[{"role": "user", "content": "Write a Python function is_even(n) that returns True when n is even."}],
          template_kwargs={"reasoning_effort": "none"}),
 ]
 SELFCHECK_TOKENS = 48
@@ -378,14 +381,14 @@ def selfcheck_prompts(folder: Path):
 
 def reference_tokens(folder: Path, weights: str, cases, code_dir: str, device: str, n_tokens: int):
     """Greedy tokens of every case with the reference implementation (Ink2DevModel of ``code_dir``/ink2_dev.py) on the converted
-    weights, decoded as the engine is given them (dense matrices rounded to bfloat16)."""
+    weights, decoded exactly (float32: the values the engine multiplies; dense matrices are not rounded to bfloat16)."""
     t0 = time.time()
     sys.path.insert(0, str(Path(code_dir).resolve()))
     import torch
     import ink2_dev
     Y = package_modules()
     yf = Y.YsknFile(folder / weights)
-    view = Y.CheckpointView(yf, dense="bf16")
+    view = Y.CheckpointView(yf, dense="exact")
     cfg = json.loads((folder / "config.json").read_text(encoding="utf-8"))["text_config"]
     model = ink2_dev.Ink2DevModel(view, cfg, device=device)
     say("reference model on %s ready in %.0f s" % (device, time.time() - t0))
@@ -404,8 +407,8 @@ def reference_tokens(folder: Path, weights: str, cases, code_dir: str, device: s
             say("  reference %-9s %d tokens in %.1f s" % (c["name"], len(toks), time.time() - t1))
     del model
     yf.close()
-    impl = "Ink2DevModel (PyTorch %s, float32, %s), dense matrices decoded and rounded to bfloat16, experts decoded from the " \
-           "stored codes" % (torch.__version__, device)
+    impl = "Ink2DevModel (PyTorch %s, float32, %s), dense matrices decoded exactly from the file (not rounded to " \
+           "bfloat16), experts decoded from the stored codes" % (torch.__version__, device)
     return res, impl
 
 
