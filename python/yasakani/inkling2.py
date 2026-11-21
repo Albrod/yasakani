@@ -573,7 +573,7 @@ def find_dll(path: Optional[str] = None) -> Path:
         if p.is_file():
             return p
         tried.append(str(p))
-    raise YasakaniError("the Inkling-2 engine library (%s) was not found%s.  It is in the engine zip of YASAKANI 0.3.0 or newer, next "
+    raise YasakaniError("the Inkling-2 engine library (%s) was not found%s.  It is in the engine zip of YASAKANI 0.3.1 or newer, next "
                         "to yskn.dll: update the engine (START.cmd does this), or give its path with --dll or YASAKANI_INK2_DLL"
                         % (LIBRARY, " (looked for %s)" % "; ".join(tried) if tried else ""))
 

@@ -50,7 +50,7 @@ class FindLibraryTests(unittest.TestCase):
         with self.assertRaises(YasakaniError) as cm:
             ink.find_dll(str(self.engine / "yskn.dll"))
         self.assertIn(ink.LIBRARY, str(cm.exception))
-        self.assertIn("0.3.0", str(cm.exception))
+        self.assertIn("0.3.1", str(cm.exception))
         with self.assertRaises(YasakaniError):
             ink.find_dll(str(self.root / "nothing.dll"))
         os.environ["YASAKANI_INK2_DLL"] = str(self.root / "nothing.dll")

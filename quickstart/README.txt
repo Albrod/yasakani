@@ -1,4 +1,4 @@
-﻿YASAKANI quickstart 0.3.0
+﻿YASAKANI quickstart 0.3.1
 =========================
 
 日本語
@@ -52,7 +52,7 @@ START.cmd がすること
     今すぐ確かめる：メニューの 7 か START.cmd --action update
     前の版に戻す：START.cmd --action rollback
     確認を止める：START.cmd --no-update-check（戻すときは --update-check）
-  - Inkling-2 Mini（0.3.0 から試験的に対応。文章だけ・24 GB 以上のカード）は、モデルの質問には出ません。
+  - Inkling-2 Mini（0.3.1 から試験的に対応。文章だけ・24 GB 以上のカード）は、モデルの質問には出ません。
     Hugging Face から取得して変換したフォルダーを、START.cmd --model-dir <フォルダー> で開きます。
     手順はリポジトリの README.ja.md の「Inkling-2 Mini」にあります。
   - 手で入れる手順と、くわしい説明は https://github.com/yasakani-dev/yasakani にあります。
@@ -104,7 +104,7 @@ Good to know
     An update copies the current start files to the backup folder and installs the engine and the package again
     (the models are kept). Check now: 7 in the menu or START.cmd --action update. Go back: START.cmd --action rollback.
     Turn the check off: START.cmd --no-update-check (on again: --update-check).
-  - Inkling-2 Mini (experimental since 0.3.0; text only; a card with 24 GB or more) is not in the model question.
+  - Inkling-2 Mini (experimental since 0.3.1; text only; a card with 24 GB or more) is not in the model question.
     Download it from Hugging Face, convert it, and open the folder with START.cmd --model-dir <folder>.
     The steps are in the section "Inkling-2 Mini" of README.md in the repository.
   - The manual steps and the full documentation are at https://github.com/yasakani-dev/yasakani
