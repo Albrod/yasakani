@@ -2,7 +2,7 @@
 # Copyright (c) 2026 the YASAKANI authors
 """YASAKANI: a fast local inference engine for Qwen3.8-27B on one NVIDIA RTX GPU (tested and tuned on the RTX 5090 under Windows)."""
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 BUILD_NOTE = ""                      # "test build" for test builds (0.1.7.dev1); empty for releases
 
 from ._native import NativeLib, YasakaniError, find_library      # noqa: F401
