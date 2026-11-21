@@ -70,8 +70,7 @@ def open_stack(args, warm: bool = True):
     ctx = context_of(args, pack)
     draft, depth = draft_options(args)
     _select_gpu(args)
-    with open(pack.root / "config.json", encoding="utf-8") as f:
-        kv = ink.bytes_per_position(json.load(f)) * ctx
+    kv = ink.bytes_per_position(ink.read_config(pack.root)) * ctx
     _say("loading %s (%s of weights, context %d tokens, key/value cache %s) ..." % (pack.model_id, _gb(pack.weights.stat().st_size), ctx, _gb(kv)))
     t0 = time.time()
     try:

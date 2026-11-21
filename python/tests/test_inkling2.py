@@ -1012,6 +1012,117 @@ class ShippedSelfcheckConvertTests(unittest.TestCase):
             self.assertIn("no expected tokens were made", sc["note"])
 
 
+# ---- malformed model files: clean errors -------------------------------------------------------------------------------------------
+def yskn_bytes(header) -> bytes:
+    """A YSKN version 2 file with this JSON header (CRC-32 correct) and no data."""
+    import zlib
+    from yasakani import ink2_yskn as Y
+    js = json.dumps(header).encode("ascii")
+    data_off = -(-(Y.PREFIX_BYTES + len(js)) // Y.ALIGN) * Y.ALIGN
+    head = Y.MAGIC + struct.pack("<IQQQII", Y.VERSION, len(js), data_off, data_off, zlib.crc32(js), 0)
+    return (head + js).ljust(data_off, b"\0")
+
+
+def safetensors_bytes(header, data: bytes = b"", header_len=None) -> bytes:
+    js = json.dumps(header).encode("utf-8")
+    return struct.pack("<Q", len(js) if header_len is None else header_len) + js + data
+
+
+class MalformedFileTests(unittest.TestCase):
+    def test_yskn_header_of_wrong_types(self):
+        from yasakani import ink2_yskn as Y
+        base = {"format": "yskn", "version": 2}
+        t16 = {"name": "a", "encoding": "bf16", "shape": [2, 16],
+               "parts": [{"part": "data", "dtype": "bf16", "shape": [2, 16], "nbytes": 64, "offset": 4096}]}
+        cases = [
+            ([], "does not describe a YSKN version 2 file"),
+            (dict(base, tensors={"a": 1}), r'"tensors" is not a list'),
+            (dict(base, tensors=[1]), "tensor entry 0 of the header has no name"),
+            (dict(base, tensors=[dict(t16, shape=["2", 16])]), "not an integer"),
+            (dict(base, tensors=[dict(t16, shape=[-2, 16])]), "negative size"),
+            (dict(base, tensors=[dict(t16, parts={"data": {}})]), "not a list of named parts"),
+            (dict(base, tensors=[dict(t16, parts=[dict(t16["parts"][0], nbytes=64.0)])]), "nbytes is not an integer"),
+            (dict(base, tensors=[dict(t16, parts=[dict(t16["parts"][0], offset="4096")])]), "offset is not an integer"),
+            (dict(base, tensors=[dict(t16, parts=[dict(t16["parts"][0], offset=-4096)])]), "offset out of range"),
+            (dict(base, tensors=[dict(t16, role="experts")]), "experts stored as bf16"),
+            (dict(base, alignment=1.5, tensors=[]), "alignment"),
+            (dict(base, model=[1], tensors=[]), r'"model" is not an object'),
+        ]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
+            for k, (header, msg) in enumerate(cases):
+                path = Path(t) / ("h%d.yskn" % k)
+                path.write_bytes(yskn_bytes(header))
+                with self.assertRaisesRegex(Y.FormatError, msg):
+                    Y.YsknFile(path).close()
+            path = Path(t) / "ok.yskn"
+            path.write_bytes(yskn_bytes(dict(base, tensors=[])))
+            with Y.YsknFile(path) as yf:
+                self.assertEqual(yf.tensors, {})
+
+    def test_safetensors_header_and_offsets(self):
+        from yasakani import _ink2_ckpt as C
+        entry = {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}
+        cases = [
+            (safetensors_bytes({"a": entry}, b"\0" * 8, header_len=1 << 40), "larger than the file"),
+            (safetensors_bytes([1], b""), "not a JSON object"),
+            (b"\x05\0\0\0\0\0\0\0{abc}", "not JSON"),
+            (safetensors_bytes({"a": dict(entry, data_offsets=[-8, 0])}, b"\0" * 8), "not inside the file"),
+            (safetensors_bytes({"a": dict(entry, data_offsets=[0, 16])}, b"\0" * 8), "not inside the file"),
+            (safetensors_bytes({"a": dict(entry, data_offsets=[8, 0])}, b"\0" * 8), "not inside the file"),
+            (safetensors_bytes({"a": dict(entry, data_offsets=[0, "8"])}, b"\0" * 8), "not two integers"),
+            (safetensors_bytes({"a": dict(entry, shape="2")}, b"\0" * 8), "not a list of sizes"),
+            (safetensors_bytes({"a": 3}, b""), "not an object"),
+            (b"\0\0\0", "not a safetensors file"),
+        ]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
+            for k, (raw, msg) in enumerate(cases):
+                path = Path(t) / ("c%d.safetensors" % k)
+                path.write_bytes(raw)
+                with self.assertRaisesRegex(ValueError, msg):
+                    C.Checkpoint(str(path))
+            path = Path(t) / "size.safetensors"
+            path.write_bytes(safetensors_bytes({"a": dict(entry, shape=[3])}, b"\0" * 8))
+            ck = C.Checkpoint(str(path))
+            with self.assertRaisesRegex(ValueError, "8 bytes of data for a F32 tensor of shape"):
+                ck.raw("a")
+            del ck
+            path = Path(t) / "good.safetensors"
+            path.write_bytes(safetensors_bytes({"a": entry}, np.array([1, 2], np.float32).tobytes()))
+            ck = C.Checkpoint(str(path))
+            self.assertEqual(ck.f32("a").tolist(), [1.0, 2.0])
+            ck.data._mmap.close()
+
+    def test_config_beyond_the_engine(self):
+        import types
+        with tempfile.TemporaryDirectory() as t:
+            cfg = Path(t) / "config.json"
+            for text, msg in ((dict(num_hidden_layers=ink.MAX_LAYERS + 1), "num_hidden_layers is 65"),
+                              (dict(num_hidden_layers=0), "num_hidden_layers is 0"),
+                              (dict(num_hidden_layers="24"), "num_hidden_layers is '24'"),
+                              (dict(num_hidden_layers=6, layer_types=["hybrid"] * 5), "layer_types"),
+                              (dict(loop_config=[1]), "loop_config")):
+                cfg.write_text(json.dumps({"text_config": text}), encoding="utf-8")
+                with self.assertRaisesRegex(YasakaniError, msg):
+                    ink.read_config(t)
+                with self.assertRaisesRegex(YasakaniError, msg):             # before the library is looked for or called
+                    ink.Ink2Engine(types.SimpleNamespace(root=Path(t)), 64, dll=str(Path(t) / "missing.dll"))
+            cfg.write_text(json.dumps({"model_type": "inkling2_loop"}), encoding="utf-8")
+            with self.assertRaisesRegex(YasakaniError, "no text_config"):
+                ink.read_config(t)
+            cfg.write_text(json.dumps({"text_config": {"num_hidden_layers": ink.MAX_LAYERS}}), encoding="utf-8")
+            self.assertEqual(ink.read_config(t)["text_config"]["num_hidden_layers"], 64)
+
+    def test_binding_template_is_sandboxed(self):
+        from jinja2.exceptions import SecurityError
+        from yasakani import _ink2_native
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "chat_template.jinja").write_text("{{ messages.append(1) }}", encoding="utf-8")
+            with self.assertRaises(SecurityError):
+                _ink2_native.render_chat(t, [{"role": "user", "content": "hi"}])
+            (Path(t) / "chat_template.jinja").write_text("{% for m in messages %}{{ m.content }}{% break %}{% endfor %}",
+                                                       encoding="utf-8")
+            self.assertEqual(_ink2_native.render_chat(t, [{"role": "user", "content": "hi"}, {"role": "user", "content": "x"}]), "hi")
+
 
 if __name__ == "__main__":
     unittest.main()

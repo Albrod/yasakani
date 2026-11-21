@@ -246,6 +246,29 @@ def official_key(name):
     return key, ""
 
 
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _check_entry(path, name, entry, room):
+    """One tensor entry of the header: dtype (a string), shape (sizes >= 0), data_offsets [begin, end] inside the data
+    (``room`` bytes after the header). ValueError with the tensor's name otherwise."""
+    if not isinstance(entry, dict):
+        raise ValueError("%s: the header entry of %s is not an object" % (path, name))
+    if not isinstance(entry.get("dtype"), str):
+        raise ValueError("%s: %s has no dtype" % (path, name))
+    shape = entry.get("shape")
+    if not isinstance(shape, list) or not all(_is_int(n) and n >= 0 for n in shape):
+        raise ValueError("%s: the shape of %s is not a list of sizes: %r" % (path, name, shape))
+    offsets = entry.get("data_offsets")
+    if not isinstance(offsets, list) or len(offsets) != 2 or not all(_is_int(n) for n in offsets):
+        raise ValueError("%s: the data_offsets of %s are not two integers: %r" % (path, name, offsets))
+    begin, end = offsets
+    if begin < 0 or end < begin or end > room:
+        raise ValueError("%s: the data of %s (bytes %d to %d) is not inside the file (%d bytes of data): truncated or damaged"
+                         % (path, name, begin, end, room))
+
+
 class Checkpoint:
     """Memory-mapped safetensors file.
 
@@ -257,11 +280,26 @@ class Checkpoint:
     def __init__(self, path):
         self.path = path
         self.data = np.memmap(path, dtype=np.uint8, mode="r")
+        size = int(self.data.shape[0])
+        if size < 8:
+            raise ValueError("%s is not a safetensors file (%d bytes)" % (path, size))
         (header_len,) = struct.unpack("<Q", self.data[:8].tobytes())
-        header = json.loads(self.data[8 : 8 + header_len].tobytes().decode("utf-8"))
-        self.metadata = header.pop("__metadata__", {})
-        self.entries = header
+        if header_len > size - 8:
+            raise ValueError("%s: the header length %d is larger than the file (%d bytes): truncated or not a safetensors file"
+                             % (path, header_len, size))
+        try:
+            header = json.loads(self.data[8 : 8 + header_len].tobytes().decode("utf-8"))
+        except ValueError as ex:
+            raise ValueError("%s: the header is not JSON (%s)" % (path, ex)) from None
+        if not isinstance(header, dict):
+            raise ValueError("%s: the header is not a JSON object" % path)
+        metadata = header.pop("__metadata__", {})
+        self.metadata = metadata if isinstance(metadata, dict) else {}
         self.base = 8 + header_len
+        room = size - self.base
+        for name, entry in header.items():
+            _check_entry(path, name, entry, room)
+        self.entries = header
         self.used = {}  # checkpoint name -> what the reference model uses it for
 
     def names(self):
@@ -279,9 +317,15 @@ class Checkpoint:
         uint16 bits, float8 as uint8 bits)."""
         entry = self.entries[name]
         begin, end = entry["data_offsets"]
+        if entry["dtype"] not in _NP_DTYPES:
+            raise ValueError("%s: dtype %s is not supported" % (name, entry["dtype"]))
         np_dtype = np.dtype(_NP_DTYPES[entry["dtype"]])
-        count = int(np.prod(entry["shape"], dtype=np.int64)) if entry["shape"] else 1
-        assert (end - begin) == count * np_dtype.itemsize, name
+        count = 1
+        for n in entry["shape"]:
+            count *= n
+        if (end - begin) != count * np_dtype.itemsize:
+            raise ValueError("%s: %d bytes of data for a %s tensor of shape %s (%d bytes)"
+                             % (name, end - begin, entry["dtype"], list(entry["shape"]), count * np_dtype.itemsize))
         view = self.data[self.base + begin : self.base + end].view(np_dtype).reshape(entry["shape"])
         if use is not None:
             self.used[name] = use

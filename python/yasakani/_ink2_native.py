@@ -106,8 +106,9 @@ def text_config(config):
 
 
 def render_chat(model_dir, messages, **template_kwargs):
-    """chat_template.jinja -> text without the transformers package."""
-    import jinja2
+    """chat_template.jinja -> text without the transformers package (in jinja2's sandbox, as the package's formatter)."""
+    from jinja2.ext import loopcontrols
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
 
     with open(os.path.join(model_dir, "chat_template.jinja"), encoding="utf-8") as f:
         source = f.read()
@@ -116,7 +117,7 @@ def render_chat(model_dir, messages, **template_kwargs):
     def raise_exception(message):
         raise ValueError(message)
 
-    env = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
+    env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=[loopcontrols])
     env.globals["raise_exception"] = raise_exception
     return env.from_string(source).render(messages=messages, add_generation_prompt=True, tools=None, **template_kwargs)
 

@@ -502,11 +502,37 @@ def backend_of(lib_info: str) -> str:
     return "cuda" if "cuda" in lib_info else "host"
 
 
+MAX_LAYERS = 64                  # the engine library takes at most this many layers (num_hidden_layers of config.json)
+
+
+def read_config(root) -> dict:
+    """config.json of a model folder, with the values the package and the engine rely on checked -> the parsed file.
+    A value that the engine library does not take gives a YasakaniError here, before the library is called."""
+    path = Path(root) / "config.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as ex:
+        raise YasakaniError("cannot read config.json in %s: %s" % (Path(root), ex))
+    t = config.get("text_config") if isinstance(config, dict) else None
+    if not isinstance(t, dict):
+        raise YasakaniError("config.json in %s has no text_config object" % Path(root))
+    n = t.get("num_hidden_layers", 24)
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_LAYERS:
+        raise YasakaniError("config.json: num_hidden_layers is %r; this version of the engine takes 1 to %d layers" % (n, MAX_LAYERS))
+    types = t.get("layer_types")
+    if types is not None and (not isinstance(types, list) or len(types) != n or not all(isinstance(x, str) for x in types)):
+        raise YasakaniError("config.json: layer_types is not a list of %d names (one per layer)" % n)
+    if t.get("loop_config") is not None and not isinstance(t["loop_config"], dict):
+        raise YasakaniError("config.json: loop_config is not an object")
+    return config
+
+
 class Ink2Engine:
     """The engine library with the state of one sequence: the ids it has read since the last reset, so that a prompt that only
     extends them (the next turn of a chat) reads only the new ids."""
 
     def __init__(self, pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, graph: bool = True, log=None):
+        read_config(pack.root)                               # values the library does not take stop here, with a message
         self.dll = find_dll(dll)
         self.binding_path = find_binding(self.dll)
         self.mod = load_binding(self.binding_path)

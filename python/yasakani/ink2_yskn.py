@@ -129,6 +129,23 @@ def part_shapes(encoding: str, shape: Sequence[int]) -> Dict[str, Tuple[int, ...
     raise FormatError("unknown encoding %r" % encoding)
 
 
+def _int(value, what: str) -> int:
+    """An integer of the header (not a bool, not a float); FormatError otherwise."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FormatError("%s is not an integer: %r" % (what, value))
+    return value
+
+
+def _sizes(value, what: str) -> Tuple[int, ...]:
+    """A shape of the header: a list of integers >= 0; FormatError otherwise."""
+    if not isinstance(value, list):
+        raise FormatError("%s is not a list of sizes: %r" % (what, value))
+    out = tuple(_int(v, what) for v in value)
+    if any(v < 0 for v in out):
+        raise FormatError("%s has a negative size: %r" % (what, value))
+    return out
+
+
 def _nbytes(dtype: str, shape: Sequence[int]) -> int:
     n = 1
     for s in shape:
@@ -290,25 +307,42 @@ class YsknFile:
             self.header = json.loads(js.decode("ascii"))
         except ValueError as ex:
             raise FormatError("the header is not JSON: %s" % ex)
-        if self.header.get("format") != "yskn" or self.header.get("version") != VERSION:
+        if not isinstance(self.header, dict) or self.header.get("format") != "yskn" or self.header.get("version") != VERSION:
             raise FormatError("the header does not describe a YSKN version 2 file")
         self.data_offset = data_off
         self.model = self.header.get("model") or {}
+        if not isinstance(self.model, dict):
+            raise FormatError("the header's \"model\" is not an object")
         self.tensors: Dict[str, dict] = {}
         spans = []
-        align = int(self.header.get("alignment") or ALIGN)
-        for e in self.header.get("tensors") or []:
+        align = _int(self.header.get("alignment") or ALIGN, "the header's \"alignment\"")
+        if align <= 0:
+            raise FormatError("the header's \"alignment\" is %d" % align)
+        tensors = self.header.get("tensors") or []
+        if not isinstance(tensors, list):
+            raise FormatError("the header's \"tensors\" is not a list")
+        for k, e in enumerate(tensors):
+            if not isinstance(e, dict) or not isinstance(e.get("name"), str) or not e["name"]:
+                raise FormatError("tensor entry %d of the header has no name" % k)
             enc = e.get("encoding")
             if enc not in ENCODINGS:
-                raise FormatError("%s: unknown encoding %r" % (e.get("name"), enc))
-            want = part_shapes(enc, e["shape"])
-            got = {p["part"]: p for p in e["parts"]}
-            if set(got) != set(want):
-                raise FormatError("%s: parts %s, expected %s" % (e["name"], sorted(got), sorted(want)))
+                raise FormatError("%s: unknown encoding %r" % (e["name"], enc))
+            if e.get("role") == "experts" and enc not in ("nvfp4", "mxfp8"):
+                raise FormatError("%s: experts stored as %s (expected nvfp4 or mxfp8)" % (e["name"], enc))
+            want = part_shapes(enc, _sizes(e.get("shape"), "%s: the shape" % e["name"]))
+            parts = e.get("parts")
+            if not isinstance(parts, list) or not all(isinstance(p, dict) and isinstance(p.get("part"), str) for p in parts):
+                raise FormatError("%s: the parts are not a list of named parts" % e["name"])
+            got = {p["part"]: p for p in parts}
+            if set(got) != set(want) or len(parts) != len(got):
+                raise FormatError("%s: parts %s, expected %s" % (e["name"], sorted(p["part"] for p in parts), sorted(want)))
             for pname, dt in ENCODINGS[enc]:
                 p = got[pname]
-                if p["dtype"] != dt or tuple(p["shape"]) != want[pname] or p["nbytes"] != _nbytes(dt, want[pname]):
-                    raise FormatError("%s %s: dtype, shape or size do not fit the encoding" % (e["name"], pname))
+                what = "%s %s" % (e["name"], pname)
+                fits = p.get("dtype") == dt and _sizes(p.get("shape"), what + ": the shape") == want[pname]
+                if not fits or _int(p.get("nbytes"), what + ": nbytes") != _nbytes(dt, want[pname]):
+                    raise FormatError("%s: dtype, shape or size do not fit the encoding" % what)
+                _int(p.get("offset"), what + ": the offset")
                 if p["offset"] % align or p["offset"] < data_off or p["offset"] + p["nbytes"] > self.size:
                     raise FormatError("%s %s: offset out of range or not aligned" % (e["name"], pname))
                 spans.append((p["offset"], p["offset"] + p["nbytes"], e["name"]))
