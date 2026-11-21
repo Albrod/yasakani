@@ -18,11 +18,13 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 from tests import support  # noqa: F401  (puts the package on the path)
 from yasakani import inkling2 as ink
+from yasakani._native import YasakaniError
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent / "tools" / "convert"))
@@ -412,6 +414,7 @@ class HostEngineTests(unittest.TestCase):
         from yasakani.chat import ChatParams
         p = ChatParams(messages=[{"role": "user", "content": "hi"}], max_tokens=3, temperature=0.0, ignore_eos=True,
                        template_kwargs={"reasoning_effort": "none"})
+        self.eng.reset()
         u = self.runner.run(p, lambda kind, text: None)
         self.assertEqual((u.completion_tokens, u.finish, u.cached_tokens), (3, "length", 0))
         first = list(self.eng.fed)
@@ -421,8 +424,30 @@ class HostEngineTests(unittest.TestCase):
         longer = first + self.fmt.encode("<|end_message|><|content_model_end_sampling|><|message_user|><|content_text|>more<|end_message|>")
         _, cached = self.eng.read_prompt(longer)
         self.assertEqual(cached, len(first))
-        _, cached = self.eng.read_prompt(ids)                      # shorter: read again from the start
+        logits, cached = self.eng.read_prompt(ids)                 # shorter: the positions after its first part are dropped
+        self.assertEqual(cached, len(ids) - 1)
+        self.assertEqual(self.eng.fed, ids)
+        self.assertEqual(self.eng.native.position(), len(ids))
+        self.eng.reset()
+        fresh, cached = self.eng.read_prompt(ids)                  # the same logits as reading it from the start
         self.assertEqual(cached, 0)
+        np.testing.assert_allclose(logits, fresh, rtol=0, atol=1e-3)
+        other = self.fmt.encode("<|message_user|><|content_text|>something else<|end_message|>")
+        _, cached = self.eng.read_prompt(other)                    # nothing in common: read from the start
+        self.assertEqual((cached, self.eng.fed), (0, other))
+
+    def test_prompt_after_an_engine_error_starts_from_a_reset(self):
+        ids, _ = self.fmt.prompt([{"role": "user", "content": "hi"}], {"reasoning_effort": "none"})
+        self.eng.read_prompt(ids)
+        with mock.patch.object(self.eng.native, "feed_many", side_effect=RuntimeError("feed_many: test")):
+            with self.assertRaisesRegex(YasakaniError, "engine step failed"):
+                self.eng.read_prompt(ids + self.fmt.encode("more words"))
+        self.assertIsNone(self.eng.fed)
+        _, cached = self.eng.read_prompt(ids)
+        self.assertEqual((cached, self.eng.fed), (0, ids))
+        with self.assertRaisesRegex(YasakaniError, "context of 256 positions is full"):
+            self.eng.read_prompt(list(ids) * (256 // len(ids) + 1))
+        self.assertEqual(self.eng.fed, ids)
 
     def test_requests_that_are_refused(self):
         from yasakani.chat import ChatParams, ContextLengthError, RequestError

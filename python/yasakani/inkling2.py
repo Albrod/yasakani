@@ -536,18 +536,46 @@ class Ink2Engine:
         return logits
 
     def read_prompt(self, ids: Sequence[int]) -> Tuple[np.ndarray, int]:
-        """Read the prompt; -> (logits after its last id, ids that did not have to be read again)."""
+        """Read the prompt; -> (logits after its last id, ids that did not have to be read again).
+
+        The ids already read are kept as far as the new prompt starts with them: when the prompt goes on from all of them (the
+        next turn of a chat) only the new ids are read; when it shares only a first part, the positions after that part are dropped
+        (``truncate``, up to the engine's rollback) and the rest is read.  All ids but the last are read in passes of several rows
+        (``feed_many``), the last one in a step that gives the logits."""
         ids = [int(i) for i in ids]
-        fed = self.fed
-        if fed is not None and 0 < len(fed) < len(ids) and ids[:len(fed)] == fed:
-            cached = len(fed)
-        else:
+        if not ids:
             self.reset()
-            cached = 0
-        logits = None
-        for t in ids[cached:]:
-            logits = self.step(t)
-        return logits, cached
+            return None, 0
+        if len(ids) > self.max_ctx:
+            raise YasakaniError("the context of %d positions is full" % self.max_ctx)
+        fed = self.fed
+        common = 0
+        if fed is not None:
+            limit = min(len(fed), len(ids) - 1)              # the last id is always read: its logits are needed
+            while common < limit and fed[common] == ids[common]:
+                common += 1
+        try:
+            if fed is None or common == 0:
+                self.reset()
+                common = 0
+            elif common < len(fed):
+                if len(fed) - common <= int(getattr(self.native, "rollback", 0)):
+                    self.native.truncate(common)
+                else:                                        # too far back for the caches: read again from the start
+                    self.reset()
+                    common = 0
+            rest = ids[common:]
+            self.fed = None                                  # state unknown until the reading ends
+            self.last_logits = None
+            if len(rest) > 1:
+                self.native.feed_many(rest[:-1])
+            logits = self.native.step(rest[-1])
+        except (RuntimeError, ValueError) as ex:
+            self.fed = None                                  # the next prompt starts from a reset
+            raise YasakaniError("engine step failed: %s" % ex) from ex
+        self.fed = ids
+        self.last_logits = logits
+        return logits, common
 
     # -- information ----------------------------------------------------------------------------------------------------------------
     def memory_used(self) -> int:
