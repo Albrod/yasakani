@@ -73,7 +73,6 @@ class Usage:
     queue_ms: Optional[float] = None              # served in parallel (serve --parallel): time the request waited for a stream slot
     parallel_avg: Optional[float] = None          # served in parallel: streams that shared its passes, on average
     ms_passes: int = 0                            # served in parallel: passes of the request in the multi-stream pass
-    spec: Optional[dict] = None                   # Inkling-2 with its drafter: draft_mode, draft_passes, tokens_per_pass
 
 
 class StopFilter:

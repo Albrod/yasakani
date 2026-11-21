@@ -4,9 +4,9 @@ English · [日本語](README.ja.md)
 
 <a name="what-it-is"></a>
 
-YASAKANI is an engine that runs the Qwen3.8-27B language model on a Windows PC with one NVIDIA RTX GPU. The developer has tested it on the RTX 5090 only. After setup you can chat and edit code offline. You can also connect your own development tools through its OpenAI-compatible API. Since 0.3.0 it also runs Inkling-2 Mini by Thinking Machines Lab, as an experimental, text-only model ([details](#inkling-2-mini)).
+YASAKANI is an engine that runs the Qwen3.8-27B language model on a Windows PC with one NVIDIA RTX GPU. The developer has tested it on the RTX 5090 only. After setup you can chat and edit code offline. You can also connect your own development tools through its OpenAI-compatible API.
 
-**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.3.0/yasakani-quickstart-0.3.0.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.3.0/fast_live_uncut.mp4)
+**[Download for Windows](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.1/yasakani-quickstart-0.2.1.zip)** · [Compare eight engines](docs/MEASUREMENTS.md#thinking-off-the-table-of-the-readme-average-without-repetition-loops-etc-toks) · [Watch an uncut code edit](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.1/fast_live_uncut.mp4)
 
 <a name="two-models"></a>
 <a name="what-you-need"></a>
@@ -40,7 +40,7 @@ Contributors have tested a Linux build from source. AMD and Mac are future targe
 
 You need 64-bit Windows 11, Python 3.10 or later, NVIDIA driver 580 or later, the Visual C++ 2015–2022 x64 runtime, and 20 GB of free disk space.
 
-1. Extract the v0.3.0 Windows quickstart ZIP to a path with only English letters and digits, such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.3.0)
+1. Extract the v0.2.1 Windows quickstart ZIP to a path with only English letters and digits, such as `C:\yasakani`. [Release files and SHA-256 checksums](https://github.com/yasakani-dev/yasakani/releases/tag/v0.2.1)
 2. Open **`START.cmd`** and choose a model. On the first run it downloads the engine and model files, checks them, and runs a GPU self-check.
 3. A menu comes last. Press Enter and the page opens in your browser. It shows the model loading; when that is done, type your first prompt. The page has four tabs: chat, a speed test (a rough figure measured in the browser; `yasakani bench` is the standard measurement), the API address for other apps, and model and status (GPU memory, and a switch between models when two or more are downloaded). It also has a quit button: it stops the model, and the black window then closes by itself.
 4. From the second run on (once the model has passed the checks), `START.cmd` opens this page directly, with no model question and no menu. For the menu (measure the speed, compare look-ahead on and off, chat in the terminal, start the server), open a command prompt in that folder and type `START.cmd --menu`.
@@ -49,7 +49,7 @@ To use YASAKANI from another app, set the app's API address to the one on the AP
 
 In terminal chat, type `/effort medium` to make the model think for a shorter time, or `/think off` to turn thinking off. [Manual installation](python/README.md#install) · [API guide](python/README.md#the-server)
 
-**Updates.** Since 0.1.7, the quickstart can update itself (from v0.1.6 or older, download the 0.3.0 quickstart ZIP by hand once). At most once a day, before it shows the menu or before it opens the browser page directly, it asks GitHub whether there is a newer release and says so first. If there is one, it shows the old and new version. Before the menu it then asks, and it changes nothing without a yes. The browser page shows the same offer with an **Update** button. When the page opens directly, nothing is asked in the black window, and nothing changes until you press that button. You can also choose “check for a new version” in the menu, run `START.cmd --action update`, or type `yasakani update`. The models stay; the engine and the Python package are installed again. `START.cmd --action rollback` goes back to the version before. To turn the daily check off: `START.cmd --no-update-check`. [What the check sends, and how the files are checked](docs/FAQ.md#how-does-the-update-work)
+**Updates.** Since 0.1.7, the quickstart can update itself (from v0.1.6 or older, download the 0.2.1 quickstart ZIP by hand once). At most once a day, before it shows the menu or before it opens the browser page directly, it asks GitHub whether there is a newer release and says so first. If there is one, it shows the old and new version. Before the menu it then asks, and it changes nothing without a yes. The browser page shows the same offer with an **Update** button. When the page opens directly, nothing is asked in the black window, and nothing changes until you press that button. You can also choose “check for a new version” in the menu, run `START.cmd --action update`, or type `yasakani update`. The models stay; the engine and the Python package are installed again. `START.cmd --action rollback` goes back to the version before. To turn the daily check off: `START.cmd --no-update-check`. [What the check sends, and how the files are checked](docs/FAQ.md#how-does-the-update-work)
 
 <a name="speed"></a>
 
@@ -161,84 +161,6 @@ Limits:
 * Without a `seed`, a request's result depends on the order in which requests arrive.
 
 [Questions and measurements](docs/FAQ.md#several-requests-at-once-experimental)
-
-<a name="inkling-2-mini"></a>
-
-## Inkling-2 Mini (experimental, new in 0.3.0)
-
-Inkling-2 Mini is a language model that Thinking Machines Lab published on November 20, 2026 ([thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)). It has 26.4 billion weights in a mixture of experts: for every token each layer picks 8 of its 128 experts. It is published under Apache-2.0, and its model card also names the [Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/), which applies to the weights and to modified versions. YASAKANI runs it with a second engine library in the engine zip; the Qwen3.8-27B models run on `yskn.dll` as before (the file of 0.2.0).
-
-What you need: 64-bit Windows 11, an NVIDIA RTX card with 24 GB or more (cards under 24 GB cannot hold the model), the YASAKANI 0.3.0 quickstart or package, and about 20 GB of free disk for the download. The converter links the weights file into the new folder when both are on the same drive, so the folder takes almost no more space there (on another drive the converter copies the file).
-
-1. Download the published model with the Hugging Face command line tool (`hf`, from the Python package `huggingface_hub`), at the revision we checked.
-2. Convert it with `tools/convert/inkling2_convert.py` from the source of this release (the source code ZIP on the release page, or a clone of this repository). By default the converter does not change the weights: it writes the files our package needs next to them (the manifest `yasakani.json` with the SHA-256 of every file, `selfcheck.json` and `NOTICE`). The image part in the download is not used. The drafter (`mtp.safetensors`) is linked or copied into the folder in the same way as the weights.
-3. Check the folder, then chat, start the server or open the browser page.
-
-In a quickstart folder, run `yasakani_env.cmd` first in the command prompt; it puts the quickstart's `python` and `yasakani` on the path.
-
-```bat
-cd /d C:\yasakani
-yasakani_env.cmd
-hf download thinkingmachines/Inkling-2-Mini --revision ed40e7da625f594fc9c4990f5f66be24873c22d7 --local-dir D:\models\Inkling-2-Mini-hf
-python C:\src\yasakani-0.3.0\tools\convert\inkling2_convert.py --source D:\models\Inkling-2-Mini-hf --out D:\models\inkling2-mini
-yasakani verify --model-dir D:\models\inkling2-mini
-yasakani selfcheck --model-dir D:\models\inkling2-mini
-yasakani chat --model-dir D:\models\inkling2-mini
-yasakani serve --model-dir D:\models\inkling2-mini
-START.cmd --model-dir D:\models\inkling2-mini
-```
-
-The converter is run with the quickstart's Python (the `python` that `yasakani_env.cmd` puts on the path): it uses numpy, tokenizers and
-jinja2, which are installed there with the package. The commands find the engine library `yskn_inkling2.dll` by themselves: it is next to
-`yskn.dll` in the engine folder of the quickstart, and `yasakani_env.cmd` names that `yskn.dll`. Give `--dll` only for a library in
-another place (the path of `yskn_inkling2.dll`, or of the `yskn.dll` it is next to).
-
-`selfcheck` runs the prompt of the official text test of the model's code in the transformers library and compares the 30 greedy tokens with the ones that test expects. `serve` gives the same OpenAI-compatible API as for the Qwen models, with the model id `inkling-2-mini`. `START.cmd --model-dir` opens the browser page with this folder. It first runs `info`, `verify` and `selfcheck` on the folder at every
-start (in our run the checks and the start of the page took 35 to 40 s with the files in the Windows file cache); the other options of
-`START.cmd` work as before.
-
-**Speed** (one RTX 5090, Windows 11, November 21, 2026, the published weights, one request at a time): generation with greedy decoding, thinking off and 256 tokens ran at 166.3 tokens/s with `yasakani bench --draft off` (mean of its 4 runs; 165.6 with the engine alone in the same job) and at 207.7 tokens/s with the default `--draft auto` (the drafter, below). Chat in the terminal with thinking on at low effort ran at 155.7 tokens/s (one question in Japanese, 207 tokens, `--draft auto`); the server streamed 174 tokens/s (a short question in Japanese, 145 tokens with thinking), with the first piece 0.08 s after the request. A long conversation is slower: from position 1,024 on, a token took 7.3 to 7.5 ms (133 to 138 tokens/s). Prompt reading: 1,000 tokens/s for a prompt of 4,056 tokens and 1,090 tokens/s for 1,011 tokens through the package (3 runs each, from an empty context); with the engine alone 950 to 1,050 tokens/s from 1,000 to 4,000 tokens and 760 to 860 tokens/s at 16,000. When a prompt starts like the one before (the next turn of a chat), only the new part is read. The model was ready 6.4 s after the start without the drafter and 8.4 s with it (files in the Windows file cache). With the default context of 32,768 tokens the engine allocated 22.1 GB of GPU memory (2.15 GB of it the key/value cache), 23.2 GB with the drafter; `--max-ctx` changes the context, and the cache grows with it.
-
-**Answers.** On the RTX 5090 our engine gave the 30 tokens that the official test expects, and it agreed with our own CPU implementation of the model (hidden states within 1e-4, the same experts chosen). We measured agreement with the published model only, not accuracy on tasks.
-
-**Drafter.** Since 0.3.0 the package uses the drafter that comes with the model (`mtp.safetensors`, a few small layers published with the weights). The drafter guesses the next few tokens, and the model checks all of them in one pass. A guessed token that the model would not have chosen itself is thrown away, so the output does not change: greedy decoding gives the same tokens, and sampling picks each token with the same probabilities. `--draft` chooses how it is used: `auto` (the default) uses it only while it makes generation faster, `on` always uses it, and `off` does not load it (the environment variable `YASAKANI_DRAFT` does the same). `--draft-depth N` sets how many tokens it guesses per pass (1 to 7). The start-up lines say whether the drafter was loaded and which mode is used. A model folder without the file still works, without the drafter.
-
-Speed with the drafter (one RTX 5090, Windows 11, November 21, 2026, greedy, 200 tokens per prompt, measured with the engine and its Python binding in one job; Japanese prose: 2 prompts, one with thinking; code: 2 prompts, one with thinking; JSON: 1 prompt; math: 1 prompt with thinking). Tokens per pass are those of `--draft auto`:
-
-| text | published weights, `--draft off` | published weights, `--draft auto` | `--scheme quality`, `--draft off` | `--scheme quality`, `--draft auto` | tokens per pass (published / quality) |
-|---|---|---|---|---|---|
-| Japanese prose | 164.3 tokens/s | 162.3 tokens/s | 202.8 tokens/s | 195.4 tokens/s | 1.28 / 1.11 |
-| code | 164.4 tokens/s | 200.8 tokens/s | 203.1 tokens/s | 211.4 tokens/s | 2.35 / 1.76 |
-| JSON | 164.1 tokens/s | 260.4 tokens/s | 202.7 tokens/s | 256.9 tokens/s | 3.88 / 3.57 |
-| math | 164.8 tokens/s | 177.8 tokens/s | 203.7 tokens/s | 212.8 tokens/s | 1.72 / 1.54 |
-
-Over these and one English prompt (7 prompts), `--draft auto` gave 186.0 against 164.4 tokens/s with the published weights and 210.1 against 203.0 tokens/s with the `--scheme quality` weights. In every run the greedy output was the same, token for token, with and without the drafter (at every depth from 1 to 7 and with `auto`). Where the guesses are seldom right, `auto` costs a little: with the `--scheme quality` weights, Japanese prose was 3.6 % slower, and a run of 1,000 tokens of English prose 2.8 % slower (182.9 against 188.2 tokens/s). With `yasakani bench` (its 4 prompts, thinking off, 256 tokens, mean of 4 runs, same job as above): published weights 166.3 tokens/s with `--draft off` and 207.7 with `--draft auto`; `--scheme quality` 209.4 and 213.9 tokens/s.
-
-The drafter helps most where the next tokens are easy to guess (code, JSON, math). `yasakani chat` and `yasakani bench` print the tokens per pass; the server gives them in `timings` (`tokens_per_pass`, `draft_passes`, `draft_n`, `draft_n_accepted`).
-
-**Smaller converted weights (`--scheme quality`).** The converter can also write the weights again in fewer bits: with `--scheme quality` it stores most dense matrices in 4 or 8 bits and re-packs the 8-bit experts of layers 20 to 23 to 4 bits, in one `.yskn` file of 15.05 GB (the published file has 19.5 GB). Against the published model on 43 text windows (14,024 positions: the model's own thinking and answers, English and Japanese prose, code) the KL divergence was 0.0110, and the most likely next token was the same at 96.0 % of the positions. The engine multiplies these matrices as they are stored, so the folder is faster and needs less GPU memory. Measured in one job on the RTX 5090 (`yasakani bench --draft off`, greedy, thinking off, 256 tokens, mean of 4 runs): 209.4 tokens/s against 166.3 for the published weights, and 213.9 against 207.7 tokens/s with the default `--draft auto`. At the default context of 32,768 tokens the engine allocated 18.3 instead of 22.1 GB (19.4 instead of 23.2 GB with the drafter). Prompt reading through the package was a little slower: 925 against 998 tokens/s for 4,056 tokens and 1,002 against 1,090 tokens/s for 1,011 tokens (3 runs each). The model was ready 2.5 s after the start without the drafter and 7.2 s with it (the drafter is prepared on the CPU when it loads). The conversion takes about 4 minutes on the CPU; the new folder needs about 15 GB of disk.
-
-```bat
-python C:\src\yasakani-0.3.0\tools\convert\inkling2_convert.py --source D:\models\Inkling-2-Mini-hf --out D:\models\inkling2-mini-quality --scheme quality
-yasakani verify --model-dir D:\models\inkling2-mini-quality
-yasakani selfcheck --model-dir D:\models\inkling2-mini-quality
-yasakani chat --model-dir D:\models\inkling2-mini-quality
-START.cmd --model-dir D:\models\inkling2-mini-quality
-```
-
-`verify` compares every file with its SHA-256 and every tensor with its CRC-32. `selfcheck` runs three short prompts (one in English, one in Japanese, one asking for code) and compares 48 greedy tokens of each with the tokens that a reference implementation of the model gave on these converted weights, decoded exactly as the engine multiplies them. We chose prompts where, at each of the 48 tokens, the chosen token leads the next best one by at least 0.11 in the logits (in the reference and in our engine), so that small differences of arithmetic on other GPUs should not change the result; only the RTX 5090 was tested. The conversion on the CPU gives the same file every time: when the `.yskn` file has the SHA-256 of our conversion of revision `ed40e7da625f594fc9c4990f5f66be24873c22d7` (`44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d`, 15,052,423,172 bytes), the converter writes those tokens into `selfcheck.json`, and `START.cmd --model-dir` runs its checks on this folder as on the published weights. A file that differs (for example one made from another revision) gets a `selfcheck.json` without cases: `selfcheck` then has nothing to compare, and `START.cmd --model-dir` needs `--skip-checks` for that folder (it stops at the self-check otherwise).
-
-**Limits.** Experimental in 0.3.0.
-
-* Text only (the original model also reads images).
-* One request at a time: no `--parallel`.
-* No tools or function calling.
-* The drafter speeds up text that is easy to guess more than free prose. `--draft auto` stops using it where it does not pay, but its trial passes still cost a little there (up to 3.6 % on Japanese prose in our runs); `--draft off` avoids that.
-* `bench --edit` and image input are not available for this model.
-* Tested on one RTX 5090 under Windows 11 only; not on other GPUs and not on Linux.
-* Thinking off is our own setting ([FAQ](docs/FAQ.md#inkling-2-mini)).
-
-[FAQ](docs/FAQ.md#inkling-2-mini) · [Commands and settings](python/README.md#inkling-2-mini-experimental)
 
 ## Community conversions
 

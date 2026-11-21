@@ -6,8 +6,7 @@
 
 An inference engine for running **Qwen3.8-27B** on your own Windows PC with **one NVIDIA RTX GPU** (tested on the RTX 5090). It is GPU kernels, a file format for the
 compressed model, and a runtime, with an OpenAI-compatible server, a terminal chat, a benchmark and a self-check. One person in Japan built it. It is
-not a general-purpose engine: one model, tuned on one card. Since 0.3.0 it also runs a second model, Inkling-2 Mini, as an experimental,
-text-only model ([below](#inkling-2-mini)).
+not a general-purpose engine: one model, tuned on one card.
 
 ## Which model should I download?
 
@@ -512,100 +511,10 @@ Known limits:
 * The wait limit counts only waiting caused by kept places and next turns. A next turn that runs alone (because no place is free) is not stopped for a new request, so a new request can wait longer than the limit.
 * Over long runs the GPU memory of the whole card rose by up to 71 MiB. In a 30-minute run with a development build the server's own GPU memory did not change.
 
-<a name="inkling-2-mini"></a>
-
-## Inkling-2 Mini (experimental, new in 0.3.0)
-
-Inkling-2 Mini is a language model by Thinking Machines Lab, published on November 20, 2026. Since 0.3.0 YASAKANI runs it as an
-experimental model, with a second engine library. How to download, convert and start it: [README](../README.md#inkling-2-mini).
-
-### Which cards can run it, and why 24 GB?
-
-We ran it on one RTX 5090 (32 GB) under Windows 11 only. With the default context of 32,768 tokens the engine allocated 22.1 GB of GPU
-memory (2.15 GB of it the key/value cache), and 23.2 GB with the drafter loaded (the default). The GPU as a whole had 24.2 GB in use
-without and 25.4 GB with the drafter; with the converted weights of `--scheme quality` the engine allocated 18.3 / 19.4 GB, and the GPU
-had 20.4 / 21.6 GB in use. `--draft off` does not load the drafter. Cards under 24 GB cannot hold it. We have not run it on a 24 GB card (RTX 3090, 3090 Ti or 4090); with the desktop also on that card
-there is less room, and a smaller `--max-ctx` needs less memory. Linux is not tested.
-
-### How fast is it, and under which conditions?
-
-One RTX 5090, Windows 11, November 21, 2026, the published weights, one request at a time:
-
-* Generation with greedy decoding, thinking off, 256 tokens: `yasakani bench --draft off` 166.3 tokens/s (mean of its 4 runs; 165.6
-  tokens/s with the engine alone in the same job), and 207.7 tokens/s with the default `--draft auto`. With the converted weights of
-  `--scheme quality`: 209.4 and 213.9 tokens/s in the same job. Speeds by kind of text with and without the drafter:
-  [README](../README.md#inkling-2-mini).
-* Terminal chat with thinking on at low effort and `--draft auto`: 155.7 tokens/s (one question in Japanese, 207 tokens). The server,
-  streamed: 174 tokens/s (a short question in Japanese, 145 tokens with thinking), the first piece 0.08 s after the request.
-* The speed drops as the conversation grows: 6.0 ms per token at position 88, 6.7 ms at 536, 7.3 to 7.5 ms from position 1,024 on (133 to
-  138 tokens/s).
-* Prompt reading through the package: 1,000 tokens/s for a prompt of 4,056 tokens, 1,090 tokens/s for 1,011 tokens (3 runs each, from an
-  empty context). With the engine alone: 950 to 1,050 tokens/s from 1,000 to 4,000 tokens, 760 to 860 tokens/s at 16,000. A prompt that
-  starts like the one before (the next turn of a chat) reads only the new part.
-* Start until ready (files in the Windows file cache): published weights 6.4 s without the drafter and 8.4 s with it; converted
-  weights 2.5 s and 7.2 s (their tensors are checked at load, 0.8 s; the drafter is prepared on the CPU when it loads).
-* Prompt reading with the converted weights through the package: 925 tokens/s for 4,056 tokens, 1,002 tokens/s for 1,011 tokens.
-
-`yasakani bench --model-dir <folder>` measures it on your PC (greedy, thinking off, 256 tokens per test). We have not measured other cards.
-
-### How were the answers checked against the published model?
-
-Two ways, both on the RTX 5090 with the published weights. Our engine gives the 30 tokens that the official text test of the model's code
-in the transformers library expects for its prompt; `yasakani selfcheck` runs that same check on your PC. And we compared the engine with
-our own CPU implementation of the model: the hidden states agreed within 1e-4 and the same experts were chosen. This measures agreement
-with the published model, not accuracy on tasks; we have not measured task accuracy.
-
-### What are the converted weights of `--scheme quality`?
-
-The converter can write the weights again in fewer bits (`inkling2_convert.py ... --scheme quality`, [README](../README.md#inkling-2-mini)):
-most dense matrices in 4 or 8 bits, and the 8-bit experts of layers 20 to 23 re-packed to 4 bits, in one `.yskn` file of 15.05 GB
-instead of 19.5 GB ([FORMAT](FORMAT.md)). Against the published model on 43 text windows (14,024 positions: the model's own thinking and
-answers, English and Japanese prose, code) the KL divergence was 0.0110, and the most likely next token was the same at 96.0 % of the
-positions. The engine multiplies these matrices as they are stored (interface version 3 of the library), so the folder is faster and
-needs less memory: `yasakani bench --draft off` 209.4 against 166.3 tokens/s for the published weights in the same job on the RTX 5090,
-and 18.3 instead of 22.1 GB allocated at a context of 32,768 tokens. The conversion takes about 4 minutes on the CPU.
-`yasakani verify` checks every file and every tensor. `yasakani selfcheck` compares the greedy output of three short prompts (English,
-Japanese, code) with the tokens that a reference implementation of the model gave on the same converted weights, decoded exactly as the
-engine multiplies them. At every one of the 48 tokens the chosen token leads the next best one by at least 0.11 in the logits, so small
-differences of arithmetic on other GPUs should not change the result (only the RTX 5090 was tested). The conversion on the CPU gives the same
-file every time, and the converter writes these tokens into `selfcheck.json` when its file has the SHA-256 of ours
-(`44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d`). `START.cmd --model-dir <folder>` then opens it after the
-same checks as for the published weights. A file that differs gets no expected tokens; open that folder with `--skip-checks`.
-
-### How do thinking on and off work for this model?
-
-The model writes its reasoning in a thinking block before the answer, and its chat template takes a thinking effort (none, minimal, low,
-medium, high, xhigh, max or a number from 0 to 0.99; the template's default is 0.9). In terminal chat, `/effort low` shortens the thinking;
-in the API, `reasoning_effort`. The model card says that even the lowest effort does not fully turn the thinking off. Our "thinking off"
-(`--no-think`, `/think off`, or `{"enable_thinking": false}` in `chat_template_kwargs`) is therefore our own setting: it sets the effort to 0
-and starts the reply with an answer block, so that no thinking is written. The speed numbers with thinking off use this setting.
-
-### Why is it slower than the Qwen models?
-
-The work per token is different. Inkling-2 Mini has 24 layers, but a token passes through 48 layers, because layers 6 to 17 are visited
-three times. In each visit the layer chooses 8 of its 128 experts for that token, so the weights that are read change from token to token.
-The look-ahead also differs: with the Qwen models a small draft model proposes tokens that the main model checks several at a time,
-and in edits whole copied spans are checked in one pass. Inkling-2 Mini uses the drafter that comes with the model (`--draft auto`, see
-the [README](../README.md#inkling-2-mini)); it checks at most 8 tokens per pass and helps most with text that is
-easy to guess. The output is the same with and without it. The speed tables of the Qwen models therefore do not apply to this model.
-
-### What are its licence and its use policy?
-
-The weights are published under Apache-2.0. The model card also names the
-[Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/), which applies to the weights and to modified
-versions. The model folder made by the converter has a `NOTICE` file that says where the files come from, the licence, the policy and what
-the converter changed. Read them for your own case; this FAQ is not legal advice. YASAKANI is not made by, and not endorsed by, Thinking
-Machines Lab.
-
-### What is not supported yet?
-
-Images (the original model reads them; we support text only), tools and function calling, several requests at once (`--parallel`),
-`bench --edit`, Linux, and any GPU other than the RTX 5090 (not tested). This model is experimental in 0.3.0.
-
 ## Can I use other models, for example Qwen4?
 
-Not in this release: it runs Qwen3.8-27B and, since 0.3.0, Inkling-2 Mini ([above](#inkling-2-mini)). Each has its own converter in
-[tools/convert/](../tools/convert/) and its own engine library, so another model needs changes in both.
+Not in this release: it runs Qwen3.8-27B only. The conversion program ([tools/convert/](../tools/convert/), added on
+November 14, 2026) knows the layers of Qwen3.8-27B only, and the engine runs this model only, so another model needs changes in both.
 Whether other models can be supported is decided one by one, and nothing is promised.
 
 ## Does it send my prompts anywhere?
@@ -617,7 +526,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7, 0.2.0 or 0.2.1 it offers 0.3.0. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.0.zip`) by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 or 0.2.0 it offers 0.2.1. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.2.1.zip`) by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, before it shows the menu or before it opens the browser page directly (from the second run on,
   `START.cmd` does that without a menu), the quickstart first prints that it asks github.com, then sends one HTTPS request:
@@ -664,18 +573,14 @@ built from source, contributed in [#8](https://github.com/yasakani-dev/yasakani/
 ## Can I use it commercially?
 
 YASAKANI is under the Apache License 2.0, which allows commercial use; Qwen3.8-27B (Alibaba Cloud) and the helper model are published under Apache-2.0
-as well. Inkling-2 Mini (Thinking Machines Lab) is published under Apache-2.0, and its model card also names the
-[Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/), which applies to the weights and to modified
-versions ([above](#what-are-its-licence-and-its-use-policy)). The licenses, copyright notices and what was converted or re-trained are in [LICENSE](../LICENSE), [NOTICE](../NOTICE) and
+as well. The licenses, copyright notices and what was converted or re-trained are in [LICENSE](../LICENSE), [NOTICE](../NOTICE) and
 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Read them for your own case; this FAQ is not legal advice.
 
 ## Who made the model, and what did you change?
 
 Qwen3.8-27B is the work of Alibaba's Qwen team. YASAKANI is the engine and the file format that run it fast, and the model files are converted,
 compressed versions of it. The small helper model that speeds up generation is built on a publicly released model: it was converted, compressed and
-re-trained. [NOTICE](../NOTICE) says where each comes from. Inkling-2 Mini is the work of Thinking Machines Lab; YASAKANI runs its
-published weights unchanged, or weights that the converter wrote again in fewer bits (`--scheme quality`), and the `NOTICE` file in the
-model folder made by the converter says what the converter changed.
+re-trained. [NOTICE](../NOTICE) says where each comes from.
 
 ## How do I report a problem?
 

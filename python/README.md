@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.3.0`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)). 0.3.0 adds Inkling-2 Mini as an experimental, text-only model on a second engine library (see [Inkling-2 Mini](#inkling-2-mini-experimental)).
+Status: version `0.2.1`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)).
 
 ## What you need
 
@@ -565,71 +565,6 @@ note). A reference file written before 0.1.4 has neither; with it, another GPU p
 The three prompts are short on purpose. Output is not guaranteed to be bit-identical from run to run while other programs use the GPU at the
 same time (see `docs/MEASUREMENTS.md` in the repository). In our checks the three self-check requests were identical in all 180 repeats and
 the command passed 12 of 12 times, but if a case fails, run the command once more before you report it.
-
-<a name="inkling-2-mini-experimental"></a>
-
-## Inkling-2 Mini (experimental)
-
-New in 0.3.0. The package also runs [Inkling-2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) by Thinking Machines Lab
-(Apache-2.0, with the [Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/) named on its model card).
-Text only, one request at a time, tested on the RTX 5090 under Windows 11 only. It runs on a second engine library, not on `yskn.dll`;
-the Qwen3.8-27B commands, settings and numbers in the rest of this document do not change.
-
-**The architecture field.** The commands read `"architecture"` in the folder's `yasakani.json`. With `"architecture": "inkling2"` they
-use the Inkling-2 path (`yasakani/inkling2.py` and `yasakani/inkling2_cli.py`); without the field, or with any other folder, they work as
-before. The manifest also names the source (`repository`, `revision`, `license`, `acceptable_use_policy`), the context (`max_ctx`, and
-`default_ctx`, 32,768, which the engine opens unless `--max-ctx` is given), the `weights` entry (`"format": "hf-safetensors"` for the
-published file, unchanged), the `drafter` entry (`{"file": "mtp.safetensors", "format": "hf-safetensors", "sha256": ..., "size": ...}`, when the folder has the model's drafter), the sampling defaults of the model's `generation_config.json`, the stop token, and the size and SHA-256 of
-every file.
-
-**Making the folder.** `tools/convert/inkling2_convert.py` makes it from a downloaded copy of the published model (Hugging Face layout).
-Nothing is downloaded, and nothing in the source folder is run or changed. With the default scheme `published` the weights file is
-the published one: a hard link when both folders are on the same drive, else a copy (`--copy` always copies). The image part of the
-download is not used. With both schemes the drafter (`mtp.safetensors`, 0.64 GB) is placed next to the weights in the same way (hard link or copy), listed in `yasakani.json` and checked by `yasakani verify`; a source without it gives a folder that generates without drafting. With `--scheme quality` it writes the weights again in fewer bits, in one `.yskn` file of
-15.05 GB (`"format": "yskn"` in the `weights` entry; [FORMAT](../docs/FORMAT.md)); the numbers are in the [README](../README.md#inkling-2-mini).
-The engine library multiplies the packed dense matrices of that file as they are stored; `YASAKANI_INK2_DENSE=bf16` makes the package
-decode them to bfloat16 instead (slower and larger, for comparisons only).
-Its `selfcheck.json` gets the expected tokens of three prompts when the `.yskn` file has the SHA-256 of a conversion we checked
-([`tools/convert/data/inkling2_selfcheck.json`](../tools/convert/data/inkling2_selfcheck.json): the conversion on the CPU gives the
-same file every time); for any other file it has no cases.
-The converter imports the package from the `python/` folder next to it and needs numpy, tokenizers and jinja2 (installed with the package);
-in a quickstart folder run it with the quickstart's Python after `yasakani_env.cmd`.
-
-```bat
-hf download thinkingmachines/Inkling-2-Mini --revision ed40e7da625f594fc9c4990f5f66be24873c22d7 --local-dir D:\models\Inkling-2-Mini-hf
-python tools\convert\inkling2_convert.py --source D:\models\Inkling-2-Mini-hf --out D:\models\inkling2-mini
-```
-
-The folder then holds the published weights file (`model-00001-of-00001.safetensors`, 19.5 GB), `config.json`,
-`generation_config.json`, the tokenizer files and `chat_template.jinja` and the model card (`README.md`) of the source, unchanged, and
-three new files: `yasakani.json`, `selfcheck.json` and `NOTICE` (where the files come from, the licence, the policy and what the
-converter changed).
-
-**The commands.** They find the second library, `yskn_inkling2.dll`, next to `yskn.dll`: next to the `yskn.dll` given with `--dll` (as
-for the Qwen models), else next to `YASAKANI_DLL` or in the `bin` folder next to the package. `--dll` may also name `yskn_inkling2.dll`
-itself or a folder that holds it, and `YASAKANI_INK2_DLL` names it directly. Its Python binding is part of the package
-(`yasakani/_ink2_native.py`). A library older than the package's interface version stops with a message.
-
-| command | for an Inkling-2 folder |
-|---|---|
-| `yasakani info --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | Python and its three libraries, the engine library and its binding, the GPU, and the folder: source and revision, weights, sampling, stop token, the tokenizer and the chat template |
-| `yasakani verify --model-dir D:\models\inkling2-mini` | compares every file with the SHA-256 in `yasakani.json` (reads about 20 GB), and for a `.yskn` file every tensor with its CRC-32 |
-| `yasakani selfcheck --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | the prompt of the official text test of the model's code in the transformers library, greedy, compared with the 30 tokens that test expects (a folder of `--scheme quality`: three prompts, in English, Japanese and code, 48 tokens each, compared with the tokens that the converter writes when its `.yskn` file equals our conversion; a file that differs gets none) |
-| `yasakani chat --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | chat in the terminal. `/think on\|off`, `/effort none\|minimal\|low\|medium\|high\|xhigh\|max`, `/reset`, `/exit`; `--no-think`, `--effort low\|medium\|xhigh` at start |
-| `yasakani serve --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | the OpenAI-compatible server, model id `inkling-2-mini`; `reasoning_effort` and `chat_template_kwargs` `{"enable_thinking": false}` as for the Qwen models |
-| `yasakani bench --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | generation speed: greedy, thinking off, 256 tokens per test (`--n` changes it, `--think` turns thinking on), `--json` |
-
-**The drafter.** `chat`, `serve`, `bench` and `selfcheck` take `--draft auto|on|off` (default `auto`, or `YASAKANI_DRAFT`) and `--draft-depth N` (1 to 7, or `YASAKANI_DRAFT_DEPTH`; default: the engine's). `auto` lets the engine use the drafter only while it makes generation faster; `on` always drafts; `off` does not load it. The output does not change: greedy gives the same tokens as without the drafter, and sampling picks each token with the same probabilities (one random number per emitted token, so a seed gives the same tokens as long as the engine's logits are the same). The start-up lines say whether the drafter was loaded and the mode; `info` shows the `drafter` entry, whether the binding has the drafter calls and the capabilities of the engine library (packed dense matrices, drafter). The package needs a library of interface version 3 (the one of 0.3.0); an older `yskn_inkling2.dll` stops with a message. `chat` and `bench` print the tokens per pass, and `serve` adds `draft_mode`, `draft_passes`, `tokens_per_pass`, `draft_n` and `draft_n_accepted` to `timings`. `selfcheck` gives the same tokens with `--draft on` and `--draft off`.
-
-`--max-ctx`, `--device` and `--seed` work as for the Qwen models. These stop with a message instead: `--parallel` and `--concurrency`
-above 1, `bench --edit`, image input (`--mmproj`) and `selfcheck --write`. Requests with `tools` are refused by the server.
-
-**Thinking off.** The chat template takes a thinking effort (none, minimal, low, medium, high, xhigh, max or a number from 0 to 0.99;
-default 0.9). The model card says that even the lowest effort does not fully turn the thinking off, so `enable_thinking: false` (and
-`--no-think`, `/think off`) sets the effort to 0 and starts the reply with an answer block, so that no thinking is written.
-
-Measured numbers, the checks of the answers and the limits: [README](../README.md#inkling-2-mini) and
-[FAQ](../docs/FAQ.md#inkling-2-mini).
 
 ## Use it from Python
 

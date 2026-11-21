@@ -134,13 +134,6 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--edit-copy", choices=gpus.EDIT_COPY_MODES, default=None,
                     help="edit copy: on or off.  Default: $YASAKANI_EDIT_COPY or %s" % gpus.EDIT_COPY_DEFAULT)
     _add_wide_args(sp)
-    g = sp.add_argument_group("drafter (Inkling-2 Mini model folders; other models do not use these)")
-    g.add_argument("--draft", choices=("auto", "on", "off"), default=None,
-                   help="the model's drafter proposes a few tokens that the model checks in one pass; the output does not change.  "
-                        "auto (default): used only while it makes generation faster; on: always; off: not loaded.  "
-                        "Default: $YASAKANI_DRAFT or auto")
-    g.add_argument("--draft-depth", type=int, default=None, metavar="N",
-                   help="tokens the drafter proposes per pass, 1 to 7 (default: $YASAKANI_DRAFT_DEPTH or the engine's)")
 
 
 def _add_wide_args(sp: argparse.ArgumentParser) -> None:
@@ -645,11 +638,6 @@ CHAT_HELP = """commands:  /exit  quit      /reset  forget the conversation      
 
 def cmd_chat(args) -> int:
     from .chat import ChatParams, RequestError
-    if args.ask is not None:
-        raise YasakaniError("--ask is available for Inkling-2 model folders only; pipe the question into the chat instead")
-    for k, v in (("temperature", 1.0), ("top_p", 0.95), ("top_k", 20)):     # the defaults of Qwen3.8 (generation_config.json)
-        if getattr(args, k, None) is None:
-            setattr(args, k, v)
     pack, eng, fmt, runner = _open_stack(args, warm=True)
     color = _use_color()
     dim = (lambda s: "\x1b[2m%s\x1b[0m" % s) if color else (lambda s: s)
@@ -1069,17 +1057,6 @@ def _selfcheck_one(args, pack, eng, fmt) -> int:
 
 
 # ---- entry point ------------------------------------------------------------------------------------------------------------------
-def _inkling2_command(args):
-    """The command of yasakani/inkling2_cli.py when the model folder is an Inkling-2 folder ("architecture": "inkling2" in its
-    yasakani.json), else None (the Qwen3.8 commands above, unchanged)."""
-    names = {cmd_info: "info", cmd_verify: "verify", cmd_selfcheck: "selfcheck", cmd_chat: "chat", cmd_serve: "serve", cmd_bench: "bench"}
-    name = names.get(getattr(args, "func", None))
-    if name is None:
-        return None
-    from .inkling2_cli import dispatch
-    return dispatch(name, args)
-
-
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="yasakani", description="Run Qwen3.8-27B locally on one NVIDIA RTX GPU with the YASAKANI engine "
                                                            "(tested on the RTX 5090 under Windows).")
@@ -1129,11 +1106,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_engine_args(sp)
     sp.add_argument("--system", help="system prompt")
     sp.add_argument("--max-tokens", type=int, default=32768)
-    sp.add_argument("--temperature", type=float, default=None, help="default: the model's (1.0 for Qwen3.8 and Inkling-2)")
-    sp.add_argument("--top-p", type=float, default=None, help="default: the model's (0.95 for Qwen3.8, 1.0 for Inkling-2)")
-    sp.add_argument("--top-k", type=int, default=None, help="default: the model's (20 for Qwen3.8, off for Inkling-2)")
-    sp.add_argument("--ask", default=None, metavar="QUESTION",
-                    help="Inkling-2 models: ask this one question, print the answer and end")
+    sp.add_argument("--temperature", type=float, default=1.0)
+    sp.add_argument("--top-p", type=float, default=0.95)
+    sp.add_argument("--top-k", type=int, default=20)
     sp.add_argument("--seed", type=int, default=None, help="fixed seed (same seed and prompt give the same answer)")
     sp.add_argument("--no-think", action="store_true", help="answer without a thinking phase")
     sp.add_argument("--effort", choices=("low", "medium", "xhigh"), help="how long the model thinks (default xhigh)")
@@ -1219,8 +1194,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pci_bus_order()                              # 0.1.5: --device N is nvidia-smi's GPU N; set before anything can start CUDA
     args = build_parser().parse_args(argv)
     try:
-        func = _inkling2_command(args) or args.func
-        return int(func(args) or 0)
+        return int(args.func(args) or 0)
     except YasakaniError as ex:
         _say("error: %s" % ex)
         return 1

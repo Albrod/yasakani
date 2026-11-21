@@ -10,11 +10,9 @@ the original checkpoint of Qwen3.8-27B, the data it needs, and what we got when 
 |---|---|
 | [`yskn_convert.py`](yskn_convert.py) | the conversion: `convert` (GPU: statistics and codes), `assemble` (CPU: the file), `compare` (two files, tensor by tensor), `selftest` |
 | [`trellis_search.py`](trellis_search.py) | the search for the codes: a call into the CUDA kernel, and a PyTorch version of the same kernel that gives the same symbols |
-| [`inkling2_convert.py`](inkling2_convert.py) | the model folder of Inkling-2 Mini: the published weights unchanged (`--scheme published`) or re-quantised into one `.yskn` file of version 2 (`--scheme quality`, [docs/FORMAT.md](../../docs/FORMAT.md) section 10), with `selfcheck.json` |
-| [`inkling2_quant.py`](inkling2_quant.py) | its quantisers (NVFP4, MXFP8; numpy, and the same steps in PyTorch for a GPU) |
 | [`native/`](native/) | the CUDA kernel of the search (one file) and its CMake file |
 | [`make_calibration.py`](make_calibration.py) | the 192 calibration windows as token ids: WikiText-2 made again from the public dataset, and the transcripts below |
-| [`data/`](data/) | the two value tables, the number of bits of every matrix of the quality model, the 96 transcripts of the calibration; `inkling2_selfcheck.json`, the expected self-check tokens of the Inkling-2 Mini conversion with `--scheme quality` (by source revision and the SHA-256 of the `.yskn` file) |
+| [`data/`](data/) | the two value tables, the number of bits of every matrix of the quality model, the 96 transcripts of the calibration |
 | [`records/`](records/) | what we got: the log of the run, and the comparison of the files with the released ones |
 
 ## What the conversion does

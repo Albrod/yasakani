@@ -142,7 +142,6 @@ class VersionTests(unittest.TestCase):
             self.assertTrue(mod.is_newer("v0.1.7", "0.1.6"))
             self.assertTrue(mod.is_newer("v0.2.0", "0.1.7"))
             self.assertTrue(mod.is_newer("v0.2.1", "0.2.0"))
-            self.assertTrue(mod.is_newer("v0.3.0", "0.2.1"))
             self.assertFalse(mod.is_newer("0.1.9", "0.1.10"))
             self.assertFalse(mod.is_newer("0.1.6", "0.1.6"))
             self.assertIsNone(mod.parse_version("v0.1.7-test1"))

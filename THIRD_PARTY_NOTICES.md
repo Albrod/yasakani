@@ -51,15 +51,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### NVIDIA CUDA Runtime (inside `yskn.dll` and `yskn_inkling2.dll`)
+### NVIDIA CUDA Runtime (inside `yskn.dll`)
 
-* The prebuilt `yskn.dll` and, since 0.3.0, `yskn_inkling2.dll` (the engine for Inkling-2 Mini) each contain the NVIDIA CUDA Runtime library
-  (`cudart`), linked statically (`cudart_static.lib`; the release is built
+* The prebuilt `yskn.dll` contains the NVIDIA CUDA Runtime library (`cudart`), linked statically (`cudart_static.lib`; the release is built
   with CUDA Toolkit 13.2: nvcc 13.2.78, CUDA Runtime 13.2.75). NVIDIA's CUDA Toolkit End User License Agreement lets an application distribute the files that its
   Attachment A lists; for the CUDA Runtime on Windows the list is `cudart.dll`, `cudart_static.lib` and `cudadevrt.lib`. The runtime inside
-  each library is used only by that engine itself. See <https://docs.nvidia.com/cuda/eula/> (sections 1.1.1, 1.1.2, 2.2 and 2.6).
+  `yskn.dll` is used only by the engine itself. See <https://docs.nvidia.com/cuda/eula/> (sections 1.1.1, 1.1.2, 2.2 and 2.6).
 * The Apache License 2.0 of YASAKANI does **not** apply to this component. It stays under NVIDIA's agreement; please do not take it out of
-  `yskn.dll` or `yskn_inkling2.dll` for other use.
+  `yskn.dll` for other use.
 * The agreement text was read on 2026-10-31 in its CUDA 13.3 and 13.4 versions ("last updated January 26, 2026"); both say the same about the
   runtime. The `EULA.txt` installed with the CUDA 13.2 toolkit that built the release DLL was compared on 2026-11-12: it carries the
   same date, has the sections named above, and lists the same three files for the CUDA Runtime on Windows.
@@ -128,7 +127,7 @@ Agreement.
 | What | Why | License | Tested with |
 |---|---|---|---|
 | NVIDIA display driver | runs the GPU | NVIDIA driver license | 616.92 |
-| Microsoft Visual C++ 2015-2022 x64 runtime | `yskn.dll` and `yskn_inkling2.dll` are built with Visual C++ (`yskn_inkling2.dll` also uses its OpenMP library, `vcomp140.dll`) | Microsoft software license terms | - |
+| Microsoft Visual C++ 2015-2022 x64 runtime | `yskn.dll` is built with Visual C++ | Microsoft software license terms | - |
 | Python 3.10 or newer | the command-line tool and server | PSF License | 3.14.4 on Windows 11 (the unit tests also ran on 3.10) |
 | numpy | array handling | BSD-3-Clause | 2.4.4 and 2.5.4 |
 | tokenizers (Hugging Face) | tokenizer | Apache-2.0 | 0.22.2 and 0.23.3 |
@@ -162,12 +161,6 @@ is in the release; you download them yourself.
 * Jian Chen, Yesheng Liang, Zhijian Liu. *DFlash: Block Diffusion for Flash Speculative Decoding.* arXiv:2602.06036, February 2026.
   The helper model above is a drafter of this kind.
 * Qwen team. The Qwen3.8 model family (see above).
-* Thinking Machines Lab. Inkling-2 Mini (<https://huggingface.co/thinkingmachines/Inkling-2-Mini>, Apache License 2.0; its model card
-  also names a Model Acceptable Use Policy, <https://thinkingmachines.ai/model-acceptable-use-policy/>). The engine in `src/inkling2/` and
-  the reader `python/yasakani/_ink2_ckpt.py` compute what the published model code computes (the Inkling-2 code proposed for Hugging Face
-  transformers, <https://github.com/huggingface/transformers/pull/51050>, Apache License 2.0); they were written for YASAKANI. The model
-  files are not part of the release: the converter `tools/convert/inkling2_convert.py` makes a model folder from the files you download
-  and writes the model's notice into it.
 
 ## Not included
 

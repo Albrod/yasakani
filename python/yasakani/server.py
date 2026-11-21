@@ -51,8 +51,6 @@ class ServerConfig:
             except ValueError:
                 default_thinking_budget = 0
         self.default_thinking_budget = max(0, int(default_thinking_budget))
-        self.sampling_defaults = {}                       # the model's defaults (temperature, top_p, top_k); empty: those of Qwen3.8
-        self.effort_aliases = None                        # accepted reasoning_effort values; None: REASONING_EFFORT_ALIASES
 
 
 class ApiState:
@@ -140,21 +138,18 @@ def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> C
     if isinstance(body.get("enable_thinking"), bool):
         kw.setdefault("enable_thinking", body["enable_thinking"])
     eff = body.get("reasoning_effort")
-    aliases = getattr(cfg, "effort_aliases", None) or REASONING_EFFORT_ALIASES
     if eff is not None:
-        if eff not in aliases:
-            raise RequestError("reasoning_effort must be one of " + ("low, medium, high, xhigh" if aliases is REASONING_EFFORT_ALIASES
-                                                                     else ", ".join(aliases)))
-        kw.setdefault("reasoning_effort", aliases[eff])
+        if eff not in REASONING_EFFORT_ALIASES:
+            raise RequestError("reasoning_effort must be one of low, medium, high, xhigh")
+        kw.setdefault("reasoning_effort", REASONING_EFFORT_ALIASES[eff])
     tb = body.get("thinking_budget", kw.pop("thinking_budget", None))
     thinking_budget = cfg.default_thinking_budget if tb is None else _num({"thinking_budget": tb}, "thinking_budget", 0, 0, None, int)
     seed = body.get("seed")
-    d = getattr(cfg, "sampling_defaults", None) or {}
     return ChatParams(
         messages=messages, max_tokens=max_tokens,
-        temperature=_num(body, "temperature", d.get("temperature", DEFAULT_TEMPERATURE), 0.0, 2.0),
-        top_p=_num(body, "top_p", d.get("top_p", DEFAULT_TOP_P), 1e-6, 1.0),
-        top_k=_num(body, "top_k", d.get("top_k", DEFAULT_TOP_K), None, None, int),
+        temperature=_num(body, "temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
+        top_p=_num(body, "top_p", DEFAULT_TOP_P, 1e-6, 1.0),
+        top_k=_num(body, "top_k", DEFAULT_TOP_K, None, None, int),
         min_p=_num(body, "min_p", 0.0, 0.0, 1.0),
         seed=None if seed is None else _num(body, "seed", 0, None, None, int),
         stop=list(stop), ignore_eos=bool(body.get("ignore_eos", False)), loop_guard=body.get("loop_guard", True) is not False,
@@ -195,8 +190,6 @@ def timings_json(u: Usage) -> dict:
              predicted_per_second=per_s(u.completion_tokens, predicted_ms))
     if u.draft_n > 0:
         d.update(draft_n=u.draft_n, draft_n_accepted=u.draft_n_accepted)
-    if u.spec:                                            # Inkling-2 with its drafter: the verification passes and tokens per pass
-        d.update(u.spec)
     if u.queue_ms is not None:                            # served by the scheduler (--parallel N): its wait, the streams that shared
         d.update(queue_ms=u.queue_ms, parallel_avg=u.parallel_avg, snap_mode=u.snap_mode)    # its passes, how its prompt was read
     return d
