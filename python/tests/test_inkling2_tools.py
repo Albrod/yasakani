@@ -448,6 +448,63 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((ch["finish_reason"], "tool_calls" in ch["message"]), ("stop", False))
 
 
+class RollbackTests(unittest.TestCase):
+    """The engine's rollback option (no engine library: a stand-in for the binding)."""
+
+    class Native:
+        def __init__(self, rollback):
+            self.rollback, self.calls = rollback, []
+
+        def load(self, root, backend="host", max_positions=4096, dll=None, weights=None, log=None, rollback=None):
+            pass
+
+        def reset(self):
+            self.calls.append("reset")
+
+        def truncate(self, n):
+            self.calls.append(("truncate", n))
+
+        def feed_many(self, ids):
+            self.calls.append(("feed", len(ids)))
+
+        def step(self, tok):
+            return np.zeros(4, np.float32)
+
+    def engine(self, rollback, max_ctx=32768):
+        e = ink.Ink2Engine.__new__(ink.Ink2Engine)
+        e.max_ctx, e.mod = max_ctx, SimpleNamespace(Ink2Native=self.Native)
+        e.native, e.fed, e.last_logits = self.Native(rollback), [], None
+        return e
+
+    def test_option(self):
+        e = self.engine(64)
+        old = os.environ.pop(ink.ROLLBACK_ENV, None)
+        try:
+            self.assertEqual(e._rollback_kw(), {"rollback": ink.DEFAULT_ROLLBACK})
+            self.assertEqual(self.engine(64, max_ctx=256)._rollback_kw(), {"rollback": 256})
+            os.environ[ink.ROLLBACK_ENV] = "0"
+            self.assertEqual(e._rollback_kw(), {})                             # the engine's own default
+            os.environ[ink.ROLLBACK_ENV] = "4096"
+            self.assertEqual(e._rollback_kw(), {"rollback": 4096})
+            for bad in ("x", "-1", "40000"):
+                os.environ[ink.ROLLBACK_ENV] = bad
+                with self.assertRaises(Exception):
+                    e._rollback_kw()
+        finally:
+            os.environ.pop(ink.ROLLBACK_ENV, None)
+            if old is not None:
+                os.environ[ink.ROLLBACK_ENV] = old
+
+    def test_a_dropped_reply_keeps_the_prompt(self):
+        """The next request leaves out the last reply's thinking: the reply is dropped, the conversation before it is not read again."""
+        prompt, reply = list(range(1000)), list(range(5000, 5300))
+        for rollback, want in ((1024, [("truncate", 1001), ("feed", 49)]), (64, ["reset", ("feed", 1050)])):
+            e = self.engine(rollback)
+            e.fed = prompt + reply
+            _, cached = e.read_prompt(prompt + [5000] + list(range(9000, 9050)))
+            self.assertEqual((e.native.calls, cached), (want, 1001 if rollback == 1024 else 0))
+
+
 class ParseRequestTests(unittest.TestCase):
     """parse_chat_request: tool_choice and the kept ids (no tokenizer needed)."""
 

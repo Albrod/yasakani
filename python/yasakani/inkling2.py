@@ -68,6 +68,12 @@ WEIGHTS_FORMATS = ("hf-safetensors", "yskn")
 CONTEXT_MARGIN = 16                    # positions kept free at the end of the context
 DRAFT_MODES = ("auto", "on", "off")
 DRAFT_ENV, DRAFT_DEPTH_ENV = "YASAKANI_DRAFT", "YASAKANI_DRAFT_DEPTH"
+ROLLBACK_ENV = "YASAKANI_INK2_ROLLBACK"
+# positions the engine can drop without reading the prompt again (its option "rollback"; the engine's own default is 64).  The next
+# request of a chat goes on from the ids already read only where it starts with them: a client that does not send the thinking of
+# the last reply back (most OpenAI clients) or that writes a tool call in another form drops the whole last reply, which the engine
+# can do without a new reading of the conversation up to this many positions.  Costs GPU memory for the rings of the sliding layers.
+DEFAULT_ROLLBACK = 1024
 MAX_DRAFT_DEPTH = 7
 DRAFTER_FORMATS = ("hf-safetensors",)
 DRAFT_CALLS = ("draft_load", "draft_mode", "spec_step", "spec_stats")   # what the engine wrapper needs for drafting
@@ -679,7 +685,8 @@ class Ink2Engine:
                 self.native = self._load_yskn(pack, lib, log)
             else:
                 self.native = self.mod.Ink2Native().load(str(pack.root), backend=self.backend, max_positions=self.max_ctx,
-                                                         dll=str(self.dll), weights=pack.weights.name, log=log)
+                                                         dll=str(self.dll), weights=pack.weights.name, log=log,
+                                                         **self._rollback_kw())
         except (RuntimeError, OSError, AssertionError, KeyError, ValueError) as ex:
             if self._yskn is not None:
                 self._yskn.close()
@@ -698,6 +705,21 @@ class Ink2Engine:
         self.draft_mode = "off"
         self.draft_depth = 0
         self.draft_note = "drafter: not set up"
+
+    def _rollback_kw(self) -> dict:
+        """{"rollback": n} for the binding's load (DEFAULT_ROLLBACK, or $YASAKANI_INK2_ROLLBACK; 0 = the engine's default)."""
+        v = (os.environ.get(ROLLBACK_ENV) or "").strip()
+        try:
+            n = int(v) if v else min(DEFAULT_ROLLBACK, self.max_ctx)
+        except ValueError:
+            n = -1
+        if not 0 <= n <= self.max_ctx:
+            raise YasakaniError("%s must be a number from 0 to %d, not %r" % (ROLLBACK_ENV, self.max_ctx, v))
+        try:
+            takes = "rollback" in inspect.signature(self.mod.Ink2Native.load).parameters
+        except (TypeError, ValueError):
+            takes = False
+        return {"rollback": n} if n and takes else {}
 
     # -- drafter ------------------------------------------------------------------------------------------------------------------
     def set_drafter(self, pack: "Ink2Pack", mode: str = "auto", depth: Optional[int] = None) -> str:
@@ -797,7 +819,8 @@ class Ink2Engine:
         if want == "bf16":
             packed = False
         view = Y.CheckpointView(yf, dense="packed" if packed else "bf16")
-        kw = dict(backend=self.backend, max_positions=self.max_ctx, dll=str(self.dll), weights=pack.weights.name, log=log)
+        kw = dict(backend=self.backend, max_positions=self.max_ctx, dll=str(self.dll), weights=pack.weights.name, log=log,
+                  **self._rollback_kw())
         try:
             takes_reader = "checkpoint" in inspect.signature(self.mod.Ink2Native.load).parameters
         except (TypeError, ValueError):
