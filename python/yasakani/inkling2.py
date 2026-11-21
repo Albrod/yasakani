@@ -3,9 +3,9 @@
 """Inkling-2 Mini (``"architecture": "inkling2"`` in ``yasakani.json``): model folder, chat template, output stream, sampling and
 the chat runner on the Inkling-2 engine library.
 
-Text only, one request at a time.  The engine library is a separate DLL with its own C API (one token per call) and a ctypes
-binding module (``ink2_native.py``); both are found through ``--dll`` / ``$YASAKANI_INK2_DLL`` (the binding next to the DLL or one
-folder up, or ``$YASAKANI_INK2_BINDING``).  Model folders are made by ``tools/convert/inkling2_convert.py``.
+Text only, one request at a time.  The engine library is a separate DLL (``yskn_inkling2.dll``, next to ``yskn.dll`` in the engine
+zip) with its own C API; its ctypes binding is the package module ``_ink2_native.py`` (with the safetensors reader ``_ink2_ckpt.py``).
+The library is found as ``find_dll`` says.  Model folders are made by ``tools/convert/inkling2_convert.py``.
 
 Two weights formats (the ``weights`` entry of yasakani.json): ``hf-safetensors`` (the published file, read by the binding) and
 ``yskn`` (a re-quantised ``.yskn`` file of version 2, yasakani/ink2_yskn.py).  For a ``.yskn`` file the CRC-32 of every tensor is
@@ -354,35 +354,74 @@ class Sampler:
 
 
 # ---- engine ------------------------------------------------------------------------------------------------------------------------
+LIBRARY = "yskn_inkling2.dll"          # the Inkling-2 engine library, next to yskn.dll in the engine zip
+MAIN_LIBRARIES = ("yskn.dll", "libyskn.so")
+REQUIRED_ABI = 2                       # ink2_abi_version() of the library this binding was written for (or newer)
+
+
 def find_dll(path: Optional[str] = None) -> Path:
-    p = path or os.environ.get("YASAKANI_INK2_DLL")
-    if not p:
-        raise YasakaniError("the Inkling-2 engine library is not set: give --dll (or set YASAKANI_INK2_DLL) to ink2_cuda.dll")
-    p = Path(p)
-    if not p.is_file():
-        raise YasakaniError("Inkling-2 engine library not found: %s" % p)
-    return p
+    """The Inkling-2 engine library, in this order: ``path`` (``--dll``) when it names a file other than the main library
+    (yskn.dll), or a folder that holds yskn_inkling2.dll; ``$YASAKANI_INK2_DLL``; yskn_inkling2.dll next to the main library
+    (``--dll`` naming yskn.dll, as the Windows launcher passes it, else ``$YASAKANI_DLL`` or the bin folder next to the package)."""
+    tried = []
+    main = None
+    if path:
+        p = Path(path)
+        if p.is_dir():
+            p = p / LIBRARY
+        elif p.name.lower() in MAIN_LIBRARIES:
+            main = p
+            p = None
+        if p is not None:
+            if p.is_file():
+                return p
+            raise YasakaniError("Inkling-2 engine library not found: %s" % p)
+    env = os.environ.get("YASAKANI_INK2_DLL")
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p
+        raise YasakaniError("Inkling-2 engine library not found: %s (YASAKANI_INK2_DLL)" % p)
+    if main is None:
+        from ._native import find_library
+        try:
+            main = find_library(None)
+        except YasakaniError:
+            main = None
+    if main is not None:
+        p = main.parent / LIBRARY
+        if p.is_file():
+            return p
+        tried.append(str(p))
+    raise YasakaniError("the Inkling-2 engine library (%s) was not found%s.  It is in the engine zip of YASAKANI 0.3.0 or newer, next "
+                        "to yskn.dll: update the engine (START.cmd does this), or give its path with --dll or YASAKANI_INK2_DLL"
+                        % (LIBRARY, " (looked for %s)" % "; ".join(tried) if tried else ""))
 
 
 def find_binding(dll: Path) -> Path:
-    p = os.environ.get("YASAKANI_INK2_BINDING")
-    cands = [Path(p)] if p else [dll.parent / "ink2_native.py", dll.parent.parent / "ink2_native.py"]
-    for c in cands:
-        if c.is_file():
-            return c
-    raise YasakaniError("the binding of the Inkling-2 engine (ink2_native.py) is not next to %s; set YASAKANI_INK2_BINDING" % dll.name)
+    """The binding of the engine library: the package module _ink2_native.py (nothing is loaded from outside the package)."""
+    return Path(__file__).resolve().parent / "_ink2_native.py"
 
 
-def load_binding(path: Path):
-    name = "_yasakani_ink2_binding"
-    mod = sys.modules.get(name)
-    if mod is not None and getattr(mod, "__file__", None) == str(path):
-        return mod
-    spec = importlib.util.spec_from_file_location(name, str(path))
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+def load_binding(path: Optional[Path] = None):
+    from . import _ink2_native
+    return _ink2_native
+
+
+def open_library(mod, dll: Path):
+    """Opens the engine library through the binding and checks that it is the Inkling-2 library of a version this package can use."""
+    try:
+        lib = mod.open_dll(str(dll))
+    except OSError as ex:
+        from ._native import _VC_HINT
+        raise YasakaniError("%s: %s%s" % (dll.name, _VC_HINT, ex)) from ex
+    except AttributeError as ex:
+        raise YasakaniError("%s is not the Inkling-2 engine library (%s)" % (dll, ex)) from ex
+    abi = int(getattr(lib, "abi", 1))
+    if abi < REQUIRED_ABI:
+        raise YasakaniError("%s is too old for this package (interface version %d, %d or newer is needed): use the yskn_inkling2.dll "
+                            "of the same release as the package" % (dll, abi, REQUIRED_ABI))
+    return lib
 
 
 def backend_of(lib_info: str) -> str:
@@ -402,7 +441,7 @@ class Ink2Engine:
         self.dll = find_dll(dll)
         self.binding_path = find_binding(self.dll)
         self.mod = load_binding(self.binding_path)
-        lib = self.mod.open_dll(str(self.dll))
+        lib = open_library(self.mod, self.dll)
         self.build_info = lib.ink2_build_info().decode("utf-8", "replace")
         self.backend = backend_of(self.build_info)
         self.max_ctx = int(max_ctx)

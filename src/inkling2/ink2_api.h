@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 the YASAKANI authors
+// C API of the Inkling-2 Mini engine (text only). One token per call
+// (ink2_step / ink2_feed), or R consecutive positions in one pass
+// (ink2_feed_many / ink2_step_many, ABI version 2).
+#pragma once
+
+// 1: one token per call; 2: adds ink2_abi_version, ink2_feed_many, ink2_step_many,
+// ink2_truncate, ink2_position, ink2_limits, ink2_get_row and the options
+// "max_rows", "rollback", "chunk". Functions of version 1 are unchanged.
+#define INK2_ABI_VERSION 2
+
+#ifdef INK2_BUILD
+#define INK2_API extern "C" __declspec(dllexport)
+#else
+#define INK2_API extern "C" __declspec(dllimport)
+#endif
+
+typedef struct Ink2Config {
+  int vocab;       // rows of the output projection that are used (unpadded vocabulary)
+  int embed_rows;  // rows of the embedding table
+  int hidden, layers;
+  int nh_full, nkv_full, hd_full;  // full-attention layers: heads, key/value heads, head size
+  int nh_sw, nkv_sw, hd_sw;        // sliding-window layers
+  int window, d_rel, rel_extent;
+  int conv_k, expert_inner, experts, top_k;
+  int bar_block;  // layers per attention-residual block
+  int loop_start, loop_end, loop_passes, gate_rank;
+  int n_floor;        // log scaling starts at this position count
+  int max_positions;  // context limit (full-attention caches)
+  float eps, qk_thr, rel_thr, alpha, route_scale, gate_cap, up_cap, logit_cap;
+  int sliding[64];  // 1 = sliding-window layer
+} Ink2Config;
+
+enum {
+  INK2_GET_HIDDEN = 0,         // float32 [hidden], output of a visit
+  INK2_GET_ROUTER_INDEX = 1,   // int32 [top_k], increasing
+  INK2_GET_ROUTER_WEIGHT = 2,  // float32 [top_k], same order
+  INK2_GET_ROUTER_LOGITS = 3,  // float32 [experts]
+  INK2_GET_EMBED = 4,          // float32 [hidden]
+  INK2_GET_FINAL_HIDDEN = 5,   // float32 [hidden]
+  INK2_GET_LOGITS = 6          // float32 [vocab]
+};
+
+// Profile slots of ink2_profile (seconds, accumulated while the profile is on).
+enum {
+  INK2_PROF_EXPERTS = 0,
+  INK2_PROF_ATTENTION = 1,
+  INK2_PROF_MATRIX = 2,
+  INK2_PROF_OUTPUT = 3,
+  INK2_PROF_MIX_NORM = 4,
+  INK2_PROF_GATES = 5,
+  INK2_PROF_CONV_ROUTER = 6,
+  INK2_PROF_COPY = 7,
+  INK2_PROF_COUNT = 8
+};
+
+INK2_API const char* ink2_build_info(void);
+INK2_API void* ink2_create(const Ink2Config* cfg, const char* backend);  // "host" or "cuda"; NULL on error
+INK2_API void ink2_destroy(void* h);
+INK2_API const char* ink2_last_error(void* h);  // h may be NULL (errors of ink2_create / ink2_selftest)
+INK2_API int ink2_set_tensor(void* h, const char* name, const void* data, long long nbytes);
+INK2_API int ink2_finalize(void* h);
+INK2_API int ink2_reset(void* h);
+INK2_API int ink2_step(void* h, int token, float* logits_out);  // logits_out may be NULL
+// A token whose prediction is not needed (all prompt tokens but the last): no output projection,
+// no copy, no wait. INK2_GET_FINAL_HIDDEN and INK2_GET_LOGITS are not valid after it.
+INK2_API int ink2_feed(void* h, int token);
+// Options: "graph" 1 = record the kernels of a step once and replay them with one call (cuda only);
+// "gemvc" / "exp13c" 0 = use the row-per-warp kernels instead of the column-owner forms (default 1;
+// passes of several rows always use the column-owner expert form);
+// before ink2_finalize only: "max_rows" = largest R of a pass (default 128, R * top_k <= 2048),
+// "rollback" = positions ink2_truncate can always drop (default 64; the rings keep
+// max(max_rows, rollback) extra positions); "chunk" = rows per pass of ink2_feed_many (default 128).
+INK2_API int ink2_set_option(void* h, const char* name, int value);
+
+// ---- version 2 ----
+INK2_API int ink2_abi_version(void);  // INK2_ABI_VERSION of the DLL
+// n prompt tokens whose predictions are not needed, in passes of "chunk" rows (no output
+// projection, no copy, no wait). Same results as n calls of ink2_feed.
+INK2_API int ink2_feed_many(void* h, const int* ids, int n);
+// n consecutive tokens in one pass with the logits of every row (n <= max step rows, see
+// ink2_limits): same results as n calls of ink2_step. Any output may be NULL:
+// logits_out [n, vocab], argmax_out [n] (first index of the largest logit), max_out [n] (that logit).
+INK2_API int ink2_step_many(void* h, const int* ids, int n, float* logits_out, int* argmax_out, float* max_out);
+// Drops the positions from n_positions on (rejected drafted tokens, a chat continued from an
+// earlier point): at most `rollback` positions (ink2_limits out4[2]) without recomputing; more
+// gives an error (reset and feed again). n_positions = 0 is a reset.
+INK2_API int ink2_truncate(void* h, int n_positions);
+INK2_API int ink2_position(void* h);  // positions seen so far
+// out4: max rows of a pass, max rows of ink2_step_many, positions ink2_truncate can drop, max_positions.
+INK2_API int ink2_limits(void* h, int* out4);
+// As ink2_get, for row `row` of the last pass (row 0 = the token of the last single step).
+INK2_API int ink2_get_row(void* h, int what, int visit, int row, void* out, long long out_bytes);
+// out4: seconds spent queueing kernels, seconds waiting for the logits, steps, kernel launches (cleared).
+// Returns the number of graphs recorded so far.
+INK2_API int ink2_timing(void* h, double* out4);
+INK2_API int ink2_num_visits(void* h);
+INK2_API int ink2_visit_info(void* h, int visit, int* layer, int* pass);
+INK2_API int ink2_get(void* h, int what, int visit, void* out, long long out_bytes);
+INK2_API long long ink2_memory_used(void* h);  // bytes allocated by the engine on its backend
+INK2_API int ink2_device_memory(void* h, long long* free_bytes, long long* total_bytes);
+INK2_API int ink2_profile(void* h, int enable, double* seconds_out, int n);  // returns and clears the slots
+// Timing of every kernel alone: with reps > 0 each kernel of the following steps runs reps times in a
+// row (those steps give no valid result; reset afterwards). Returns the number of kernels; fills the
+// seconds of one run and the launch counts per kernel since the last call.
+INK2_API const char* ink2_kernel_name(int kid);
+INK2_API int ink2_bench(void* h, int reps, double* seconds_out, long long* counts_out, int n);
+// Debug capture: the buffers written by every operation of one visit (-1 = off).
+INK2_API int ink2_capture(void* h, int visit);
+INK2_API int ink2_capture_count(void* h);
+INK2_API int ink2_capture_get(void* h, int i, char* name_out, int name_cap, float* data_out, long long max_floats);
+// Device measurements that are independent of the model (launch cost, barrier cost); cuda build only.
+INK2_API int ink2_microbench(char* report, int report_cap);
+// Every kernel on random inputs, host emulation against the CUDA build.
+// Returns the number of kernels over the tolerance (0 = pass), < 0 on error.
+INK2_API int ink2_selftest(const char* backend, char* report, int report_cap);

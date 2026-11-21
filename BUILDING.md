@@ -85,6 +85,47 @@ reads prompts and runs passes of 64 rows as 0.1.7 did. `YSKN_EDIT_COPY=1` turns 
 set them yourself: the Python package sets both from `--prefill` (or `YASAKANI_PREFILL`) and `--edit-copy` (or `YASAKANI_EDIT_COPY`), also
 for a library you built and pass with `--dll` ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md), 5.5 and chapter 8).
 
+## The Inkling-2 Mini library (`yskn_inkling2.dll`, since 0.3.0)
+
+日本語：Inkling-2 Mini 用のエンジンは別の DLL（`yskn_inkling2.dll`）で、エンジンの zip の `yskn.dll` の隣に入っています。ソースは `src/inkling2/` です。「x64 Native Tools Command Prompt for VS 2022」で `src\inkling2\build.cmd cuda` を実行すると `build\inkling2\yskn_inkling2.dll` ができます。Qwen3.8 用の `yskn.dll` は変わりません。
+
+The engine zip of 0.3.0 holds a second library next to `yskn.dll`: `yskn_inkling2.dll`, the engine for Inkling-2 Mini (text only, one
+request at a time; experimental in 0.3.0). It has its own C interface (`src/inkling2/ink2_api.h`) and shares no code with `yskn.dll`, which
+stays the file of 0.2.0 (SHA-256 `c995bb24c297ae823dfc92eaaf3357401083a9922abe2fdfeb56509c323fd052`). The Python package loads it only for
+a model folder whose `yasakani.json` says `"architecture": "inkling2"`, and finds it in this order: `--dll` when it names this library or a
+folder that holds it, the environment variable `YASAKANI_INK2_DLL`, then `yskn_inkling2.dll` next to `yskn.dll` (`--dll`, `YASAKANI_DLL` or
+the `bin` folder next to the package). The launcher passes the `yskn.dll` of its engine folder, so it needs no setting.
+
+What is in `src/inkling2/`:
+
+* `ink2_kernels.inc`: every GPU kernel, one source for two builds. `ink2_cuda.cu` compiles it as CUDA kernels; `ink2_emu.cpp` runs the
+  same source on the CPU under a small thread-block emulator (used by the self-test and by the CPU build for the unit tests).
+* `ink2_engine.cpp`: the order of the layer visits, the caches, the loading of the weights and the C interface. `ink2_kargs.h`: the
+  argument blocks of the kernels. `ink2_selftest.cpp`: every kernel on random inputs, the CPU emulation against the GPU build.
+  `ink2_micro.cu`: launch and barrier measurements of the GPU.
+* `build.cmd`: the build. There is no CMake file for this library.
+
+The released `yskn_inkling2.dll` has SHA-256 `@@YSKN_INKLING2_SHA256@@` (@@YSKN_INKLING2_BYTES@@ bytes). It was built with the tools of
+the table above (Visual C++ 19.44, CUDA Toolkit 13.2) by `build.cmd cuda`. Like `yskn.dll` it has machine code for compute capability 8.6
+(RTX 30 series), 8.9 (RTX 40 series) and 12.0 (RTX 50 series), plus PTX for `compute_120`, and the CUDA runtime is linked statically. It
+also uses the OpenMP library of Visual C++ (`vcomp140.dll`, part of the Visual C++ 2015-2022 x64 runtime). Only the RTX 5090 has been
+tested. The model needs about 22 GB of GPU memory at a context of 32,768 tokens, so cards with less than 24 GB cannot run it.
+
+To build it, open the **x64 Native Tools Command Prompt for VS 2022** with the CUDA Toolkit 13 installed (the installer sets `CUDA_PATH`;
+without it `nvcc` must be on the path), go to the source folder and run:
+
+```bat
+src\inkling2\build.cmd cuda
+yasakani info --model-dir D:\models\inkling2-mini --dll build\inkling2\yskn_inkling2.dll
+```
+
+The build takes a minute or two and writes `build\inkling2\yskn_inkling2.dll` (about 2.3 MB). `set INK2_ARCHS=-gencode
+arch=compute_120,code=sm_120` before it builds for the RTX 50 series only. `src\inkling2\build.cmd host` builds
+`build\inkling2\ink2_host.dll`, the kernels on the CPU only: it is not released and serves the unit tests of the package
+(`YASAKANI_TEST_INK2_DLL`, with the tiny test checkpoint in `YASAKANI_TEST_INK2_SOURCE`; see `python/tests/test_inkling2.py`). The library
+is for Windows only; there is no Linux build of it. Then check it with `yasakani selfcheck` on the model folder: it compares the greedy
+tokens with those of the official test of the model.
+
 ## Linux (building from source)
 
 The engine also builds on Linux, as `libyskn.so` (contributed in [#3](https://github.com/yasakani-dev/yasakani/pull/3)). This is building
@@ -298,6 +339,7 @@ Add `-DCMAKE_CUDA_ARCHITECTURES=120` to the first command for a faster build tha
 ## Layout
 
 * `src/`: the engine (C++ and CUDA); `include/`: the C interface that the Python package binds to; `third_party/`: nlohmann/json (MIT).
+* `src/inkling2/`: the engine for Inkling-2 Mini (`yskn_inkling2.dll`), with its own C interface and build script (see above).
 * The Python package is built and installed separately (`pip install .` in its folder).
 * `tools/convert/`: the program that made the released model files from the original weights (Qwen3.8-27B only). See
   [tools/convert/README.md](tools/convert/README.md).

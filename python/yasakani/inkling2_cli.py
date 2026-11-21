@@ -99,7 +99,8 @@ def cmd_info(args) -> int:
         dll = ink.find_dll(getattr(args, "dll", None))
         binding = ink.find_binding(dll)
         mod = ink.load_binding(binding)
-        lib_info = mod.open_dll(str(dll)).ink2_build_info().decode("utf-8", "replace")
+        lib = ink.open_library(mod, dll)
+        lib_info = "%s, interface version %d" % (lib.ink2_build_info().decode("utf-8", "replace"), lib.abi)
         print("engine   %s  %s  sha256 %s  (%s; uses the %s backend)" % (dll.name, _human(dll.stat().st_size),
               hashlib.sha256(dll.read_bytes()).hexdigest()[:16], lib_info, ink.backend_of(lib_info)))
         print("binding  %s" % binding.name)

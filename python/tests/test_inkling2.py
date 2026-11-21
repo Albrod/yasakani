@@ -4,8 +4,8 @@ template, output stream, sampling, the engine on its host backend, the server, a
 
 Needs (else the tests skip):
   YASAKANI_TEST_INK2_SOURCE  the downloaded hf-internal-testing/tiny-inkling2-mini folder (config.json, model.safetensors, tokenizer)
-  YASAKANI_TEST_INK2_DLL     the host build of the Inkling-2 engine library (ink2_host.dll), with its binding ink2_native.py next to
-                             it or one folder up (only for the engine and server tests)
+  YASAKANI_TEST_INK2_DLL     the host build of the Inkling-2 engine library (build/inkling2/ink2_host.dll of src/inkling2/build.cmd
+                             host; only for the engine and server tests)
 The engine tests run on the CPU (about 20 s each class).
 """
 import argparse
