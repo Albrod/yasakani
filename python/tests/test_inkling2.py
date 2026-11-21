@@ -936,5 +936,82 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual((args.temperature, args.top_p, args.top_k, args.prompt), (None, None, None, None))
 
 
+# ---- the expected self-check tokens shipped for --scheme quality ---------------------------------------------------------------
+QUALITY_DIR = os.environ.get("YASAKANI_TEST_INK2_QUALITY_DIR")   # optional: the folder of Inkling-2 Mini converted with --scheme quality
+
+
+class ShippedSelfcheckTests(unittest.TestCase):
+    """data/inkling2_selfcheck.json: one entry for the quality conversion of the published revision, with the three cases."""
+
+    def test_the_data_file(self):
+        d = json.loads(conv.KNOWN_SELFCHECK.read_text(encoding="utf-8"))
+        entries = conv.known_conversions("thinkingmachines/Inkling-2-Mini", "ed40e7da625f594fc9c4990f5f66be24873c22d7", "quality")
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(d["conversions"], [e])
+        self.assertEqual((e["file"], e["size"], e["sha256"]), ("inkling_2_mini_quality.yskn", 15052423172,
+                                                               "44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d"))
+        self.assertEqual(sorted(e["cases"]), sorted(c["name"] for c in conv.SELFCHECK_CASES))
+        self.assertEqual(e["cases"]["official"]["prompt_ids"], conv.OFFICIAL_PROMPT_IDS)
+        for c in e["cases"].values():
+            self.assertEqual(len(c["tokens"]), conv.SELFCHECK_TOKENS)
+        self.assertEqual(conv.known_conversions("thinkingmachines/Inkling-2-Mini", "0" * 40, "quality"), [])
+        self.assertEqual(conv.known_conversions("thinkingmachines/Inkling-2-Mini", e["revision"], "published"), [])
+
+    @unittest.skipUnless(QUALITY_DIR, "set YASAKANI_TEST_INK2_QUALITY_DIR to a folder converted with --scheme quality")
+    def test_equal_to_the_converted_folder(self):
+        root = Path(QUALITY_DIR)
+        meta = json.loads((root / "yasakani.json").read_text(encoding="utf-8"))
+        sc = json.loads((root / "selfcheck.json").read_text(encoding="utf-8"))
+        e = conv.known_conversions(meta["source"]["repository"], meta["source"]["revision"], meta["weights"]["scheme"])[0]
+        self.assertEqual((meta["weights"]["file"], meta["weights"]["sha256"], meta["weights"]["size"]),
+                         (e["file"], e["sha256"], e["size"]))
+        self.assertEqual({c["name"]: (c["prompt_ids"], c["tokens"]) for c in sc["cases"]},
+                         {n: (c["prompt_ids"], c["tokens"]) for n, c in e["cases"].items()})
+
+
+@unittest.skipUnless(HAVE_SOURCE, NEED_SOURCE)
+class ShippedSelfcheckConvertTests(unittest.TestCase):
+    """The converter writes the shipped tokens only when its .yskn file has the SHA-256 of the entry (tiny checkpoint)."""
+
+    def convert_with(self, sha: str, dest: Path) -> dict:
+        src_meta = json.loads((tiny_quality_folder() / "yasakani.json").read_text(encoding="utf-8"))
+        entry = dict(repository=src_meta["source"]["repository"], revision=src_meta["source"]["revision"], scheme="quality",
+                     file=src_meta["weights"]["file"], sha256=sha, size=src_meta["weights"]["size"], implementation="a test run",
+                     cases={"official": {"prompt_ids": conv.OFFICIAL_PROMPT_IDS, "tokens": TINY_QUALITY_TOKENS}})
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        data = dest.parent / "known.json"
+        data.write_text(json.dumps({"format": 1, "conversions": [entry]}), encoding="utf-8")
+        with mock.patch.object(conv, "KNOWN_SELFCHECK", data):
+            conv.convert(tiny_source(), dest, repo=entry["repository"], revision=entry["revision"], scheme="quality", threads=4)
+        return json.loads((dest / "selfcheck.json").read_text(encoding="utf-8"))
+
+    def test_known_and_other_sha256(self):
+        want = json.loads((tiny_quality_folder() / "yasakani.json").read_text(encoding="utf-8"))["weights"]["sha256"]
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "known" / "f"
+            sc = self.convert_with(want, root)                                   # the same conversion again: the same file
+            self.assertEqual([(c["name"], c["tokens"], c["prompt_ids"]) for c in sc["cases"]],
+                             [("official", TINY_QUALITY_TOKENS, conv.OFFICIAL_PROMPT_IDS)])
+            self.assertEqual(sc["cases"][0]["source"], "greedy output of the converted weights: a test run")
+            self.assertNotIn("note", sc)
+            meta = json.loads((root / "yasakani.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["weights"]["sha256"], want)
+            pack = ink.Ink2Pack.load(root)
+            self.assertTrue(all(pack.verify().values()))
+            self.assertEqual(ink.selfcheck_cases(pack)[0]["tokens"], TINY_QUALITY_TOKENS)
+            if HAVE_DLL:                                                         # and the folder passes selfcheck
+                fmt, eng, _ = ink.open_runner(pack, 128, dll=DLL, warm=False)
+                try:
+                    out = []
+                    self.assertEqual(ink.run_selfcheck(eng, fmt, ink.selfcheck_cases(pack), say=out.append), 0, out)
+                finally:
+                    eng.close()
+            sc = self.convert_with("0" * 64, Path(t) / "other" / "f")            # another SHA-256: no cases, the usual note
+            self.assertEqual(sc["cases"], [])
+            self.assertIn("no expected tokens were made", sc["note"])
+
+
+
 if __name__ == "__main__":
     unittest.main()

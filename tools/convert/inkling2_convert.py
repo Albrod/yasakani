@@ -25,8 +25,11 @@ Two schemes:
   The vision tower and the drafter are not in the file.  Measured on 43 windows (14,024 positions) against the
   published model: KL 0.0110, top-1 96.0 %; the file has 15.05 GB (the published file 19.5 GB, with the vision tower).
   The expected tokens of selfcheck.json are made FROM THE CONVERTED WEIGHTS, by a reference implementation of the model (PyTorch;
-  not part of this repository): ``--reference-code`` names the folder of its ``ink2_dev.py``, or ``--selfcheck-tokens`` a JSON
-  file {case name: [token ids]} made by such a run.  Without either, selfcheck.json has no cases.
+  not part of this repository).  The conversion on the CPU is reproducible byte for byte, and data/inkling2_selfcheck.json holds
+  the tokens of the conversions we checked (by source revision, scheme and the SHA-256 of the .yskn file): when the file written
+  here has exactly such a SHA-256, they go into selfcheck.json.  ``--selfcheck-tokens`` gives them as a JSON file {case name:
+  [token ids]} made by a reference run, ``--reference-code`` the folder of a reference implementation to run.  Without any of
+  these, selfcheck.json has no cases.
 
 With both schemes the model's drafter (mtp.safetensors, a few layers that propose tokens for speculative decoding) is placed in
 the model folder unchanged (a hard link where possible, else a copy) and named by the ``drafter`` entry of the manifest; a source
@@ -63,6 +66,7 @@ OPTIONAL_TEXT_FILES = ("README.md",)
 DEFAULT_CTX = 32768                  # context the engine opens by default (the model allows more; the cache grows with it)
 DRAFTER_FILE = "mtp.safetensors"     # the model's drafter (multi-token prediction layers), published next to the weights
 POLICY = "https://thinkingmachines.ai/model-acceptable-use-policy/"
+KNOWN_SELFCHECK = HERE / "data" / "inkling2_selfcheck.json"   # expected tokens of the --scheme quality conversions we checked
 SCHEMES = ("published", "quality")
 NVFP4_SEARCH, MXFP8_SEARCH = 6, 1
 
@@ -413,6 +417,33 @@ def read_tokens_file(path: str):
     return d, "a reference run (%s)" % Path(path).name
 
 
+def known_conversions(repo: str, revision: str, scheme: str):
+    """The entries of data/inkling2_selfcheck.json for this source revision and scheme ([] when there are none)."""
+    try:
+        d = json.loads(KNOWN_SELFCHECK.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    conv = d.get("conversions") if isinstance(d, dict) else None
+    return [c for c in (conv if isinstance(conv, list) else []) if isinstance(c, dict) and c.get("repository") == repo
+            and c.get("revision") == revision and c.get("scheme") == scheme]
+
+
+def shipped_tokens(entries, file_sha: str, cases):
+    """(tokens {case: [ids]}, implementation) of the entry with the SHA-256 ``file_sha``, for the cases whose prompt ids equal the
+    entry's; ({}, "") when no entry has that SHA-256."""
+    for e in entries:
+        if e.get("sha256") != file_sha:
+            continue
+        known = e.get("cases") if isinstance(e.get("cases"), dict) else {}
+        tokens = {}
+        for c in cases:
+            k = known.get(c["name"])
+            if isinstance(k, dict) and k.get("tokens") and [int(i) for i in k.get("prompt_ids") or []] == list(c["prompt_ids"]):
+                tokens[c["name"]] = [int(t) for t in k["tokens"]]
+        return tokens, str(e.get("implementation") or "a reference run")
+    return {}, ""
+
+
 def write_selfcheck(folder: Path, model_id: str, cases, tokens: dict, impl: str, fmt) -> dict:
     out = []
     for c in cases:
@@ -538,6 +569,20 @@ def convert(source: Path, out: Path, repo: str = None, revision: str = None, cop
             tokens, impl = read_tokens_file(selfcheck_tokens)
         elif reference_code:
             tokens, impl = reference_tokens(out, out_weights, cases, reference_code, reference_device, SELFCHECK_TOKENS)
+        else:
+            entries = known_conversions(repo, revision, scheme)
+            if entries:
+                sums[out_weights] = sha256_of(out / out_weights)             # also the manifest's
+                tokens, impl = shipped_tokens(entries, sums[out_weights], cases)
+                if tokens:
+                    say("selfcheck: %s equals the conversion we checked (SHA-256 %s...): selfcheck.json gets its expected "
+                        "tokens (%d cases)" % (out_weights, sums[out_weights][:16], len(tokens)))
+                else:
+                    say("note: %s has the SHA-256 %s..., not that of the conversion we checked (%s...); selfcheck.json has no "
+                        "cases" % (out_weights, sums[out_weights][:16], str(entries[0].get("sha256"))[:16]))
+            else:
+                say("note: no expected tokens are known for %s at revision %s (scheme %s); selfcheck.json has no cases"
+                    % (repo, revision, scheme))
         write_selfcheck(out, model_id, cases, tokens, impl, fmt)
 
     drafter_entry = None
@@ -612,7 +657,8 @@ def main(argv=None) -> int:
     ap.add_argument("--default-ctx", type=int, default=DEFAULT_CTX, help="context the engine opens by default (%d)" % DEFAULT_CTX)
     ap.add_argument("--device", default="cpu", help="where the quantiser runs: cpu (numpy, default) or a PyTorch device such as cuda")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads of the quantiser (default: the CPU count, at most 32)")
-    ap.add_argument("--reference-code", help="folder of the reference implementation (ink2_dev.py) for the expected tokens")
+    ap.add_argument("--reference-code", help="folder of a reference implementation of the model (PyTorch, not part of this "
+                                             "repository) that makes the expected tokens of selfcheck.json")
     ap.add_argument("--reference-device", default="cpu", help="PyTorch device of the reference run (cpu or cuda)")
     ap.add_argument("--selfcheck-tokens", help="JSON file {case: [token ids]} with the expected tokens of a reference run")
     ap.add_argument("--selfcheck-only", action="store_true", help="only make selfcheck.json of an existing re-quantised folder again")

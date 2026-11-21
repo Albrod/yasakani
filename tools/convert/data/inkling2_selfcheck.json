@@ -1,0 +1,29 @@
+{
+ "note": "Expected tokens of selfcheck.json for Inkling-2 folders made with --scheme quality. tools/convert/inkling2_convert.py writes them into the new folder only when the .yskn file it wrote has exactly the SHA-256 of an entry here (the conversion on the CPU is byte for byte reproducible); any other file gets a selfcheck.json without cases. The tokens are the greedy output of a reference implementation of the model on the weights of that file.",
+ "format": 1,
+ "conversions": [
+  {
+   "repository": "thinkingmachines/Inkling-2-Mini",
+   "revision": "ed40e7da625f594fc9c4990f5f66be24873c22d7",
+   "scheme": "quality",
+   "file": "inkling_2_mini_quality.yskn",
+   "sha256": "44ef7ea5eade7a1e6cfb4f7ad3f7568a701ce9c621f7e4d00d38b624f4de138d",
+   "size": 15052423172,
+   "implementation": "Ink2DevModel (PyTorch 2.10.0+cu128, float32, CUDA), dense matrices decoded from the file and rounded to bfloat16 (what the engine is given), experts decoded from the stored codes",
+   "cases": {
+    "official": {
+     "prompt_ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 100887, 149881, 150011, 156021, 151661, 149876, 158808, 149884, 152978, 152778, 13, 200010],
+     "tokens": [200001, 200008, 371, 150409, 171960, 149887, 150011, 156021, 181130, 151661, 149876, 158808, 149884, 152978, 152778, 13, 170289, 150893, 149911, 4123, 13, 170289, 151791, 153606, 25, 220, 47157, 180553, 25, 177113, 152778, 166386, 82, 159486, 150033, 163485, 149910, 150924, 161777, 11, 149982, 152778, 150932, 149884, 159486, 302, 149881, 149971]
+    },
+    "japanese": {
+     "prompt_ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 90626, 6079, 14771, 23970, 120494, 19275, 6085, 11728, 77122, 6108, 6434, 123042, 5919, 14771, 18004, 6079, 21415, 115683, 6110, 6125, 6116, 6101, 6434, 200010],
+     "tokens": [200001, 200008, 371, 150409, 171960, 149881, 165047, 25, 196980, 90626, 6079, 14771, 23970, 120494, 19275, 6085, 11728, 77122, 6108, 6434, 123042, 5919, 14771, 18004, 6079, 21415, 115683, 6110, 6125, 6116, 6101, 6434, 1, 150465, 849, 25, 150721, 149884, 149876, 155543, 159044, 149881, 153630, 30, 154001, 151968, 149876, 152134]
+    },
+    "code": {
+     "prompt_ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 3711, 149878, 152743, 150131, 149890, 153939, 149876, 149934, 12, 258, 181713, 150107, 13, 200010],
+     "tokens": [200001, 200008, 371, 150409, 171960, 149887, 149878, 152743, 150131, 157850, 149934, 12, 258, 181713, 150107, 13, 150078, 149884, 195307, 163872, 13, 170289, 150684, 149911, 4123, 150893, 13, 170289, 154573, 189105, 167569, 13, 166910, 153135, 34086, 150131, 149899, 179836, 159072, 13, 220, 45169, 149934, 28, 15, 197005, 15, 11]
+    }
+   }
+  }
+ ]
+}
