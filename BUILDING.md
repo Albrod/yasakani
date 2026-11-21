@@ -100,16 +100,23 @@ What is in `src/inkling2/`:
 
 * `ink2_kernels.inc`: every GPU kernel, one source for two builds. `ink2_cuda.cu` compiles it as CUDA kernels; `ink2_emu.cpp` runs the
   same source on the CPU under a small thread-block emulator (used by the self-test and by the CPU build for the unit tests).
-* `ink2_engine.cpp`: the order of the layer visits, the caches, the loading of the weights and the C interface. `ink2_kargs.h`: the
-  argument blocks of the kernels. `ink2_selftest.cpp`: every kernel on random inputs, the CPU emulation against the GPU build.
-  `ink2_micro.cu`: launch and barrier measurements of the GPU.
+* `ink2_engine.cpp`: the order of the layer visits, the caches, the loading of the weights and the C interface (interface version 3,
+  `ink2_api.h`). It checks the values of `config.json` it is given (head counts, sizes, experts and top-k, kernel and window sizes)
+  before it allocates anything. `ink2_kargs.h`: the argument blocks of the kernels. `ink2_selftest.cpp`: every kernel on random
+  inputs, the CPU emulation against the GPU build. `ink2_micro.cu`: launch and barrier measurements of the GPU.
+* The dense (non-expert) matrices are multiplied either from bfloat16 (the published weights) or as they are stored in a converted
+  `.yskn` file (4-bit NVFP4 and 8-bit MXFP8 rows, `--scheme quality`); `ink2_capabilities()` says so (bit 1).
+* `ink2_drafter.inc`, `ink2_drafter_kernels.inc`, `ink2_drafter_kargs.h`, `ink2_drafter_api.h`: the model's drafter
+  (`mtp.safetensors`) inside the same library, and the pass that checks its guesses (`ink2_capabilities()` bit 2).
 * `build.cmd`: the build. There is no CMake file for this library.
 
-The released `yskn_inkling2.dll` has SHA-256 `af783cdd41d701a2b112ba803b4b29501ebcd34f567066e7d317f76fb9fc1ffc` (2,253,824 bytes). It was built with the tools of
+The released `yskn_inkling2.dll` has SHA-256 `61eec80a1c39c11f3e13a115b5cfcc44653b160d74cb84bad429a4cac3a5436e` (4,067,328 bytes): the
+engine with the drafter and with the products for packed dense matrices, built from `src/inkling2/` of this release. It was built with the tools of
 the table above (Visual C++ 19.44, CUDA Toolkit 13.2) by `build.cmd cuda`. Like `yskn.dll` it has machine code for compute capability 8.6
 (RTX 30 series), 8.9 (RTX 40 series) and 12.0 (RTX 50 series), plus PTX for `compute_120`, and the CUDA runtime is linked statically. It
 also uses the OpenMP library of Visual C++ (`vcomp140.dll`, part of the Visual C++ 2015-2022 x64 runtime). Only the RTX 5090 has been
-tested. The model needs about 22 GB of GPU memory at a context of 32,768 tokens, so cards with less than 24 GB cannot run it.
+tested. At a context of 32,768 tokens the engine allocates about 22 GB of GPU memory for the published weights (23 GB with the drafter)
+and about 18 GB for the weights of `--scheme quality` (19 GB with the drafter), so cards with less than 24 GB cannot run it.
 
 To build it, open the **x64 Native Tools Command Prompt for VS 2022** with the CUDA Toolkit 13 installed (the installer sets `CUDA_PATH`;
 without it `nvcc` must be on the path), go to the source folder and run:
@@ -119,7 +126,7 @@ src\inkling2\build.cmd cuda
 yasakani info --model-dir D:\models\inkling2-mini --dll build\inkling2\yskn_inkling2.dll
 ```
 
-The build takes a minute or two and writes `build\inkling2\yskn_inkling2.dll` (about 2.3 MB). `set INK2_ARCHS=-gencode
+The build takes a few minutes and writes `build\inkling2\yskn_inkling2.dll` (about 4 MB). `set INK2_ARCHS=-gencode
 arch=compute_120,code=sm_120` before it builds for the RTX 50 series only. `src\inkling2\build.cmd host` builds
 `build\inkling2\ink2_host.dll`, the kernels on the CPU only: it is not released and serves the unit tests of the package
 (`YASAKANI_TEST_INK2_DLL`, with the tiny test checkpoint in `YASAKANI_TEST_INK2_SOURCE`; see `python/tests/test_inkling2.py`). The library
