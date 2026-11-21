@@ -107,7 +107,7 @@ class RuntimeProfile:
 
     @classmethod
     def default(cls, pack: "ModelPack", overrides: Optional[Dict[str, str]] = None) -> "RuntimeProfile":
-        if pack.is_inkling2:
+        if pack.is_hf_inkling2:                   # the engine of #28 has no drafter head or KV profile
             env: Dict[str, str] = {}
             for k, v in (overrides or {}).items():
                 if not k.startswith("YSKN_"):
@@ -150,6 +150,7 @@ class ModelPack:
     vocab_size: int = VOCAB_SIZE
     padded_vocab_size: int = VOCAB_SIZE
     eos_ids: Tuple[int, ...] = EOS_IDS
+    sampling_defaults: Dict[str, float] = field(default_factory=dict)    # the model's (generation_config.json); empty: Qwen3.8's
 
     DEFAULT_FILES = dict(weights="qwen38_27b_e3x.yskn", draft="bdraft2_k8.yskn", draft_head="bdraft2_k8.shead", kv_profile="kvq_u5.bin")
 
@@ -158,64 +159,66 @@ class ModelPack:
         return load_suppress_tokens(paths, self, allow_special=allow_special)
 
     @property
-    def is_inkling2(self) -> bool:
-        return self.arch == "inkling2_loop"
+    def is_hf_inkling2(self) -> bool:
+        """A folder of the published Inkling-2 safetensors without yasakani.json, run by the engine of #28 inside yskn.dll /
+        libyskn.so (a library built with YSKN_WITH_INK2).  Not the 0.3.0 Inkling-2 folders ("architecture": "inkling2" in
+        yasakani.json, yasakani/inkling2.py), which never reach this class."""
+        return self.arch == HF_INKLING2_ARCH
 
     @classmethod
-    def load(cls, root) -> "ModelPack":
+    def load(cls, root, *, hf_inkling2: bool = False) -> "ModelPack":
+        """``hf_inkling2``: the caller can run a folder of the published Inkling-2 safetensors without yasakani.json (it checks the
+        engine library itself, see :func:`hf_inkling2_error`).  Without it such a folder gives the error of 0.3.0, with a hint."""
         root = Path(root)
         if not root.is_dir():
             raise YasakaniError("model folder not found: %s" % root)
-        cfg_file = root / "config.json"
-        if cfg_file.is_file():
-            try:
-                cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, ValueError) as exc:
-                raise YasakaniError("cannot read config.json in %s: %s" % (root, exc)) from exc
+        cfg = _hf_inkling2_config(root) if hf_inkling2 else None
+        if cfg is not None:
             tcfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else cfg
-            mt = cfg.get("model_type")
-            tmt = tcfg.get("model_type") if isinstance(tcfg, dict) else None
-            if mt == "inkling2_loop" or tmt == "inkling2_loop_text":
-                for need in ("tokenizer.json", "tokenizer_config.json"):
-                    if not (root / need).is_file():
-                        raise YasakaniError("model folder %s is missing %s" % (root, need))
-                st_files = sorted(
-                    p for p in root.glob("*.safetensors")
-                    if p.is_file() and p.name != "mtp.safetensors"
-                )
-                if not st_files:
-                    raise YasakaniError("model folder %s has no model .safetensors file" % root)
-                padded_v = int(tcfg.get("vocab_size", 201024))
-                vocab_v = int(tcfg.get("unpadded_vocab_size", padded_v))
-                max_pos = int(tcfg.get("max_position_embeddings", 131072))
-                eos_list: List[int] = []
-                gc_file = root / "generation_config.json"
-                raw_eos = cfg.get("eos_token_id")
-                if gc_file.is_file():
-                    try:
-                        gc = json.loads(gc_file.read_text(encoding="utf-8"))
-                        if "eos_token_id" in gc:
-                            raw_eos = gc["eos_token_id"]
-                    except (OSError, UnicodeDecodeError, ValueError):
-                        pass
-                if isinstance(raw_eos, int) and not isinstance(raw_eos, bool):
-                    eos_list.append(int(raw_eos))
-                elif isinstance(raw_eos, list):
-                    eos_list.extend(int(x) for x in raw_eos if isinstance(x, int) and not isinstance(x, bool))
-                if not eos_list:
-                    eos_list = [200006, 199999]
-                elif 199999 not in eos_list:
-                    eos_list.append(199999)
-                return cls(
-                    root=root,
-                    weights=st_files[0],
-                    max_ctx=min(max_pos, 131072),
-                    model_id=root.name or "inkling2-mini",
-                    arch="inkling2_loop",
-                    vocab_size=vocab_v,
-                    padded_vocab_size=padded_v,
-                    eos_ids=tuple(eos_list),
-                )
+            for need in ("tokenizer.json", "tokenizer_config.json"):
+                if not (root / need).is_file():
+                    raise YasakaniError("model folder %s is missing %s" % (root, need))
+            st_files = sorted(
+                p for p in root.glob("*.safetensors")
+                if p.is_file() and p.name != "mtp.safetensors"
+            )
+            if not st_files:
+                raise YasakaniError("model folder %s has no model .safetensors file" % root)
+            padded_v = int(tcfg.get("vocab_size", 201024))
+            vocab_v = int(tcfg.get("unpadded_vocab_size", padded_v))
+            max_pos = int(tcfg.get("max_position_embeddings", 131072))
+            eos_list: List[int] = []
+            gc_file = root / "generation_config.json"
+            raw_eos = cfg.get("eos_token_id")
+            gc: dict = {}
+            if gc_file.is_file():
+                try:
+                    gc = json.loads(gc_file.read_text(encoding="utf-8"))
+                    if not isinstance(gc, dict):
+                        gc = {}
+                    if "eos_token_id" in gc:
+                        raw_eos = gc["eos_token_id"]
+                except (OSError, UnicodeDecodeError, ValueError):
+                    gc = {}
+            if isinstance(raw_eos, int) and not isinstance(raw_eos, bool):
+                eos_list.append(int(raw_eos))
+            elif isinstance(raw_eos, list):
+                eos_list.extend(int(x) for x in raw_eos if isinstance(x, int) and not isinstance(x, bool))
+            if not eos_list:
+                eos_list = [200006, 199999]
+            elif 199999 not in eos_list:
+                eos_list.append(199999)
+            return cls(
+                root=root,
+                weights=st_files[0],
+                max_ctx=min(max_pos, 131072),
+                model_id=root.name or "inkling2-mini",
+                arch=HF_INKLING2_ARCH,
+                vocab_size=vocab_v,
+                padded_vocab_size=padded_v,
+                eos_ids=tuple(eos_list),
+                sampling_defaults=_model_sampling(gc),          # as the 0.3.0 Inkling-2 path: the model's own values
+            )
         files = dict(cls.DEFAULT_FILES)
         meta = {}
         mf = root / "yasakani.json"
@@ -225,7 +228,7 @@ class ModelPack:
         paths = {k: root / v for k, v in files.items() if k in cls.DEFAULT_FILES}
         missing = [str(p.name) for p in paths.values() if not p.is_file()]
         if missing:
-            raise YasakaniError("model folder %s is missing: %s" % (root, ", ".join(missing)))
+            raise YasakaniError("model folder %s is missing: %s%s" % (root, ", ".join(missing), _hf_inkling2_hint(root)))
         for need in ("tokenizer.json", "tokenizer_config.json"):
             if not (root / need).is_file():
                 raise YasakaniError("model folder %s is missing %s" % (root, need))
@@ -246,6 +249,72 @@ class ModelPack:
             if progress:
                 progress(name, res[name])
         return res
+
+
+# ---- Inkling-2 folders without yasakani.json (the engine of #28) ---------------------------------------------------------------------
+# Two rules, kept apart: yasakani/inkling2.py takes a folder whose yasakani.json says "architecture": "inkling2" (0.3.0, its own
+# library yskn_inkling2.dll); the rule here takes a folder that has NO yasakani.json and whose config.json says model_type
+# "inkling2_loop" (the published safetensors as downloaded), and only where the caller runs an engine library with that engine.
+HF_INKLING2_ARCH = "inkling2_loop"
+HF_INKLING2_BUILD_FLAG = "ink2=1"           # in yskn_build_info of a library built with -DYSKN_WITH_INK2=ON
+
+
+def _hf_inkling2_config(root) -> Optional[dict]:
+    """config.json of a folder of the published Inkling-2 safetensors that has no yasakani.json; None for every other folder (also
+    when config.json cannot be read: such a folder gets the usual error of a model folder)."""
+    root = Path(root)
+    if (root / "yasakani.json").exists():
+        return None
+    try:
+        cfg = json.loads((root / "config.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    tcfg = cfg.get("text_config")
+    if cfg.get("model_type") == HF_INKLING2_ARCH or (isinstance(tcfg, dict) and tcfg.get("model_type") == "inkling2_loop_text"):
+        return cfg
+    return None
+
+
+def is_hf_inkling2_folder(root) -> bool:
+    """See :func:`_hf_inkling2_config` (not ``yasakani.inkling2.is_inkling2``, which reads yasakani.json)."""
+    return _hf_inkling2_config(root) is not None
+
+
+def lib_has_hf_inkling2(lib) -> bool:
+    """The engine library has the Inkling-2 engine of #28 (built with YSKN_WITH_INK2; the released Windows yskn.dll has not)."""
+    try:
+        info = lib.build_info()
+    except Exception:
+        return False
+    return HF_INKLING2_BUILD_FLAG in (info or "").split(";")
+
+
+def _hf_inkling2_hint(root) -> str:
+    if not is_hf_inkling2_folder(root):
+        return ""
+    return ("  (this is a folder of the published Inkling-2 weights without yasakani.json: make a YASAKANI model folder of it with "
+            "tools/convert/inkling2_convert.py, or on Linux build the engine library with -DYSKN_WITH_INK2=ON, see BUILDING.md)")
+
+
+def hf_inkling2_error(root) -> YasakaniError:
+    """The error for a folder of the published Inkling-2 weights on an engine library without the engine of #28: the one of 0.3.0
+    (the Qwen3.8 files are missing), with the hint."""
+    root = Path(root)
+    missing = [n for n in ModelPack.DEFAULT_FILES.values() if not (root / n).is_file()]
+    return YasakaniError("model folder %s is missing: %s%s" % (root, ", ".join(missing), _hf_inkling2_hint(root)))
+
+
+def _model_sampling(gc: dict) -> Dict[str, float]:
+    """The sampling defaults of generation_config.json, as the 0.3.0 Inkling-2 folders keep them (top_k 0 = off)."""
+    def num(k, d, typ):
+        v = gc.get(k, d)
+        try:
+            return typ(v) if v is not None and not isinstance(v, bool) else d
+        except (TypeError, ValueError):
+            return d
+    return dict(temperature=num("temperature", 1.0, float), top_p=num("top_p", 1.0, float), top_k=int(num("top_k", 0, int) or 0))
 
 
 def suppress_fingerprint(token_ids: Sequence[int]) -> Optional[str]:

@@ -506,7 +506,7 @@ def plan_context(pack, det: Detected, reserve_mib: int = 0, max_ctx_limit: Optio
     memory is known and ``max_ctx_limit`` exceeds ``pack.max_ctx`` (e.g. ``--yarn2``), the longer context is planned against free GPU memory
     on every card.  Raises YasakaniError when not even MIN_CONTEXT tokens fit.  ``reserve_mib`` (prefill_reserve_mib) is taken off the free
     memory before the context is chosen."""
-    if getattr(pack, "is_inkling2", False):
+    if getattr(pack, "is_hf_inkling2", False):
         return ContextPlan(max_ctx=min(int(pack.max_ctx), 32768))
     plan = ContextPlan()
     limit = pack.max_ctx if max_ctx_limit is None else int(max_ctx_limit)
@@ -574,7 +574,7 @@ def plan_given_context(pack, det: Detected, max_ctx: int, reserve_mib: int = 0) 
     it in YSKN_BDR_SHEAD, and the engine loads a named head without the free-memory check it makes for one it finds by itself.
     Unchanged on larger cards for native contexts and when nvidia-smi gave no answer."""
     plan = ContextPlan(max_ctx=int(max_ctx))
-    if getattr(pack, "is_inkling2", False):
+    if getattr(pack, "is_hf_inkling2", False):
         return plan
     extended = plan.max_ctx > pack.max_ctx
     g = det.worst()

@@ -240,7 +240,7 @@ class ChatRunner:
         self.vision = vision
         self._seed = int(seed0)
         self._seed_lock = threading.Lock()
-        if getattr(fmt, "is_inkling2", False):
+        if getattr(fmt, "hf_inkling2", False):
             self.bridge = np.zeros(0, np.int32)
         else:
             self.bridge = fmt.encode(loopguard.BRIDGE)
@@ -334,7 +334,7 @@ class ChatRunner:
         max_new = max(1, int(p.max_tokens))
         seed = p.seed if p.seed is not None else self.next_seed()
         eng.set_sampling(Sampling(p.temperature, p.top_p, p.top_k, p.min_p, seed))
-        is_ink2 = bool(getattr(self.fmt, "is_inkling2", False))
+        is_ink2 = bool(getattr(self.fmt, "hf_inkling2", False))
         eos_ids = getattr(getattr(eng, "pack", None), "eos_ids", EOS_IDS)
         stops = None if p.ignore_eos else eos_ids
         usage = Usage(prompt_tokens=len(prompt))

@@ -42,10 +42,10 @@ LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
 
 class ServerConfig:
     def __init__(self, host="127.0.0.1", port=8765, api_key=None, model_id="qwen3.8-27b", default_max_tokens=32768,
-                 max_tokens_cap=None, default_thinking_budget=None, is_inkling2=False):
+                 max_tokens_cap=None, default_thinking_budget=None, hf_inkling2=False):
         self.host, self.port, self.api_key, self.model_id = host, int(port), api_key, model_id
         self.default_max_tokens, self.max_tokens_cap = int(default_max_tokens), max_tokens_cap
-        self.is_inkling2 = bool(is_inkling2)
+        self.hf_inkling2 = bool(hf_inkling2)               # the Inkling-2 engine of #28 (a folder without yasakani.json)
         if default_thinking_budget is None:               # no command-line option yet: the starter of the harness sets the variable
             try:
                 default_thinking_budget = int(os.environ.get("YASAKANI_THINKING_BUDGET") or 0)
@@ -123,7 +123,7 @@ def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> C
     rf = body.get("response_format")
     if isinstance(rf, dict) and rf.get("type") not in (None, "text"):
         raise RequestError("response_format %r is not supported" % rf.get("type"))
-    messages = clean_messages(body.get("messages"), images=images, tool_ids=bool(getattr(cfg, "keep_tool_ids", False)) or cfg.is_inkling2)
+    messages = clean_messages(body.get("messages"), images=images, tool_ids=bool(getattr(cfg, "keep_tool_ids", False)))
     mt = body.get("max_completion_tokens", body.get("max_tokens"))
     max_tokens = cfg.default_max_tokens if mt is None else _num({"v": mt}, "v", None, 1, None, int)
     if cfg.max_tokens_cap:
@@ -144,7 +144,7 @@ def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> C
     eff = body.get("reasoning_effort")
     aliases = getattr(cfg, "effort_aliases", None) or REASONING_EFFORT_ALIASES
     if eff is not None:
-        if cfg.is_inkling2:
+        if getattr(cfg, "hf_inkling2", False):           # the names of the chat template, or its number in [0, 0.99]
             if isinstance(eff, str):
                 if eff.strip() not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
                     raise RequestError("reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max or a number in [0.0, 0.99]")

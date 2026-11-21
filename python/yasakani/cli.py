@@ -23,7 +23,7 @@ from . import __version__, BUILD_NOTE
 from . import gpu as gpus
 from . import widecheck
 from ._native import NativeLib, YasakaniError, find_library, library_loaded, pci_bus_order
-from .runtime import ModelPack, RuntimeProfile, suppress_fingerprint
+from .runtime import ModelPack, RuntimeProfile, hf_inkling2_error, lib_has_hf_inkling2, suppress_fingerprint
 from .selfcheck import FORMAT as SELFCHECK_FORMAT
 from .selfcheck import cases as _selfcheck_cases, ids_sha as _ids_sha, run as _selfcheck_run    # noqa: F401  (names of 0.1.3: bench scripts use them)
 
@@ -247,7 +247,12 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1, allow_suppress: b
         raise YasakaniError("selfcheck does not support --yarn2: the reference files were made with the native rotary table")
     if yarn2 and args.max_ctx is not None and args.max_ctx > gpus.YARN2_MAX_CTX:
         raise YasakaniError("--yarn2 supports at most %d context tokens (got %d)" % (gpus.YARN2_MAX_CTX, args.max_ctx))
-    pack = ModelPack.load(_model_dir(args))
+    pack = ModelPack.load(_model_dir(args), hf_inkling2=True)    # a folder of the #28 engine: the library is checked below
+    if pack.is_hf_inkling2:                      # Qwen3.8 options this engine does not have: refused, not silently ignored
+        if yarn2:
+            raise YasakaniError("--yarn2 is for Qwen3.8 model folders only (not for Inkling-2)")
+        if suppress_paths:
+            raise YasakaniError("--suppress-tokens and YASAKANI_SUPPRESS_TOKENS are for Qwen3.8 model folders only (not for Inkling-2)")
     fmt = ChatFormatter(pack.root)
     vision = _vision(args)                       # wrong image input options fail here, before the long load
     suppress_ids = pack.load_suppress_tokens(
@@ -264,8 +269,13 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1, allow_suppress: b
     # --suppress-tokens load it below to check optional entries): CUDA reads CUDA_VISIBLE_DEVICES only once.
     device = _visible_gpu(det, args.device)
     n, lib, plan = int(parallel or 1), None, None
+    if pack.is_hf_inkling2:                      # only a library built with YSKN_WITH_INK2 has the engine of #28
+        lib = NativeLib(args.dll)
+        if not lib_has_hf_inkling2(lib):
+            raise hf_inkling2_error(pack.root)
+        _say("note: Inkling-2 folder without yasakani.json: the engine contributed in #28 (built with YSKN_WITH_INK2) runs it")
     reserve = gpus.prefill_reserve_mib(prefill, det)     # --prefill new on a card under 30,000 MiB: room for its extra memory
-    if pack.is_inkling2 and n >= 2:
+    if pack.is_hf_inkling2 and n >= 2:
         _say("note: --parallel %d is not supported for Inkling-2 yet: serving one request at a time" % n)
         n = 1
     if n >= 2:                                   # several requests at once, if the engine library has the entries
@@ -311,9 +321,9 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1, allow_suppress: b
         if max_ctx is not None and max_ctx > gpus.YARN2_MAX_CTX:
             raise YasakaniError("--yarn2 supports at most %d context tokens (got %d)" % (gpus.YARN2_MAX_CTX, max_ctx))
         extra_env["YSKN_Q35_YARN2"] = "1"
-    profile = RuntimeProfile.default(pack, extra_env) if (extra_env or pack.is_inkling2) else None
+    profile = RuntimeProfile.default(pack, extra_env) if (extra_env or pack.is_hf_inkling2) else None
     replaced = [k for k in extra_env if k in os.environ]     # set in the shell, but the plan's value is used: named with the removed ones
-    wide = "off" if pack.is_inkling2 else widecheck.mode_of(getattr(args, "wide", None))         # 0.1.7: a wrong YASAKANI_WIDE fails here, before the long load
+    wide = "off" if pack.is_hf_inkling2 else widecheck.mode_of(getattr(args, "wide", None))         # 0.1.7: a wrong YASAKANI_WIDE fails here, before the long load
     _say("loading the model (%s of weights) ..." % _human(pack.weights.stat().st_size))
     t0 = time.time()
     eng = Engine(pack, max_ctx=max_ctx, device=device, dll=args.dll, profile=profile, wide=wide, **({"lib": lib} if lib is not None else {}))
@@ -331,7 +341,7 @@ def _open_stack(args, *, warm: bool = True, parallel: int = 1, allow_suppress: b
         runner = ChatRunner(eng, fmt, seed0=args.seed0, vision=vision)
         if warm:
             runner.warmup(say=_say)
-        elif not pack.is_inkling2:                                 # --no-warmup: a kept result of the wide check, nothing measured
+        elif not pack.is_hf_inkling2:                              # --no-warmup: a kept result of the wide check, nothing measured
             res = widecheck.setup(eng, None, check=False)
             eng.wide_result = res
             if res is not None and res.line:
@@ -678,7 +688,10 @@ def cmd_serve(args) -> int:
         else:
             pack, eng, fmt, runner = _open_stack(args, warm=not args.no_warmup)
         cfg.model_id = pack.model_id
-        cfg.is_inkling2 = pack.is_inkling2
+        if pack.is_hf_inkling2:                  # as the 0.3.0 Inkling-2 path: the model's sampling, the tool ids its template reads
+            cfg.hf_inkling2 = True
+            cfg.keep_tool_ids = True
+            cfg.sampling_defaults = dict(pack.sampling_defaults)
         state.runner = runner
         _say("ready: OpenAI-compatible API at %s/v1   (model id %r%s%s)" % (base, cfg.model_id, ", API key required" if cfg.api_key else "",
                                                                          ", image input on" if runner.vision is not None else ""))
@@ -722,10 +735,14 @@ def cmd_chat(args) -> int:
     from .chat import ChatParams, RequestError
     if args.ask is not None:
         raise YasakaniError("--ask is available for Inkling-2 model folders only; pipe the question into the chat instead")
+    unset = [k for k in ("temperature", "top_p", "top_k") if getattr(args, k, None) is None]
     for k, v in (("temperature", 1.0), ("top_p", 0.95), ("top_k", 20)):     # the defaults of Qwen3.8 (generation_config.json)
         if getattr(args, k, None) is None:
             setattr(args, k, v)
     pack, eng, fmt, runner = _open_stack(args, warm=True)
+    if pack.is_hf_inkling2:                      # an Inkling-2 folder of #28: the model's own defaults (top_k off)
+        for k in unset:
+            setattr(args, k, pack.sampling_defaults.get(k, getattr(args, k)))
     color = _use_color()
     dim = (lambda s: "\x1b[2m%s\x1b[0m" % s) if color else (lambda s: s)
     kw = {}

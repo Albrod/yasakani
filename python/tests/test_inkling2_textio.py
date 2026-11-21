@@ -39,13 +39,13 @@ class Inkling2TextIoTest(unittest.TestCase):
         mdir = _model_dir()
         if mdir is None:
             self.skipTest("Inkling-2-Mini files not present")
-        pack = ModelPack.load(mdir)
-        self.assertTrue(pack.is_inkling2)
+        pack = ModelPack.load(mdir, hf_inkling2=True)
+        self.assertTrue(pack.is_hf_inkling2)
         self.assertEqual(pack.vocab_size, 200058)
         self.assertEqual(pack.eos_ids, (200006, 199999))
 
         fmt = ChatFormatter(mdir)
-        self.assertTrue(fmt.is_inkling2)
+        self.assertTrue(fmt.hf_inkling2)
 
         r1 = fmt.render([{"role": "user", "content": "Hello!"}], add_generation_prompt=False, reasoning_effort="high")
         self.assertEqual(

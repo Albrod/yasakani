@@ -16,7 +16,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ._native import YasakaniError
-from .runtime import EOS_IDS, IM_START
+from .runtime import EOS_IDS, HF_INKLING2_ARCH, IM_START, is_hf_inkling2_folder
 
 
 def _raise_exception(message):
@@ -44,16 +44,10 @@ class ChatFormatter:
             template = {t.get("name"): t.get("template") for t in template}.get("default")
         if not isinstance(template, str) or not template.strip():
             raise YasakaniError("no chat template found in " + str(d))
-        self.arch = "qwen35"
-        self.is_inkling2 = False
-        cfg_file = d / "config.json"
-        if cfg_file.is_file():
-            mcfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-            tcfg = mcfg.get("text_config") if isinstance(mcfg.get("text_config"), dict) else mcfg
-            if mcfg.get("model_type") == "inkling2_loop" or (isinstance(tcfg, dict) and tcfg.get("model_type") == "inkling2_loop_text"):
-                self.arch = "inkling2_loop"
-                self.is_inkling2 = True
-        if self.is_inkling2:
+        # a folder of the published Inkling-2 weights without yasakani.json (the engine of #28; runtime.is_hf_inkling2_folder)
+        self.hf_inkling2 = is_hf_inkling2_folder(d)
+        self.arch = HF_INKLING2_ARCH if self.hf_inkling2 else "qwen35"
+        if self.hf_inkling2:
             template = template.replace("{%- generation -%}", "").replace("{%- endgeneration -%}", "")
             template = template.replace("{% generation %}", "").replace("{% endgeneration %}", "")
         env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=[loopcontrols])
@@ -63,7 +57,7 @@ class ChatFormatter:
         self.template = env.from_string(template)
         self.bos_token = cfg.get("bos_token")
         self.eos_token = cfg.get("eos_token")
-        if self.is_inkling2:
+        if self.hf_inkling2:
             self.im_start = self.token_id("<|message_user|>")
             self.im_end = self.token_id("<|end_message|>")
             self.think_start = self.token_id("<|content_thinking|>")
@@ -103,7 +97,7 @@ class ChatFormatter:
 
     def prompt(self, messages: Sequence[dict], **template_kwargs) -> Tuple[np.ndarray, bool]:
         """(prompt ids, starts inside the thinking block).  The model's template ends an open thinking block with ``<think>``."""
-        if self.is_inkling2:
+        if self.hf_inkling2:
             kw = dict(template_kwargs)
             en_think = kw.pop("enable_thinking", None)
             if en_think is False and "reasoning_effort" not in kw:

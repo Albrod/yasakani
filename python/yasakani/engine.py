@@ -68,6 +68,14 @@ class Sampling:
             k = 20
         return Sampling(float(self.temperature), float(self.top_p), k, float(self.min_p or 0.0), int(self.seed), self.mode)
 
+    def normalized_full(self) -> "Sampling":
+        """For the Inkling-2 engine of #28, which samples over the whole vocabulary: top_k 0 stays off (no cap of 20), so the model's
+        own defaults (top_p 1.0, top_k off) are what it uses, as on the 0.3.0 Inkling-2 path."""
+        if self.temperature <= 0:
+            return Sampling(0.0, 1.0, 1, 0.0, 0, self.mode)
+        return Sampling(float(self.temperature), float(self.top_p), max(0, int(self.top_k or 0)), float(self.min_p or 0.0),
+                        int(self.seed), self.mode)
+
 
 @dataclass
 class GenResult:
@@ -210,6 +218,11 @@ def _put_narrow_env_utf8(env: Dict[str, str]) -> None:
             raise YasakaniError("could not pass %s to the engine library" % k)
 
 
+
+def _runtime_mod():
+    from . import runtime
+    return runtime
+
 class Engine:
     """One model on one GPU.  Calls are serialized; ``cancel()`` may be called from any thread."""
 
@@ -236,7 +249,9 @@ class Engine:
         self._lock = threading.RLock()
         self._cancelled = False
         self._busy = False
-        open_target = pack.root if pack.is_inkling2 else pack.weights
+        if pack.is_hf_inkling2 and not _runtime_mod().lib_has_hf_inkling2(self.lib):
+            raise _runtime_mod().hf_inkling2_error(pack.root)
+        open_target = pack.root if pack.is_hf_inkling2 else pack.weights
         self._e = self._f["yskn_open"](str(open_target).encode("utf-8"), self.max_ctx, int(device), 0)
         if not self._e:
             msg = self.lib.last_error()
@@ -244,7 +259,7 @@ class Engine:
             if "memory" in msg.lower():
                 hint = "  (not enough free GPU memory: close other programs that use the GPU, or lower --max-ctx)"
             raise YasakaniError("could not open the model: %s%s" % (msg or "unknown error", hint))
-        if not pack.is_inkling2:
+        if not pack.is_hf_inkling2:
             try:
                 self._check(self._f["yskn_load_bdraft"](self._e, str(pack.draft).encode("utf-8")))
             except Exception:
@@ -362,7 +377,7 @@ class Engine:
                 self._check(f(self._e, None, None, 0, None, 0, 0))
 
     def set_sampling(self, s: Sampling) -> Sampling:
-        s = s.normalized()
+        s = s.normalized_full() if self.pack.is_hf_inkling2 else s.normalized()
         with self._lock:
             self._need_open()
             f, e = self._f["yskn_set_opt"], self._e
@@ -490,7 +505,7 @@ class Engine:
     # ---- teacher forcing -------------------------------------------------------------------------------------------------------
     @property
     def supports_forced(self) -> bool:
-        if self.pack.is_inkling2:                # the Inkling-2 engine of #28 has no teacher-forcing pass (yskn_verify_nll refuses it)
+        if self.pack.is_hf_inkling2:                # the Inkling-2 engine of #28 has no teacher-forcing pass (yskn_verify_nll refuses it)
             return False
         return all(k in self._f for k in ("yskn_verify_nll", "yskn_commit"))
 
@@ -725,7 +740,7 @@ class Engine:
         plain prompt and one prompt that contains the chat start marker; the state is reset afterwards.  0.1.7: then decide the widths
         of the wide copy passes on this GPU (yasakani/widecheck.py; ``wide_ids`` is the text the check reads, None = use a kept result
         only) and build their graphs.  ``say`` gets the one-line summary."""
-        if self.pack.is_inkling2:
+        if self.pack.is_hf_inkling2:
             self.set_sampling(Sampling(0.0, 1.0, 1, 0.0, 0, 3))
             if prompts:
                 self.reset()
@@ -747,7 +762,7 @@ class Engine:
     # ---- wide copy passes (0.1.7) ---------------------------------------------------------------------------------------------
     @property
     def supports_wide_check(self) -> bool:
-        if self.pack.is_inkling2:
+        if self.pack.is_hf_inkling2:
             return False
         return all(k in self._f for k in ("yskn_time_cycle", "yskn_wide_state", "yskn_prefill", "yskn_verify_nll", "yskn_commit"))
 
