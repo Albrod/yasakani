@@ -732,8 +732,8 @@ class QuickstartTests(unittest.TestCase):
             raise unittest.SkipTest("quickstart/quickstart.py not found (set YASAKANI_QUICKSTART)")
 
     def test_version(self):
-        self.assertEqual(self.qs.QS_VERSION, "0.2.1")
-        self.assertIn("/v0.2.1/", self.qs.ENGINE_URL)
+        self.assertEqual(self.qs.QS_VERSION, "0.3.0")
+        self.assertIn("/v0.3.0/", self.qs.ENGINE_URL)
 
     def test_decision_table(self):
         for name, cc, total, qs, quality in CARDS:
