@@ -13,6 +13,7 @@ import http.client
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import threading
@@ -40,11 +41,36 @@ NEED_DLL = "set YASAKANI_TEST_INK2_DLL to the host build of the Inkling-2 engine
 _FOLDER = {}
 
 
+def write_fake_drafter(path: Path) -> None:
+    """A small safetensors file in the place of the model's drafter (the tiny checkpoint has none; the package only places,
+    lists and checks the file, and the engine wrapper loads it)."""
+    data = np.arange(8, dtype=np.float32).tobytes()
+    head = json.dumps({"mtp.fc.weight": {"dtype": "F32", "shape": [2, 4], "data_offsets": [0, len(data)]}}).encode()
+    head += b" " * (-len(head) % 8)
+    path.write_bytes(struct.pack("<Q", len(head)) + head + data)
+
+
+def tiny_source() -> Path:
+    """The tiny checkpoint folder (hard links) with a stand-in drafter file next to its weights."""
+    if "src" not in _FOLDER:
+        d = Path(tempfile.mkdtemp(prefix="ink2_src_"))
+
+        def link(a, b):
+            try:
+                os.link(a, b)
+            except OSError:
+                shutil.copy2(a, b)
+        shutil.copytree(SOURCE, d / "src", copy_function=link)
+        write_fake_drafter(d / "src" / conv.DRAFTER_FILE)
+        _FOLDER["src"] = d
+    return _FOLDER["src"] / "src"
+
+
 def tiny_folder() -> Path:
     """The tiny checkpoint converted once per test run (hard link of the weights where possible)."""
     if "dir" not in _FOLDER:
         d = Path(tempfile.mkdtemp(prefix="ink2_tiny_"))
-        conv.convert(Path(SOURCE), d / "tiny", repo="hf-internal-testing/tiny-inkling2-mini",
+        conv.convert(tiny_source(), d / "tiny", repo="hf-internal-testing/tiny-inkling2-mini",
                      revision=conv.hf_metadata(Path(SOURCE), "model.safetensors")[0] or "test")
         _FOLDER["dir"] = d
     return _FOLDER["dir"] / "tiny"
@@ -54,14 +80,14 @@ def tiny_quality_folder() -> Path:
     """The tiny checkpoint converted once per test run with --scheme quality (no reference run: selfcheck.json has no cases)."""
     if "qdir" not in _FOLDER:
         d = Path(tempfile.mkdtemp(prefix="ink2_tinyq_"))
-        conv.convert(Path(SOURCE), d / "tinyq", repo="hf-internal-testing/tiny-inkling2-mini",
+        conv.convert(tiny_source(), d / "tinyq", repo="hf-internal-testing/tiny-inkling2-mini",
                      revision=conv.hf_metadata(Path(SOURCE), "model.safetensors")[0] or "test", scheme="quality", threads=4)
         _FOLDER["qdir"] = d
     return _FOLDER["qdir"] / "tinyq"
 
 
 def tearDownModule():
-    for k in ("dir", "qdir"):
+    for k in ("dir", "qdir", "src"):
         d = _FOLDER.pop(k, None)
         if d is not None:
             shutil.rmtree(d, ignore_errors=True)
@@ -77,6 +103,7 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(meta["weights"], dict(file="model.safetensors", format="hf-safetensors",
                                                note="published file, unchanged; vision tensors unused"))
         self.assertEqual(meta["stop_token_ids"], [200006])
+        self.assertEqual(meta["drafter"]["file"], "mtp.safetensors")
         self.assertEqual(meta["sampling"], dict(temperature=1.0, top_p=1.0, top_k=0))
         for name in ("model.safetensors", "config.json", "tokenizer.json", "chat_template.jinja", "NOTICE", "selfcheck.json"):
             self.assertIn(name, meta["sha256"])
@@ -518,6 +545,349 @@ class HostServerTests(unittest.TestCase):
         st, data = self._req("POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]}]})
         self.assertEqual(st, 400)
+
+
+@unittest.skipUnless(HAVE_SOURCE, NEED_SOURCE)
+class DrafterFolderTests(unittest.TestCase):
+    """The converter places the drafter for both schemes and names it in the manifest; verify checks it; a folder without it,
+    or with its file missing, still loads (generation without drafting)."""
+
+    def test_both_schemes_list_the_drafter(self):
+        want = (tiny_source() / conv.DRAFTER_FILE).stat().st_size
+        for root in (tiny_folder(), tiny_quality_folder()):
+            meta = json.loads((root / "yasakani.json").read_text(encoding="utf-8"))
+            d = meta["drafter"]
+            self.assertEqual((d["file"], d["format"], d["size"]), ("mtp.safetensors", "hf-safetensors", want), root.name)
+            self.assertEqual(d["sha256"], conv.sha256_of(root / "mtp.safetensors"))
+            self.assertEqual(meta["sha256"]["mtp.safetensors"], d["sha256"])
+            self.assertTrue(os.path.samefile(root / "mtp.safetensors", tiny_source() / "mtp.safetensors"))   # hard link
+            pack = ink.Ink2Pack.load(root)
+            self.assertEqual((pack.drafter, pack.drafter_problem), (root / "mtp.safetensors", ""))
+            self.assertIn("mtp.safetensors", pack.verify())
+            self.assertIn("drafter (mtp.safetensors)", (root / "NOTICE").read_text(encoding="utf-8"))
+
+    def test_verify_finds_a_changed_drafter_and_folders_without_it_load(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "c"
+            shutil.copytree(tiny_folder(), root)
+            p = root / "mtp.safetensors"
+            b = bytearray(p.read_bytes())
+            b[-1] ^= 1
+            p.unlink()                                          # the copy may be a hard link of the source: write a new file
+            p.write_bytes(bytes(b))
+            res = ink.Ink2Pack.load(root).verify()
+            self.assertEqual([n for n, ok in res.items() if not ok], ["mtp.safetensors"])
+            p.unlink()
+            pack = ink.Ink2Pack.load(root)                      # listed, file missing: loads, no drafter, verify names it
+            self.assertIsNone(pack.drafter)
+            self.assertIn("missing", pack.drafter_problem)
+            self.assertFalse(pack.verify()["mtp.safetensors"])
+            meta = json.loads((root / "yasakani.json").read_text(encoding="utf-8"))
+            del meta["drafter"]
+            del meta["sha256"]["mtp.safetensors"], meta["sizes"]["mtp.safetensors"]
+            (root / "yasakani.json").write_text(json.dumps(meta), encoding="utf-8")
+            pack = ink.Ink2Pack.load(root)                      # a folder of the earlier converter: no drafter entry
+            self.assertEqual((pack.drafter, pack.drafter_entry, pack.drafter_problem), (None, {}, ""))
+            self.assertTrue(all(pack.verify().values()))
+
+
+class DraftOptionTests(unittest.TestCase):
+    def test_modes_and_depth(self):
+        from yasakani._native import YasakaniError
+        self.assertEqual(ink.draft_mode_of(None, {}), "auto")
+        self.assertEqual(ink.draft_mode_of(None, {"YASAKANI_DRAFT": " OFF "}), "off")
+        self.assertEqual(ink.draft_mode_of("on", {"YASAKANI_DRAFT": "off"}), "on")
+        with self.assertRaisesRegex(YasakaniError, "YASAKANI_DRAFT / --draft must be one of auto, on, off"):
+            ink.draft_mode_of(None, {"YASAKANI_DRAFT": "yes"})
+        self.assertIsNone(ink.draft_depth_of(None, {}))
+        self.assertEqual(ink.draft_depth_of(None, {"YASAKANI_DRAFT_DEPTH": "5"}), 5)
+        self.assertEqual(ink.draft_depth_of(2, {"YASAKANI_DRAFT_DEPTH": "5"}), 2)
+        for bad in ("0", "8", "x"):
+            with self.assertRaisesRegex(YasakaniError, "from 1 to 7"):
+                ink.draft_depth_of(None, {"YASAKANI_DRAFT_DEPTH": bad})
+
+    def test_command_line(self):
+        from yasakani import cli
+        for cmd in ("chat", "serve", "bench", "selfcheck"):
+            args = cli.build_parser().parse_args([cmd])
+            self.assertEqual((args.draft, args.draft_depth), (None, None), cmd)
+            args = cli.build_parser().parse_args([cmd, "--draft", "on", "--draft-depth", "4"])
+            self.assertEqual((args.draft, args.draft_depth), ("on", 4), cmd)
+
+    def test_sampler_seek_gives_the_same_draws(self):
+        """Draw k of a seed is the same whether draws for rows that were not kept came in between or not."""
+        rng = np.random.default_rng(1)
+        rows = [rng.normal(size=3000).astype(np.float32) * 3 for _ in range(6)]
+        a = ink.Sampler(1.0, 0.95, seed=11)
+        plain = [a(x) for x in rows]
+        b = ink.Sampler(1.0, 0.95, seed=11)
+        got = [b(rows[0]), b(rows[1])]
+        b(rows[4])                                             # a draw for a drafted row that is thrown away
+        b(rows[5])
+        b.seek(2)
+        got += [b(x) for x in rows[2:]]
+        self.assertEqual(got, plain)
+
+
+def standin_class(base):
+    """The drafter calls of the engine wrapper (draft_load, draft_mode, spec_step, spec_stats), implemented in Python on
+    top of the engine's own step_many and truncate, for tests without the real drafter.  The proposals come from a script:
+    ``ref`` (the ids of a plain run: prompt and generated tokens) gives the true continuation while the context equals its start;
+    the positions in ``wrong`` (and every position with ``bad``) get a token that is surely not the model's choice."""
+
+    class DraftStandIn(base):
+        def draft_load(self, path):
+            if not os.path.isfile(path):
+                raise RuntimeError("drafter file not found: %s" % path)
+            self.sd = dict(mode="auto", depth=3, ref=[], wrong=set(), bad=False)
+            self.sd_stats = dict.fromkeys(("passes", "proposed", "accepted", "tokens", "draft_ms", "verify_ms", "active_passes"), 0)
+            self.pick_calls = []
+
+        def draft_loaded(self):
+            return hasattr(self, "sd")
+
+        def draft_mode(self, mode=None, depth=None):
+            if mode is not None:
+                assert mode in ("off", "on", "auto"), mode
+                self.sd["mode"] = mode
+            if depth is not None:
+                assert 1 <= depth <= 7, depth
+                self.sd["depth"] = int(depth)
+            return dict(mode=self.sd["mode"], depth=self.sd["depth"], active=self.sd["mode"] != "off")
+
+        def spec_stats(self, reset=False):
+            out = dict(self.sd_stats)
+            if reset:
+                self.sd_stats = dict.fromkeys(self.sd_stats, 0)
+            return out
+
+        def _propose(self, p0, anchor):
+            sd, ref = self.sd, self.sd["ref"]
+            ctx = list(self.seen_ids) + [int(anchor)]
+            known = not sd["bad"] and ref[:len(ctx)] == ctx
+            out = []
+            for pos in range(p0 + 1, p0 + 1 + sd["depth"]):
+                true = ref[pos] if pos < len(ref) else 0
+                out.append(int(true) if known and pos < len(ref) and pos not in sd["wrong"] else (int(true) + 1) % self.vocab)
+            return out
+
+        def spec_step(self, anchor, pick=None, want_logits=False):
+            st = self.sd_stats
+            st["passes"] += 1
+            if self.sd["mode"] == "off":
+                logits = self.step(anchor)
+                t = int(np.argmax(logits)) if pick is None else int(pick(logits))
+                self.pick_calls.append(1)
+                st["tokens"] += 1
+                return [], t, (logits if want_logits else None)
+            p0 = self.num_seen
+            drafts = self._propose(p0, anchor)
+            logits, top, _ = self.step_many([int(anchor)] + drafts, logits=pick is not None or want_logits)
+            accepted, calls = [], 0
+            for r in range(len(drafts) + 1):
+                t = int(top[r]) if pick is None else int(pick(logits[r]))
+                calls += 1
+                if r < len(drafts) and t == drafts[r]:
+                    accepted.append(t)
+                    continue
+                break
+            self.truncate(p0 + 1 + len(accepted))
+            self.pick_calls.append(calls)
+            st["active_passes"] += 1
+            st["proposed"] += len(drafts)
+            st["accepted"] += len(accepted)
+            st["tokens"] += 1 + len(accepted)
+            return accepted, t, (logits[len(accepted)].copy() if want_logits else None)
+
+    return DraftStandIn
+
+
+@unittest.skipUnless(HAVE_SOURCE and HAVE_DLL, NEED_SOURCE + " and " + NEED_DLL)
+class HostDraftTests(unittest.TestCase):
+    """The generation loop with bursts (a stand-in of the drafter calls on the host engine) against plain stepping: the same tokens,
+    text, finish reason and engine state when the reply ends in the middle of a burst; prompt reuse afterwards; sampling with a seed;
+    the older library without drafter calls; selfcheck and the server."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pack = ink.Ink2Pack.load(tiny_folder())
+        cls.fmt, cls.eng, cls.runner = ink.open_runner(cls.pack, 256, dll=DLL, warm=False)
+        cls.fallback_note = cls.eng.draft_note                  # the binding of the host library has no drafter calls
+        cls.eng.native.__class__ = standin_class(type(cls.eng.native))
+        cls.note = cls.eng.set_drafter(cls.pack, "on", 3)
+        cls.prompt = cls.fmt.encode("hi") + cls.fmt.answer_prefix          # short: the host engine reads one id per step
+        cls.ref = cls._plain(dict(max_tokens=14))[3]                        # prompt + 13 greedy tokens
+        cls.ref_s = cls._plain(dict(max_tokens=12, temperature=1.0, seed=3))[3]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.eng.close()
+
+    @classmethod
+    def _run(cls, kw, stops=None):
+        from yasakani.chat import ChatParams
+        p = ChatParams(messages=[{"role": "user", "content": "hi"}], ignore_eos=stops is None,
+                       **dict(dict(temperature=0.0), **kw))
+        pieces = []
+        saved = cls.runner.stop_ids
+        if stops is not None:
+            cls.runner.stop_ids = frozenset(stops)
+        try:
+            u = cls.runner.run(p, lambda kind, text: pieces.append((kind, text)), prepared=(cls.prompt, True))
+        finally:
+            cls.runner.stop_ids = saved
+        assert cls.eng.native.position() == len(cls.eng.fed)
+        return u, "".join(t for _, t in pieces), u.finish, list(cls.eng.fed)
+
+    @classmethod
+    def _plain(cls, kw, stops=None):
+        cls.eng.drafting = False
+        try:
+            return cls._run(kw, stops)
+        finally:
+            cls.eng.drafting = True
+
+    def _oracle(self, ref, wrong=(), depth=3, bad=False):
+        sd = self.eng.native.sd
+        sd.update(ref=list(ref), wrong=set(wrong), depth=depth, bad=bad)
+        self.eng.draft_depth = depth
+        self.eng.native.pick_calls = []
+
+    def _same(self, kw, stops=None, **oracle):
+        want = self._plain(kw, stops)
+        self._oracle(oracle.pop("ref", self.ref), **oracle)
+        got = self._run(kw, stops)
+        self.assertEqual(got[1:], want[1:])
+        self.assertEqual((got[0].completion_tokens, got[0].prompt_tokens), (want[0].completion_tokens, want[0].prompt_tokens))
+        return got[0], want
+
+    def test_notes(self):
+        self.assertIn("drafting is not available with this engine library", self.fallback_note)
+        self.assertEqual(self.note, "drafter: mtp.safetensors loaded, mode on, depth 3")
+
+    def test_greedy_bursts_equal_plain_greedy(self):
+        p = len(self.prompt)
+        u, _ = self._same(dict(max_tokens=13), wrong={p + 4, p + 9})
+        self.assertGreater(u.spec["tokens_per_pass"], 1.5)
+        self.assertEqual(u.passes, u.spec["draft_passes"])
+        self.assertLess(u.passes, u.completion_tokens)
+        self.assertGreater(u.draft_n_accepted, 0)
+        u, _ = self._same(dict(max_tokens=8), bad=True)            # every proposal wrong: one token per pass, same output
+        self.assertEqual((u.spec["tokens_per_pass"], u.draft_n_accepted), (1.0, 0))
+
+    def test_limit_stop_token_and_stop_string_in_a_burst(self):
+        p = len(self.prompt)
+        gen = self.ref[p:]
+        # depth 4 with no wrong proposals: token 0 comes from the prompt, tokens 1..4 are accepted in the first pass, so the
+        # third token (index 2) and the stop token at index 3 end the reply in the middle of a burst
+        u, (_, _, finish, fed) = self._same(dict(max_tokens=3), depth=4)
+        self.assertEqual((finish, fed), ("length", self.ref[:p + 2]))
+        j = next(i for i in range(2, len(gen)) if gen[i] not in gen[:i])
+        u, (_, _, finish, fed) = self._same(dict(max_tokens=12), stops=[gen[j]], depth=4)
+        self.assertEqual((finish, u.completion_tokens, fed), ("stop", j + 1, self.ref[:p + j]))
+        text = self.fmt.decode(gen[2:3])
+        self.assertTrue(text.strip())
+        u, (_, content, finish, fed) = self._same(dict(max_tokens=12, stop=[text]), depth=4)
+        self.assertEqual((finish, u.completion_tokens), ("stop", 3))
+        self.assertNotIn(text, content)
+        # the next prompt goes on from what was emitted: only its new ids are read, and the state equals a fresh read
+        longer = fed + gen[len(fed) - p:len(fed) - p + 1] + self.fmt.encode(" more")
+        logits, cached = self.eng.read_prompt(longer)
+        self.assertEqual(cached, len(fed))
+        self.eng.reset()
+        fresh, cached = self.eng.read_prompt(longer)
+        self.assertEqual(cached, 0)
+        np.testing.assert_allclose(logits, fresh, rtol=0, atol=1e-4)
+        self.assertEqual(int(np.argmax(logits)), int(np.argmax(fresh)))
+
+    def test_sampled_with_a_seed_equals_plain(self):
+        p = len(self.prompt)
+        kw = dict(max_tokens=11, temperature=1.0, seed=3)
+        u, _ = self._same(kw, ref=self.ref_s, wrong={p + 5})
+        self.assertGreater(u.draft_n_accepted, 0)
+        calls = self.eng.native.pick_calls
+        self.assertEqual(sum(calls), u.draft_n_accepted + len(calls))     # one pick per accepted token and one per pass
+        self._same(dict(kw, max_tokens=4), ref=self.ref_s, depth=5)       # the limit inside the first burst
+
+    def test_forced_tokens_in_a_burst(self):
+        """generate(): tokens forced after a token in the middle of a burst (as the thinking budget does) give the same
+        sequence and state as plain stepping."""
+        forced = self.fmt.encode("<|end_message|><|message_model|><|content_text|>")
+
+        def once(draft):
+            self.eng.drafting = draft
+            self._oracle(self.ref, depth=4)
+            try:
+                logits, _ = self.eng.read_prompt(self.prompt)
+                out = []
+
+                def on_token(t):
+                    out.append(t)
+                    if len(out) == 3:
+                        return forced
+                    return ink.END if len(out) >= 9 else None
+                passes = ink.generate(self.eng, int(np.argmax(logits)), on_token)
+                return out, list(self.eng.fed), passes
+            finally:
+                self.eng.drafting = True
+                self.eng.reset()
+        plain, burst = once(False), once(True)
+        self.assertEqual(burst[:2], plain[:2])
+        self.assertEqual(plain[0][3:6], forced)
+        self.assertLess(burst[2], plain[2])
+
+    def test_selfcheck_with_bursts(self):
+        cases = ink.selfcheck_cases(self.pack)
+        ids = self.fmt.encode(self.fmt.render(cases[0]["messages"], **cases[0]["template_kwargs"]))
+        self._oracle(ids + cases[0]["tokens"], depth=4)
+        out = []
+        self.assertEqual(ink.run_selfcheck(self.eng, self.fmt, cases, say=out.append), 0, out)
+        self.assertIn("tokens per pass", out[0])
+
+    def test_serve_streams_bursts(self):
+        from yasakani.chat import ChatParams
+        from yasakani.server import ApiState, ServerConfig, bind
+        cfg = ServerConfig(port=0, model_id=self.pack.model_id)
+        cfg.sampling_defaults = dict(self.pack.sampling)
+        cfg.effort_aliases = dict(ink.EFFORT_ALIASES)
+        state = ApiState(cfg)
+        httpd = bind(state)
+        cfg.port = httpd.server_address[1]
+        state.runner = self.runner
+        threading.Thread(target=httpd.serve_forever, kwargs=dict(poll_interval=0.1), daemon=True).start()
+        msgs = [{"role": "user", "content": "hi"}]
+        body = {"messages": msgs, "max_tokens": 6, "stream": True, "stream_options": {"include_usage": True},
+                "reasoning_effort": "none", "temperature": 0}
+        try:
+            prompt, _ = self.fmt.prompt(msgs, {"reasoning_effort": "none"})
+            self.eng.drafting = False
+            try:
+                plain = []
+                self.runner.run(ChatParams(messages=msgs, max_tokens=7, temperature=0.0, template_kwargs={"reasoning_effort": "none"}),
+                                lambda kind, text: plain.append(text))
+                ref = list(self.eng.fed)
+            finally:
+                self.eng.drafting = True
+            self.eng.reset()
+            self._oracle(ref, depth=3)
+            c = http.client.HTTPConnection("127.0.0.1", cfg.port, timeout=300)
+            c.request("POST", "/v1/chat/completions", body=json.dumps(body),
+                      headers={"Content-Type": "application/json", "Host": "127.0.0.1:%d" % cfg.port})
+            r = c.getresponse()
+            data = r.read().decode()
+            c.close()
+            self.assertEqual(r.status, 200)
+            events = [json.loads(ln[6:]) for ln in data.splitlines() if ln.startswith("data: {")]
+            usage = [e["usage"] for e in events if e.get("usage")][0]
+            timings = [e["timings"] for e in events if e.get("timings")][0]
+            self.assertEqual(usage["completion_tokens"], 6)
+            self.assertEqual(timings["draft_mode"], "on")
+            self.assertGreater(timings["tokens_per_pass"], 1.0)
+            self.assertLess(timings["draft_passes"], 6)
+            self.assertEqual(self.eng.fed, ref[:len(prompt) + 5])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 class ServerDefaultsTests(unittest.TestCase):

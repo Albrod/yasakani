@@ -22,11 +22,15 @@ Two schemes:
       re-packed to NVFP4 with one factor per expert and the scale search,
     - everything else as published (bfloat16 or float32): the router, the norms, the convolutions, the clip scales,
       rel_logits_proj, the attention-residual queries.
-  The vision tower and the drafter (mtp.safetensors) are not in the file.  Measured on 43 windows (14,024 positions) against the
+  The vision tower and the drafter are not in the file.  Measured on 43 windows (14,024 positions) against the
   published model: KL 0.0110, top-1 96.0 %; the file has 15.05 GB (the published file 19.5 GB, with the vision tower).
   The expected tokens of selfcheck.json are made FROM THE CONVERTED WEIGHTS, by a reference implementation of the model (PyTorch;
   not part of this repository): ``--reference-code`` names the folder of its ``ink2_dev.py``, or ``--selfcheck-tokens`` a JSON
   file {case name: [token ids]} made by such a run.  Without either, selfcheck.json has no cases.
+
+With both schemes the model's drafter (mtp.safetensors, a few layers that propose tokens for speculative decoding) is placed in
+the model folder unchanged (a hard link where possible, else a copy) and named by the ``drafter`` entry of the manifest; a source
+without it gives a folder that generates without drafting.
 
 The model folder also holds config.json, generation_config.json, the tokenizer files, chat_template.jinja and the model card
 (README.md) of the source, unchanged; NOTICE (where the files come from, the licence, the acceptable-use policy, and what this
@@ -57,6 +61,7 @@ TEXT_FILES = ("config.json", "generation_config.json", "tokenizer.json", "tokeni
               "chat_template.jinja")
 OPTIONAL_TEXT_FILES = ("README.md",)
 DEFAULT_CTX = 32768                  # context the engine opens by default (the model allows more; the cache grows with it)
+DRAFTER_FILE = "mtp.safetensors"     # the model's drafter (multi-token prediction layers), published next to the weights
 POLICY = "https://thinkingmachines.ai/model-acceptable-use-policy/"
 SCHEMES = ("published", "quality")
 NVFP4_SEARCH, MXFP8_SEARCH = 6, 1
@@ -332,6 +337,7 @@ def notice_text(repo: str, revision: str, weights: str, how: str, scheme: str = 
         body = [
             "* The weights (%s), the configuration, the tokenizer and the chat template are the published files," % weights,
             "  unchanged (weights: %s of the published file). The vision tensors in the weights file are not used." % how,
+            "  The drafter (%s), when this folder has it, is the published file, unchanged." % DRAFTER_FILE,
             "* selfcheck.json and yasakani.json were written by the YASAKANI converter (tools/convert/inkling2_convert.py).",
             "  The expected tokens in selfcheck.json are those of the official tests of the model's code.",
         ]
@@ -341,7 +347,8 @@ def notice_text(repo: str, revision: str, weights: str, how: str, scheme: str = 
             "  (tools/convert/inkling2_convert.py, scheme \"%s\"). The weights were re-quantised by this tool: most dense" % scheme,
             "  matrices are stored in 4-bit (NVFP4) or 8-bit (MXFP8) formats, and the experts that the published file stores in 8 bits",
             "  were re-packed to 4 bits. The other tensors are the published values. The outputs of this model differ slightly",
-            "  from those of the published model. The vision tower and the drafter are not included.",
+            "  from those of the published model. The vision tower is not included. The drafter (%s), when this folder" % DRAFTER_FILE,
+            "  has it, is the published file, unchanged.",
             "  The format is described in docs/FORMAT.md (section 10) of the YASAKANI repository.",
             "* The configuration, the tokenizer, the chat template and the model card are the published files, unchanged.",
             "* selfcheck.json and yasakani.json were written by the converter. The expected tokens in selfcheck.json were made",
@@ -431,6 +438,9 @@ def write_manifest(out: Path, manifest: dict, listed, known_sums: dict = None) -
     w = manifest.get("weights") or {}
     if w.get("format") == "yskn":
         w["sha256"], w["size"] = sums[w["file"]], sizes[w["file"]]
+    d = manifest.get("drafter")
+    if d and d.get("file") in sums:
+        d["sha256"], d["size"] = sums[d["file"]], sizes[d["file"]]
     (out / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8", newline="\n")
     return manifest
 
@@ -520,7 +530,7 @@ def convert(source: Path, out: Path, repo: str = None, revision: str = None, cop
             out_weights, (out / out_weights).stat().st_size / 1e9, r["stats"]["tensors"], r["stats"]["quantised"],
             r["stats"]["repacked_experts"], r["stats"]["seconds"]))
         weights_entry = {"file": out_weights, "format": "yskn", "version": 2, "scheme": scheme,
-                         "note": "re-quantised from the published weights; vision tensors and drafter not included"}
+                         "note": "re-quantised from the published weights; vision tensors not included"}
         (out / "NOTICE").write_text(notice_text(repo, revision, out_weights, "", scheme, weights), encoding="utf-8", newline="\n")
         cases, fmt = selfcheck_prompts(out)
         tokens, impl = {}, ""
@@ -530,14 +540,23 @@ def convert(source: Path, out: Path, repo: str = None, revision: str = None, cop
             tokens, impl = reference_tokens(out, out_weights, cases, reference_code, reference_device, SELFCHECK_TOKENS)
         write_selfcheck(out, model_id, cases, tokens, impl, fmt)
 
-    listed = [out_weights] + [n for n in TEXT_FILES + OPTIONAL_TEXT_FILES if (out / n).is_file()] + ["NOTICE", "selfcheck.json"]
+    drafter_entry = None
+    if (source / DRAFTER_FILE).is_file():
+        how_d = place(source / DRAFTER_FILE, out / DRAFTER_FILE, copy)
+        say("drafter  %-36s %s (%.2f GB)" % (DRAFTER_FILE, how_d, (out / DRAFTER_FILE).stat().st_size / 1e9))
+        drafter_entry = {"file": DRAFTER_FILE, "format": "hf-safetensors", "note": "published file, unchanged"}
+    else:
+        say("note: the source has no %s (the drafter); the folder generates without drafting" % DRAFTER_FILE)
+    listed = [out_weights] + ([DRAFTER_FILE] if drafter_entry else []) + \
+        [n for n in TEXT_FILES + OPTIONAL_TEXT_FILES if (out / n).is_file()] + ["NOTICE", "selfcheck.json"]
     for n in listed:
         _, tag = hf_metadata(source, n)
-        if scheme == "published" and n == weights and tag and len(tag) == 64:   # Hugging Face's etag of a large file is its SHA-256
+        published = (scheme == "published" and n == weights) or n == DRAFTER_FILE
+        if published and tag and len(tag) == 64:                         # Hugging Face's etag of a large file is its SHA-256
             sums[n] = sha256_of(out / n)
             if tag != sums[n]:
                 raise SystemExit("%s: SHA-256 %s differs from the published %s (download it again)" % (n, sums[n], tag))
-            say("weights  SHA-256 equals the published one (%s...)" % tag[:16])
+            say("%-8s SHA-256 equals the published one (%s...)" % ("drafter" if n == DRAFTER_FILE else "weights", tag[:16]))
     manifest = {
         "architecture": ARCHITECTURE,
         "model_id": model_id,
@@ -545,6 +564,7 @@ def convert(source: Path, out: Path, repo: str = None, revision: str = None, cop
         "max_ctx": max_ctx,
         "default_ctx": min(int(ctx), max_ctx),
         "weights": weights_entry,
+        **({"drafter": drafter_entry} if drafter_entry else {}),
         "sampling": {"temperature": float(gen.get("temperature", 1.0)), "top_p": float(gen.get("top_p", 1.0)),
                      "top_k": int(gen.get("top_k", 0) or 0)},
         "stop_token_ids": stop_ids,

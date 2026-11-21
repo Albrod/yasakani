@@ -195,6 +195,8 @@ def timings_json(u: Usage) -> dict:
              predicted_per_second=per_s(u.completion_tokens, predicted_ms))
     if u.draft_n > 0:
         d.update(draft_n=u.draft_n, draft_n_accepted=u.draft_n_accepted)
+    if u.spec:                                            # Inkling-2 with its drafter: the verification passes and tokens per pass
+        d.update(u.spec)
     if u.queue_ms is not None:                            # served by the scheduler (--parallel N): its wait, the streams that shared
         d.update(queue_ms=u.queue_ms, parallel_avg=u.parallel_avg, snap_mode=u.snap_mode)    # its passes, how its prompt was read
     return d

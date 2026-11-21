@@ -59,17 +59,24 @@ def _select_gpu(args) -> None:
     _visible_gpu(gpus.detect(args.device), args.device)
 
 
+def draft_options(args):
+    """(mode, depth) of --draft / --draft-depth, else $YASAKANI_DRAFT / $YASAKANI_DRAFT_DEPTH; a wrong value fails here."""
+    return ink.draft_mode_of(getattr(args, "draft", None)), ink.draft_depth_of(getattr(args, "draft_depth", None))
+
+
 def open_stack(args, warm: bool = True):
     refuse_unsupported(args)
     pack = ink.Ink2Pack.load(args.model_dir_path)
     ctx = context_of(args, pack)
+    draft, depth = draft_options(args)
     _select_gpu(args)
     with open(pack.root / "config.json", encoding="utf-8") as f:
         kv = ink.bytes_per_position(json.load(f)) * ctx
     _say("loading %s (%s of weights, context %d tokens, key/value cache %s) ..." % (pack.model_id, _gb(pack.weights.stat().st_size), ctx, _gb(kv)))
     t0 = time.time()
     try:
-        fmt, eng, runner = ink.open_runner(pack, ctx, dll=getattr(args, "dll", None), seed0=getattr(args, "seed0", 1), warm=warm)
+        fmt, eng, runner = ink.open_runner(pack, ctx, dll=getattr(args, "dll", None), seed0=getattr(args, "seed0", 1), warm=warm,
+                                           draft=draft, draft_depth=depth)
     except YasakaniError as ex:
         raise YasakaniError("%s  (a smaller --max-ctx needs less GPU memory)" % ex) if "memory" in str(ex).lower() else ex
     dm = eng.device_memory()
@@ -79,6 +86,7 @@ def open_stack(args, warm: bool = True):
     _say("model ready in %.1f s (engine load %.1f s, %s backend; %s)" % (time.time() - t0, eng.load_seconds, eng.backend, mem))
     if pack.weights_format == "yskn":
         _say("weights: %s" % eng.weights_note)
+    _say(eng.draft_note)
     return pack, eng, fmt, runner
 
 
@@ -103,7 +111,8 @@ def cmd_info(args) -> int:
         lib_info = "%s, interface version %d" % (lib.ink2_build_info().decode("utf-8", "replace"), lib.abi)
         print("engine   %s  %s  sha256 %s  (%s; uses the %s backend)" % (dll.name, _human(dll.stat().st_size),
               hashlib.sha256(dll.read_bytes()).hexdigest()[:16], lib_info, ink.backend_of(lib_info)))
-        print("binding  %s" % binding.name)
+        print("binding  %s  (drafter calls: %s)" % (binding.name, "yes" if all(callable(getattr(mod.Ink2Native, n, None))
+                                                                             for n in ink.DRAFT_CALLS) else "no, drafting not available"))
     except (YasakaniError, OSError, AttributeError) as ex:
         print("engine   NOT FOUND:", ex)
         ok = False
@@ -119,6 +128,13 @@ def cmd_info(args) -> int:
         print("  weights    %-36s %s  (%s%s)" % (pack.weights.name, _human(pack.weights.stat().st_size), pack.weights_format,
                                                 ", version %s, scheme %s" % (wmeta.get("version", 2), wmeta.get("scheme"))
                                                 if pack.weights_format == "yskn" else ""))
+        d = pack.drafter_entry
+        if not d:
+            print("  drafter    none (generation without drafting)")
+        else:
+            print("  drafter    %-36s %s  (%s)%s" % (d["file"], _human((pack.root / d["file"]).stat().st_size) if pack.drafter else "-",
+                                                 d.get("format", "hf-safetensors"), "  PROBLEM: " + pack.drafter_problem
+                                                 if pack.drafter_problem else ""))
         print("  sampling   temperature %g, top_p %g, top_k %d (generation_config.json); stop ids %s"
               % (pack.sampling["temperature"], pack.sampling["top_p"], pack.sampling["top_k"], pack.stop_ids))
         print("  checksums  %d files listed in yasakani.json" % len(pack.sha256))
@@ -269,8 +285,9 @@ def cmd_chat(args) -> int:
                 print(dim("\n(the limit of %d tokens was reached while the model was still thinking, so no answer was written.  "
                           "/effort low shortens the thinking, /think off skips it, --max-tokens raises the limit)" % args.max_tokens))
             tps = (u.completion_tokens / (u.gen_ms / 1000.0)) if u.gen_ms > 0 else 0.0
-            print(dim("\n\n[%d tokens, %.1f tokens/s, prompt %d tokens in %.2f s%s, %s]" % (
-                u.completion_tokens, tps, u.prompt_tokens, u.prompt_ms / 1000.0,
+            print(dim("\n\n[%d tokens, %.1f tokens/s%s, prompt %d tokens in %.2f s%s, %s]" % (
+                u.completion_tokens, tps, ", %.2f tokens per pass" % u.spec["tokens_per_pass"] if u.spec else "",
+                u.prompt_tokens, u.prompt_ms / 1000.0,
                 " (%d kept from the last turn)" % u.cached_tokens if u.cached_tokens else "",
                 "complete" if u.finish == "stop" else "hit the length limit")))
             if one_shot:
@@ -352,18 +369,22 @@ def cmd_bench(args) -> int:
                 tps = u.completion_tokens / (u.gen_ms / 1000.0) if u.gen_ms > 0 else 0.0
                 rows.append(dict(test=name, run=run + 1, prompt_tokens=u.prompt_tokens, tokens=u.completion_tokens,
                                  seconds=round(u.gen_ms / 1000.0, 3), prompt_seconds=round(u.prompt_ms / 1000.0, 3), tokens_per_s=round(tps, 1)))
+                if u.spec:
+                    rows[-1].update(tokens_per_pass=round(u.spec["tokens_per_pass"], 2), draft_n=u.draft_n, draft_n_accepted=u.draft_n_accepted)
                 if not args.json:
                     r = rows[-1]
-                    print("%-12s run %d  prompt %5d (%.2f s)  generated %5d  %7.1f tokens/s" %
-                          (name, r["run"], r["prompt_tokens"], r["prompt_seconds"], r["tokens"], r["tokens_per_s"]), flush=True)
+                    print("%-12s run %d  prompt %5d (%.2f s)  generated %5d  %7.1f tokens/s%s" %
+                          (name, r["run"], r["prompt_tokens"], r["prompt_seconds"], r["tokens"], r["tokens_per_s"],
+                           "  %.2f tokens per pass" % r["tokens_per_pass"] if "tokens_per_pass" in r else ""), flush=True)
     finally:
         eng.close()
     mean = sum(r["tokens_per_s"] for r in rows) / len(rows)
     if args.json:
         print(json.dumps(dict(version=__version__, model=pack.model_id, gpu=_gpu_lines(), tokens_per_test=n_tokens, runs=rows,
-                              mean_tokens_per_s=round(mean, 1)), indent=1))
+                              mean_tokens_per_s=round(mean, 1), drafter=eng.draft_note), indent=1))
     else:
-        print("mean over %d run(s): %.1f tokens/s   (greedy, thinking %s, %d tokens each)" % (len(rows), mean, "on" if args.think else "off", n_tokens))
+        print("mean over %d run(s): %.1f tokens/s   (greedy, thinking %s, %d tokens each; %s)" % (
+            len(rows), mean, "on" if args.think else "off", n_tokens, eng.draft_note))
     return 0
 
 

@@ -134,6 +134,13 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--edit-copy", choices=gpus.EDIT_COPY_MODES, default=None,
                     help="edit copy: on or off.  Default: $YASAKANI_EDIT_COPY or %s" % gpus.EDIT_COPY_DEFAULT)
     _add_wide_args(sp)
+    g = sp.add_argument_group("drafter (Inkling-2 Mini model folders; other models do not use these)")
+    g.add_argument("--draft", choices=("auto", "on", "off"), default=None,
+                   help="the model's drafter proposes a few tokens that the model checks in one pass; the output does not change.  "
+                        "auto (default): used only while it makes generation faster; on: always; off: not loaded.  "
+                        "Default: $YASAKANI_DRAFT or auto")
+    g.add_argument("--draft-depth", type=int, default=None, metavar="N",
+                   help="tokens the drafter proposes per pass, 1 to 7 (default: $YASAKANI_DRAFT_DEPTH or the engine's)")
 
 
 def _add_wide_args(sp: argparse.ArgumentParser) -> None:

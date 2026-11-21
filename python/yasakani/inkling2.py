@@ -20,6 +20,12 @@ Thinking controls: ``reasoning_effort`` goes to the template's "Thinking effort 
 xhigh, max or a number from 0 to 0.99; default 0.9).  The model card says that even the lowest effort does not fully turn the
 thinking off, so ``enable_thinking: false`` sets the effort to 0 and starts the reply with an answer block
 (``<|message_model|><|content_text|>``) so that no thinking is written.
+
+The drafter (the ``drafter`` entry of yasakani.json: the model's published ``mtp.safetensors``) proposes a few tokens that the
+model checks in one pass (speculative decoding).  The output does not change: greedy gives the same tokens, sampling the same
+distribution (and with a fixed seed the same tokens, see ``Sampler.seek``).  ``--draft auto | on | off`` / ``$YASAKANI_DRAFT``:
+auto (default) lets the engine use the drafter only while it makes generation faster, on always drafts, off does not load it.
+A folder without the drafter, or an engine library without the drafter calls, generates without drafting.
 """
 from __future__ import annotations
 
@@ -44,6 +50,11 @@ ARCHITECTURE = "inkling2"
 MANIFEST = "yasakani.json"
 WEIGHTS_FORMATS = ("hf-safetensors", "yskn")
 CONTEXT_MARGIN = 16                    # positions kept free at the end of the context
+DRAFT_MODES = ("auto", "on", "off")
+DRAFT_ENV, DRAFT_DEPTH_ENV = "YASAKANI_DRAFT", "YASAKANI_DRAFT_DEPTH"
+MAX_DRAFT_DEPTH = 7
+DRAFTER_FORMATS = ("hf-safetensors",)
+DRAFT_CALLS = ("draft_load", "draft_mode", "spec_step", "spec_stats")   # what the engine wrapper needs for drafting
 # reasoning_effort values of the chat template (its effort_map); the server and the chat accept these names
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 EFFORT_ALIASES = {e: e for e in EFFORTS}
@@ -81,6 +92,9 @@ class Ink2Pack:
     stop_ids: List[int]
     sha256: Dict[str, str] = field(default_factory=dict)
     sizes: Dict[str, int] = field(default_factory=dict)
+    drafter_entry: dict = field(default_factory=dict)       # the "drafter" entry of yasakani.json ({} when there is none)
+    drafter: Optional[Path] = None                          # its file, when it is there and of a known format
+    drafter_problem: str = ""                               # why an entry that is listed is not used
 
     @classmethod
     def load(cls, root) -> "Ink2Pack":
@@ -105,7 +119,17 @@ class Ink2Pack:
             raise YasakaniError("model folder %s is missing: %s" % (root, ", ".join(missing)))
         max_ctx = int(meta.get("max_ctx") or 32768)
         s = meta.get("sampling") or {}
-        return cls(root=root, meta=meta, weights=root / w["file"], weights_format=fmt, model_id=str(meta.get("model_id") or "inkling-2"),
+        d = meta.get("drafter")
+        d = dict(d) if isinstance(d, dict) and d.get("file") else {}
+        drafter, problem = None, ""
+        if d:
+            if str(d.get("format") or "hf-safetensors") not in DRAFTER_FORMATS:
+                problem = "drafter format %r is not supported by this version of the package" % d.get("format")
+            elif not (root / d["file"]).is_file():
+                problem = "the drafter file %s is missing" % d["file"]
+            else:
+                drafter = root / d["file"]
+        return cls(root=root, drafter_entry=d, drafter=drafter, drafter_problem=problem, meta=meta, weights=root / w["file"], weights_format=fmt, model_id=str(meta.get("model_id") or "inkling-2"),
                    max_ctx=max_ctx, default_ctx=min(int(meta.get("default_ctx") or max_ctx), max_ctx),
                    sampling=dict(temperature=float(s.get("temperature", 1.0)), top_p=float(s.get("top_p", 1.0)),
                                  top_k=int(s.get("top_k", 0) or 0)),
@@ -115,9 +139,15 @@ class Ink2Pack:
     def verify(self, progress=None) -> Dict[str, bool]:
         """Size, then SHA-256 of every listed file (the weights file is about 20 GB: a minute or so)."""
         res = {}
-        for name, want in sorted(self.sha256.items(), key=lambda kv: (self.sizes.get(kv[0], 0), kv[0])):
+        sums, sizes = dict(self.sha256), dict(self.sizes)
+        d = self.drafter_entry
+        if d.get("sha256") and d["file"] not in sums:            # the drafter entry carries its own checksum
+            sums[d["file"]] = str(d["sha256"])
+            if d.get("size") is not None:
+                sizes[d["file"]] = int(d["size"])
+        for name, want in sorted(sums.items(), key=lambda kv: (sizes.get(kv[0], 0), kv[0])):
             p = self.root / name
-            ok = p.is_file() and (name not in self.sizes or p.stat().st_size == self.sizes[name])
+            ok = p.is_file() and (name not in sizes or p.stat().st_size == sizes[name])
             if ok:
                 h = hashlib.sha256()
                 with open(p, "rb") as f:
@@ -303,6 +333,19 @@ class Sampler:
     def __init__(self, temperature: float = 1.0, top_p: float = 1.0, top_k: int = 0, min_p: float = 0.0, seed: int = 0):
         self.t, self.top_p, self.top_k, self.min_p = float(temperature), float(top_p), int(top_k or 0), float(min_p or 0.0)
         self.rng = np.random.default_rng(int(seed) & 0xFFFFFFFFFFFFFFFF)
+        self._state0 = self.rng.bit_generator.state
+        self._k = 0                                          # draws made since the seed
+
+    def seek(self, k: int) -> None:
+        """The next draw is draw number ``k`` of the seed (one draw per token): the token at output index k is drawn with the same
+        random number whether earlier draws were made for drafted rows that were not kept, or not."""
+        k = int(k)
+        if k != self._k:
+            bg = self.rng.bit_generator
+            bg.state = self._state0
+            if k:
+                bg.advance(k)                                # PCG64: random() takes one 64-bit output
+            self._k = k
 
     def _draw(self, p: np.ndarray) -> int:
         """Index drawn with probability p[i] / sum(p) (p >= 0, float32)."""
@@ -312,6 +355,7 @@ class Sampler:
             p = np.concatenate([p, np.zeros(nb * B - n, p.dtype)])
         cb = np.cumsum(p.reshape(nb, B).sum(axis=1, dtype=np.float64))
         r = self.rng.random() * cb[-1]
+        self._k += 1
         b = min(int(np.searchsorted(cb, r, side="right")), nb - 1)
         while b > 0 and cb[b] == cb[b - 1]:                 # an empty block (rounding at its edge): the one before
             b -= 1
@@ -424,6 +468,31 @@ def open_library(mod, dll: Path):
     return lib
 
 
+def draft_mode_of(value: Optional[str] = None, environ=None) -> str:
+    """auto | on | off: ``value`` (--draft), else ``$YASAKANI_DRAFT``, else auto."""
+    env = os.environ if environ is None else environ
+    v = value if value not in (None, "") else env.get(DRAFT_ENV, "")
+    v = (v or "auto").strip().lower()
+    if v not in DRAFT_MODES:
+        raise YasakaniError("%s / --draft must be one of %s, not %r" % (DRAFT_ENV, ", ".join(DRAFT_MODES), v))
+    return v
+
+
+def draft_depth_of(value=None, environ=None) -> Optional[int]:
+    """1 .. 7 tokens proposed per pass: ``value`` (--draft-depth), else ``$YASAKANI_DRAFT_DEPTH``, else None (the engine's)."""
+    env = os.environ if environ is None else environ
+    v = value if value not in (None, "") else (env.get(DRAFT_DEPTH_ENV) or "").strip()
+    if v in (None, ""):
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = 0
+    if not 1 <= n <= MAX_DRAFT_DEPTH:
+        raise YasakaniError("%s / --draft-depth must be a number from 1 to %d, not %r" % (DRAFT_DEPTH_ENV, MAX_DRAFT_DEPTH, v))
+    return n
+
+
 def backend_of(lib_info: str) -> str:
     b = (os.environ.get("YASAKANI_INK2_BACKEND") or "").strip().lower()
     if b:
@@ -469,6 +538,84 @@ class Ink2Engine:
         self.vocab = int(self.native.vocab)
         self.fed: List[int] = []
         self.last_logits: Optional[np.ndarray] = None
+        self.drafting = False                                # a drafter is loaded (set_drafter)
+        self.draft_mode = "off"
+        self.draft_depth = 0
+        self.draft_note = "drafter: not set up"
+
+    # -- drafter ------------------------------------------------------------------------------------------------------------------
+    def set_drafter(self, pack: "Ink2Pack", mode: str = "auto", depth: Optional[int] = None) -> str:
+        """Load the model folder's drafter through the engine wrapper (mode auto or on) -> the line for the start-up output.
+        Without a drafter in the folder, or with a wrapper that has no drafter calls, generation goes on without drafting; with
+        ``mode == "on"`` a drafter that is there but cannot be loaded is an error."""
+        self.drafting, self.draft_mode, self.draft_depth = False, "off", 0
+        if mode == "off":
+            note = "drafter: off (--draft off)"
+        elif pack.drafter is None:
+            note = "drafter: %s; generation without drafting" % (pack.drafter_problem or "none in this model folder")
+        elif not all(callable(getattr(self.native, n, None)) for n in DRAFT_CALLS):
+            note = "drafter: drafting is not available with this engine library (no drafter calls); generation without drafting"
+        else:
+            try:
+                self.native.draft_load(str(pack.drafter))
+                st = self.native.draft_mode(mode, depth)
+            except (RuntimeError, OSError, ValueError) as ex:
+                try:
+                    if callable(getattr(self.native, "draft_loaded", None)) and self.native.draft_loaded():
+                        self.native.draft_mode("off")
+                    self.reset()
+                except RuntimeError:
+                    pass
+                if mode == "on":
+                    raise YasakaniError("the drafter %s could not be loaded: %s" % (pack.drafter.name, ex)) from ex
+                note = "drafter: %s could not be loaded (%s); generation without drafting" % (pack.drafter.name, ex)
+            else:
+                self.drafting, self.draft_mode, self.draft_depth = True, str(st.get("mode", mode)), int(st.get("depth") or 0)
+                self.reset()                                 # the drafter's context starts with the next prompt
+                note = "drafter: %s loaded, mode %s, depth %d%s" % (
+                    pack.drafter.name, self.draft_mode, self.draft_depth,
+                    " (used only while it makes generation faster)" if self.draft_mode == "auto" else "")
+        self.draft_note = note
+        return note
+
+    def can_draft(self) -> bool:
+        """A drafting pass fits: drafter loaded and room for the anchor and every proposed token in the context."""
+        return self.drafting and self.fed is not None and len(self.fed) + 1 + self.draft_depth <= self.max_ctx
+
+    def spec_step(self, anchor: int, pick=None) -> Tuple[List[int], int]:
+        """Feed ``anchor`` and check the drafter's proposals in one pass -> (accepted tokens, next token; not fed yet)."""
+        try:
+            accepted, nxt, _ = self.native.spec_step(int(anchor), pick)
+        except BaseException as ex:
+            self.fed = None                                  # state unknown: the next prompt starts from a reset
+            if isinstance(ex, RuntimeError):
+                raise YasakaniError("engine step failed: %s" % ex) from ex
+            raise
+        accepted = [int(a) for a in accepted]
+        self.fed.append(int(anchor))
+        self.fed.extend(accepted)
+        self.last_logits = None
+        return accepted, int(nxt)
+
+    def truncate(self, n: int) -> None:
+        """Drop the positions from ``n`` on (the rest of a burst that was not emitted)."""
+        if self.fed is None or n >= len(self.fed):
+            return
+        try:
+            self.native.truncate(int(n))
+        except RuntimeError as ex:
+            self.fed = None
+            raise YasakaniError("engine truncate failed: %s" % ex) from ex
+        del self.fed[n:]
+        self.last_logits = None
+
+    def draft_stats(self) -> dict:
+        if not self.drafting:
+            return {}
+        try:
+            return dict(self.native.spec_stats())
+        except RuntimeError:
+            return {}
 
     def _load_yskn(self, pack: "Ink2Pack", lib, log):
         """Check the tensors of the .yskn file, then let the binding load it through a CheckpointView: the binding opens its weights
@@ -608,6 +755,72 @@ def bytes_per_position(config: dict) -> int:
     return visits * 2 * int(t.get("num_key_value_heads", 8)) * int(t.get("head_dim", 128)) * 4
 
 
+# ---- generation loop -----------------------------------------------------------------------------------------------------------------
+END, DROP = "end", "drop"        # on_token results: the reply ends with this token / ends before it (the token is not emitted)
+
+
+def sampler_picks(sample: Sampler):
+    """k -> a pick function for the rows of a pass whose first row gives output token k; one draw per token (Sampler.seek)."""
+    def at(k: int):
+        n = [int(k)]
+
+        def pick(logits) -> int:
+            sample.seek(n[0])
+            n[0] += 1
+            return sample(logits)
+        return pick
+    return at
+
+
+def generate(eng: Ink2Engine, first: int, on_token, pick_at=None) -> int:
+    """Emit tokens from ``first`` (chosen from the logits of the prompt) on, with the drafter when the engine has one.
+
+    ``on_token(tok)`` emits a token and returns None (go on), END (the reply ends with it), DROP (the reply ends before it; it is
+    not emitted) or a list of tokens that must come next (the thinking budget).  ``pick_at``: None = greedy, else ``k -> pick``
+    (sampler_picks).  The engine state always matches what was emitted: every emitted token is fed except the last one, as in
+    plain stepping, and the rest of a burst after the end is truncated away.  Returns the passes of the model (the prompt's last
+    pass counts as the one that gave ``first``)."""
+    k, tok, forced, passes = 0, int(first), [], 1
+    while True:
+        r = on_token(tok)
+        if r is END or r is DROP:
+            return passes
+        k += 1
+        if r:
+            forced = list(r)
+        if not forced and eng.can_draft():
+            base = len(eng.fed)
+            accepted, nxt = eng.spec_step(tok, pick_at(k) if pick_at else None)
+            passes += 1
+            for i, a in enumerate(accepted):
+                r = on_token(a)
+                if r is END or r is DROP:                    # the anchor and accepted[:i] stay fed
+                    eng.truncate(base + 1 + i)
+                    return passes
+                k += 1
+                if r:                                        # forced tokens after accepted[i]: it stays fed
+                    eng.truncate(base + 2 + i)
+                    forced = list(r)
+                    break
+            else:
+                tok = nxt
+                continue
+            tok = forced.pop(0)
+            continue
+        if len(eng.fed) >= eng.max_ctx:
+            return passes
+        logits = eng.step(tok)
+        passes += 1
+        if forced:
+            tok = forced.pop(0)
+        else:
+            tok = pick_at(k)(logits) if pick_at else int(np.argmax(logits))
+
+
+def _spec_delta(a: dict, b: dict) -> Tuple[int, int]:
+    return (int(b.get("proposed", 0)) - int(a.get("proposed", 0)), int(b.get("accepted", 0)) - int(a.get("accepted", 0)))
+
+
 # ---- chat runner --------------------------------------------------------------------------------------------------------------------
 class Ink2Runner:
     """Chat requests on one Inkling-2 engine, one at a time; the same calls as yasakani.chat.ChatRunner (prepare_checked, run,
@@ -634,6 +847,11 @@ class Ink2Runner:
         logits, _ = self.engine.read_prompt(ids)
         for _ in range(4):
             logits = self.engine.step(int(np.argmax(logits)))
+        tok = int(np.argmax(logits))
+        for _ in range(2):                                   # the drafting pass too (a CUDA graph is recorded on first use)
+            if not self.engine.can_draft():
+                break
+            _, tok = self.engine.spec_step(tok)
         self.engine.reset()
 
     def prepare(self, p):
@@ -690,43 +908,53 @@ class Ink2Runner:
         logits, usage.cached_tokens = eng.read_prompt(prompt)
         t1 = time.perf_counter()
         usage.prefill_ms = usage.prompt_ms = (t1 - t0) * 1000.0
-        finish, n_out = "length", 0
-        forced: List[int] = []
-        while n_out < max_new:
+        st0 = eng.draft_stats()
+        pick_at = None if sample.t <= 0.0 else sampler_picks(sample)     # greedy: arg-max on the device, no logits copied
+        first = int(np.argmax(logits)) if pick_at is None else pick_at(0)(logits)
+        state = dict(finish="length", n=0)
+        force = [self.fmt.ids[T_END], self.fmt.ids[T_MODEL], self.fmt.ids[T_TEXT]]
+
+        def on_token(tok: int):
             if eng._cancel.is_set():
-                break
-            tok = forced.pop(0) if forced else sample(logits)
-            n_out += 1
+                return DROP
+            state["n"] += 1
             deliver(stream.feed(tok))
-            if tok in stops:
-                finish = "stop"
-                break
-            if stopf.hit:
-                finish = "stop"
-                break
-            if len(eng.fed) >= eng.max_ctx:
-                break
-            if (budget and not forced and stream.mode == "reasoning" and stream.answer_at is None and stream.n >= budget):
-                forced = [self.fmt.ids[T_END], self.fmt.ids[T_MODEL], self.fmt.ids[T_TEXT]]
-            if n_out < max_new:
-                logits = eng.step(tok)
+            if tok in stops or stopf.hit:
+                state["finish"] = "stop"
+                return END
+            if state["n"] >= max_new:
+                return END
+            if budget and stream.mode == "reasoning" and stream.answer_at is None and stream.n >= budget:
+                return force
+            return None
+
+        passes = generate(eng, first, on_token, pick_at)
+        n_out, finish = state["n"], state["finish"]
         deliver(stream.flush())
         tail = stopf.flush()
         if tail:
             emit("content", tail)
         usage.gen_ms = (time.perf_counter() - t1) * 1000.0
-        usage.passes = usage.completion_tokens = n_out
+        usage.completion_tokens = n_out
+        usage.passes = n_out
+        if eng.drafting:
+            usage.passes = passes
+            usage.draft_n, usage.draft_n_accepted = _spec_delta(st0, eng.draft_stats())
+            usage.spec = dict(draft_mode=eng.draft_mode, draft_passes=passes,
+                              tokens_per_pass=round(n_out / passes, 3) if passes else 0.0)
         usage.reasoning_tokens = stream.reasoning_count
         usage.finish = finish
         return usage
 
 
-def open_runner(pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, seed0: int = 1, say=None, warm: bool = True):
+def open_runner(pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, seed0: int = 1, say=None, warm: bool = True,
+                draft: str = "auto", draft_depth: Optional[int] = None):
     """Model folder -> (formatter, engine, runner).  The tokenizer and template are read first, so a broken folder fails before
-    the load."""
+    the load.  ``draft``: auto | on | off (see the module text); ``eng.draft_note`` says what became of the drafter."""
     fmt = Ink2Formatter(pack.root)
     eng = Ink2Engine(pack, max_ctx, dll=dll)
     try:
+        eng.set_drafter(pack, draft, draft_depth)
         runner = Ink2Runner(eng, fmt, pack, seed0=seed0)
         if warm:
             runner.warmup(say)
@@ -761,15 +989,19 @@ def run_selfcheck(eng: Ink2Engine, fmt: Ink2Formatter, cases: Sequence[dict], sa
         eng.reset()
         t0 = time.perf_counter()
         logits, _ = eng.read_prompt(ids)
-        got = []
-        for k in range(len(want)):
-            got.append(int(np.argmax(logits)))
-            if k + 1 < len(want):
-                logits = eng.step(got[-1])
+        got: List[int] = []
+
+        def on_token(tok: int, got=got, n=len(want)):
+            got.append(int(tok))
+            return END if len(got) >= n else None
+
+        passes = generate(eng, int(np.argmax(logits)), on_token)
         dt = time.perf_counter() - t0
         eng.reset()
+        per_pass = ", %.2f tokens per pass" % (len(got) / passes) if eng.drafting and passes else ""
         if got == want:
-            say("  %-10s PASS  (%d prompt ids, %d tokens equal to the reference, %.2f s)" % (c["name"], len(ids), len(want), dt))
+            say("  %-10s PASS  (%d prompt ids, %d tokens equal to the reference, %.2f s%s)" % (c["name"], len(ids), len(want), dt,
+                                                                                            per_pass))
         else:
             n = next(i for i, (a, b) in enumerate(zip(got, want)) if a != b)
             say("  %-10s FAIL  the output differs from token #%d on: %r" % (c["name"], n + 1, fmt.decode(got)))
