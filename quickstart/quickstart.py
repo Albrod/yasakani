@@ -1735,20 +1735,42 @@ def remove_tree(path, seconds=60.0, say=None, sleep=time.sleep, clock=time.monot
             sleep(0.5)
 
 
-def stop_process(proc, seconds=30):
-    """Stops `yasakani serve`: terminate, wait up to ``seconds``, then kill.  (python.exe of the private environment starts the real
-    interpreter as its child inside a job object that ends with it, so ending the one we started leaves nothing behind.)"""
-    if proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=seconds)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+def wait_released(path, seconds=15.0, sleep=time.sleep, clock=time.monotonic):
+    """-> True when no process has the file ``path`` loaded any more (it can be opened for writing), False after ``seconds``.
+    A missing file and a file that is write-protected anyway count as free."""
+    end = clock() + seconds
+    while True:
         try:
-            proc.wait(timeout=5)
+            if not os.access(path, os.W_OK):
+                return True
+            with open(path, "r+b"):
+                return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if clock() >= end:
+                return False
+            sleep(0.2)
+
+
+def stop_process(proc, seconds=30, lib=None):
+    """Stops `yasakani serve`: terminate, wait up to ``seconds``, then kill.  (python.exe of the private environment starts the real
+    interpreter as its child inside a job object that ends with it, so ending the one we started leaves nothing behind.)
+    The real interpreter can take a moment longer to go, and until then Windows keeps the engine library ``lib`` locked.  With
+    ``lib`` given this waits (see wait_released) until it is free, so that whatever comes next - an update, a rollback, also a
+    launcher of a version before this one - can replace the engine folder."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=seconds)
         except subprocess.TimeoutExpired:
-            pass
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+    if lib:
+        wait_released(lib)
 
 
 def wait_gpu_free(read_used, before, seconds=GPU_SETTLE_SECONDS, margin=GPU_SETTLE_MIB, sleep=time.sleep, clock=time.monotonic):
@@ -1931,7 +1953,7 @@ def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, instal
         t_end = time.monotonic()
         if proc.poll() is None:
             session.leave("stopping")
-            stop_process(proc)
+            stop_process(proc, lib=dll)
             if why == "switch":
                 wait_gpu_free(lambda: gpu.get(fresh=True)["used_mib"] if gpu is not None else None, before)
         try:

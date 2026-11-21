@@ -1310,12 +1310,12 @@ class RunWebTests(RunWebBase):
         seen = {}
         real_stop = QS.stop_process
 
-        def stop(proc, seconds=30):
+        def stop(proc, seconds=30, lib=None):
             # the launcher is on its way out; the page's server still answers.  What an update button pressed now gets:
             port, tok = seen["port"], seen["update_token"]
             seen["codes"] = [request(port, "POST", "/webchat/update", self.own(port, **{"X-Yasakani-Token": tok}))[0],
                              get_json(port, "/webchat/config")["update_token"]]
-            return real_stop(proc, seconds)
+            return real_stop(proc, seconds, lib)
 
         rel = {"version": "9.9.9", "page": QS.REPO_URL + "/releases/tag/v9.9.9"}
         for path, body, want in (("/webchat/switch_model", b'{"model": "speed"}', QS.SWITCH_RC),

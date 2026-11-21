@@ -779,6 +779,47 @@ class RemoveTreeTests(unittest.TestCase):
         self.assertIn('remove_tree(edir, say=lambda: ui.say("engine_wait"))', src)
         self.assertNotIn("shutil.rmtree(edir)", src)
 
+    def test_wait_released(self):
+        d = self.folder()
+        dll = str(d / "yskn.dll")
+        self.assertTrue(QS.wait_released(dll))                               # nobody holds it
+        self.assertTrue(QS.wait_released(str(d / "missing.dll")))
+        now, slept, tries = [0.0], [], []
+
+        def sleep(s):
+            slept.append(s)
+            now[0] += s
+
+        def busy_three_times(path, mode="r", *a, **kw):                      # stands in for a library that is still loaded
+            if path == dll and "+" in mode:
+                tries.append(1)
+                if len(tries) <= 3:
+                    raise PermissionError(13, "in use", dll)
+            return open(path, mode, *a, **kw)
+
+        QS.open = busy_three_times                                           # the module's own name wins over the built-in
+        self.addCleanup(lambda: QS.__dict__.pop("open", None))
+        self.assertTrue(QS.wait_released(dll, sleep=sleep, clock=lambda: now[0]))
+        self.assertEqual((len(tries), slept), (4, [0.2, 0.2, 0.2]))
+
+        def always_busy(path, mode="r", *a, **kw):
+            raise PermissionError(13, "in use", dll)
+
+        QS.open = always_busy
+        self.assertFalse(QS.wait_released(dll, seconds=1.0, sleep=sleep, clock=lambda: now[0]))
+
+    def test_stop_waits_for_the_library(self):
+        seen = []
+        real = QS.wait_released
+        QS.wait_released = lambda path, *a, **kw: seen.append(path) or True
+        self.addCleanup(setattr, QS, "wait_released", real)
+        ended = SimpleNamespace(poll=lambda: 0)
+        QS.stop_process(ended)                                               # no library named: nothing to wait for
+        QS.stop_process(ended, lib="engine/yskn.dll")
+        self.assertEqual(seen, ["engine/yskn.dll"])
+        src = QS_PATH.read_text(encoding="utf-8")
+        self.assertIn("stop_process(proc, lib=dll)", src)
+
 
 if __name__ == "__main__":
     unittest.main()
