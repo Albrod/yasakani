@@ -576,9 +576,10 @@ and starts the reply with an answer block, so that no thinking is written. The s
 
 The work per token is different. Inkling-2 Mini has 24 layers, but a token passes through 48 layers, because layers 6 to 17 are visited
 three times. In each visit the layer chooses 8 of its 128 experts for that token, so the weights that are read change from token to token.
-And there is no look-ahead yet: with the Qwen models a small draft model proposes tokens that the main model checks several at a time, and
-in edits whole copied spans are checked in one pass. The drafter that comes with Inkling-2 Mini is not used in 0.3.0. The speed tables of
-the Qwen models therefore do not apply to this model.
+The look-ahead also differs: with the Qwen models a small draft model proposes tokens that the main model checks several at a time,
+and in edits whole copied spans are checked in one pass. Inkling-2 Mini uses the drafter that comes with the model (`--draft auto`, see
+the [README](../README.md#inkling-2-mini)); it checks at most 8 tokens per pass and helps most with text that is
+easy to guess. The output is the same with and without it. The speed tables of the Qwen models therefore do not apply to this model.
 
 ### What are its licence and its use policy?
 
@@ -590,8 +591,8 @@ Machines Lab.
 
 ### What is not supported yet?
 
-Images (the original model reads them; we support text only), tools and function calling, several requests at once (`--parallel`), the
-drafter (look-ahead), `bench --edit`, Linux, and any GPU other than the RTX 5090 (not tested). This model is experimental in 0.3.0.
+Images (the original model reads them; we support text only), tools and function calling, several requests at once (`--parallel`),
+`bench --edit`, Linux, and any GPU other than the RTX 5090 (not tested). This model is experimental in 0.3.0.
 
 ## Can I use other models, for example Qwen4?
 

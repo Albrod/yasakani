@@ -171,7 +171,7 @@ Inkling-2 Mini is a language model that Thinking Machines Lab published on Novem
 What you need: 64-bit Windows 11, an NVIDIA RTX card with 24 GB or more (cards under 24 GB cannot hold the model), the YASAKANI 0.3.0 quickstart or package, and about 20 GB of free disk for the download. The converter links the weights file into the new folder when both are on the same drive, so the folder takes almost no more space there (on another drive the converter copies the file).
 
 1. Download the published model with the Hugging Face command line tool (`hf`, from the Python package `huggingface_hub`), at the revision we checked.
-2. Convert it with `tools/convert/inkling2_convert.py` from the source of this release (the source code ZIP on the release page, or a clone of this repository). By default the converter does not change the weights: it writes the files our package needs next to them (the manifest `yasakani.json` with the SHA-256 of every file, `selfcheck.json` and `NOTICE`). The image part and the drafter in the download are not used.
+2. Convert it with `tools/convert/inkling2_convert.py` from the source of this release (the source code ZIP on the release page, or a clone of this repository). By default the converter does not change the weights: it writes the files our package needs next to them (the manifest `yasakani.json` with the SHA-256 of every file, `selfcheck.json` and `NOTICE`). The image part in the download is not used. The drafter (`mtp.safetensors`) is linked or copied into the folder in the same way as the weights.
 3. Check the folder, then chat, start the server or open the browser page.
 
 In a quickstart folder, run `yasakani_env.cmd` first in the command prompt; it puts the quickstart's `python` and `yasakani` on the path.
@@ -201,6 +201,19 @@ start (in our run the checks and the start of the page took 35 to 40 s with the 
 
 **Answers.** On the RTX 5090 our engine gave the 30 tokens that the official test expects, and it agreed with our own CPU implementation of the model (hidden states within 1e-4, the same experts chosen). We measured agreement with the published model only, not accuracy on tasks.
 
+**Drafter.** Since 0.3.0 the package uses the drafter that comes with the model (`mtp.safetensors`, a few small layers published with the weights). The drafter guesses the next few tokens, and the model checks all of them in one pass. A guessed token that the model would not have chosen itself is thrown away, so the output does not change: greedy decoding gives the same tokens, and sampling picks each token with the same probabilities. `--draft` chooses how it is used: `auto` (the default) uses it only while it makes generation faster, `on` always uses it, and `off` does not load it (the environment variable `YASAKANI_DRAFT` does the same). `--draft-depth N` sets how many tokens it guesses per pass (1 to 7). The start-up lines say whether the drafter was loaded and which mode is used. A model folder without the file still works, without the drafter.
+
+Speed with the drafter (one RTX 5090, Windows 11, {{DRAFT_DATE}}, the published weights, greedy, thinking off, {{DRAFT_TOKENS}} tokens):
+
+| text | without the drafter (`--draft off`) | `--draft auto` | tokens per pass |
+|---|---|---|---|
+| Japanese prose | {{TPS_OFF_JA_PROSE}} tokens/s | {{TPS_AUTO_JA_PROSE}} tokens/s | {{TPP_JA_PROSE}} |
+| code | {{TPS_OFF_CODE}} tokens/s | {{TPS_AUTO_CODE}} tokens/s | {{TPP_CODE}} |
+| JSON | {{TPS_OFF_JSON}} tokens/s | {{TPS_AUTO_JSON}} tokens/s | {{TPP_JSON}} |
+| math | {{TPS_OFF_MATH}} tokens/s | {{TPS_AUTO_MATH}} tokens/s | {{TPP_MATH}} |
+
+The drafter helps most where the next tokens are easy to guess (code, JSON, math). `yasakani chat` and `yasakani bench` print the tokens per pass; the server gives them in `timings` (`tokens_per_pass`, `draft_passes`, `draft_n`, `draft_n_accepted`).
+
 **Smaller converted weights (`--scheme quality`).** The converter can also write the weights again in fewer bits: with `--scheme quality` it stores most dense matrices in 4 or 8 bits and re-packs the 8-bit experts of layers 20 to 23 to 4 bits, in one `.yskn` file of 15.05 GB (the published file has 19.5 GB). Against the published model on 43 text windows (14,024 positions: the model's own thinking and answers, English and Japanese prose, code) the KL divergence was 0.0110, and the most likely next token was the same at 96.0 % of the positions. The engine needs about 2 GB less GPU memory with it (20.2 instead of 22.1 GB allocated), but it is not faster yet, because 0.3.0 decodes these matrices when it loads them (`yasakani bench`: 168.4 against 166.3 tokens/s in the same run). The conversion takes about 4 minutes on the CPU; the new folder needs about 15 GB of disk.
 
 ```bat
@@ -218,7 +231,7 @@ START.cmd --model-dir D:\models\inkling2-mini-quality
 * Text only (the original model also reads images).
 * One request at a time: no `--parallel`.
 * No tools or function calling.
-* No look-ahead: the drafter that comes with the model is not used.
+* The drafter speeds up text that is easy to guess more than free prose; where it would slow generation down, `--draft auto` does not use it.
 * `bench --edit` and image input are not available for this model.
 * Tested on one RTX 5090 under Windows 11 only; not on other GPUs and not on Linux.
 * Thinking off is our own setting ([FAQ](docs/FAQ.md#inkling-2-mini)).
