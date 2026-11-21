@@ -68,19 +68,29 @@ struct Ten {
   std::vector<unsigned char> host;  // copy of small tensors
 };
 
+// A dense (non-expert) matrix: bfloat16, or packed (nvfp4 / mxfp8) with its scale bytes.
+// fac != 0 multiplies every row sum (packed nvfp4: amax / 2688 / 2; bfloat16 rows with a
+// "_factor" tensor: amax / 2688, the decoded nvfp4 values without the matrix factor).
+struct DMat {
+  const void* w = nullptr;
+  const u8* sc = nullptr;
+  float fac = 0.0f;
+  int fmt = INK2_DFMT_BF16;
+};
+
 struct Layer {
   bool sliding = true, loop = false;
   int nh = 0, nkv = 0, hd = 0, rel_extent = 0, nq = 1;
   int fmt13 = 0, fmt2 = 0;
   const float *attn_query = nullptr, *mlp_query = nullptr, *router_bias = nullptr;
   const u16 *norm_q = nullptr, *norm_k = nullptr, *norm_v = nullptr, *mlp_norm = nullptr;
-  const u16 *wq = nullptr, *wk = nullptr, *wv = nullptr, *wr = nullptr, *wo = nullptr, *w_gate = nullptr, *w_sink = nullptr;
+  DMat wq, wk, wv, wr, wo, w_gate, w_sink, k_wproj, v_wproj, router_w;
   const u16 *q_scale = nullptr, *rel_scale = nullptr, *rel_proj = nullptr;
-  const u16 *k_w = nullptr, *v_w = nullptr, *k_wproj = nullptr, *v_wproj = nullptr;
-  const u16 *attn_sconv = nullptr, *mlp_sconv = nullptr, *router_w = nullptr;
+  const u16 *k_w = nullptr, *v_w = nullptr;
+  const u16 *attn_sconv = nullptr, *mlp_sconv = nullptr;
   const u8 *w13 = nullptr, *w13s = nullptr, *w2 = nullptr, *w2s = nullptr;
   const float *f13 = nullptr, *f2 = nullptr;
-  const u16 *g_down[4] = {}, *g_forget[4] = {}, *g_gain[4] = {};
+  DMat g_down[4], g_forget[4], g_gain[4];
 };
 
 // What one layer visit keeps: the key / value cache (cap slots; on a sliding
@@ -97,6 +107,8 @@ struct Capture {
   std::string name;
   std::vector<float> data;
 };
+
+struct Drafter;  // drafter hook (ink2_drafter.inc)
 
 struct Engine {
   Ink2Config c{};
@@ -117,7 +129,8 @@ struct Engine {
 
   std::vector<Layer> layers;
   std::vector<Visit> visits;
-  const u16 *embed = nullptr, *embed_norm = nullptr, *final_norm = nullptr, *unembed = nullptr;
+  const u16 *embed_norm = nullptr, *final_norm = nullptr;
+  DMat embed, unembed;
   const float *output_query = nullptr, *msg_q = nullptr;
   float *e4m3 = nullptr, *exp2t = nullptr;
   StepState* st = nullptr;  // [max_rows]
@@ -140,6 +153,17 @@ struct Engine {
 
   bool use_graph = false;
   bool use_gemvc = true, use_exp13c = true;  // column-owner forms of the large products
+  int packed_dense = 0;                       // dense matrices stored packed (nvfp4 / mxfp8)
+  int pgemvc_rows = 0;         // rows per block of the packed column-owner product: 0 (by size), 2, 4, 8, 16
+  int pgemvc_min_blocks = 680;  // the size rule of pgemvc_rows = 0 (4 blocks per SM of an RTX 5090)
+  int pgemvw_rows = 2;          // packed one-block-per-row products: 0 = pgemvw, else pgemvc with these rows per block
+  bool use_pgemvn = true;       // narrow packed rows (cols <= 256): several rows per warp
+  bool use_pgemvcm = true;      // passes of several rows: packed column owner for 8 rows at a time (else once per row)
+  // Rows per block of pgemvcm (any choice gives the same sums): 0 = by the rows of the pass, 2 up to 8 rows
+  // (verification passes), 16 above (prompt passes); else 2, 4, 8, 16. Passes of fewer than pgemvcm_min_rows
+  // rows use the single-row kernels once per row (faster for 2 .. 5 rows: A/B in README.md).
+  int pgemvcm_rows = 0;
+  int pgemvcm_min_rows = 6;
   void* graph[2] = {nullptr, nullptr};  // without / with the output projection
   std::map<int, void*> mgraph;          // multi-row passes: key 2 * R + with_logits
   int graphs_built = 0;
@@ -153,9 +177,14 @@ struct Engine {
   long long t_steps = 0, n_launch = 0;
   int cap_visit = -1;
   std::vector<Capture> caps;
+  Drafter* drf = nullptr;  // drafter hook: defined in ink2_drafter.inc
+  void drf_commit(int R);
+  void drf_before_pass(int R);
+  void drf_destroy();
 
   ~Engine() {
     if (be) {
+      drf_destroy();  // drafter hook
       free_graphs();
       for (void* p : owned) be->release(p);
       for (auto& kv : ten)
@@ -223,6 +252,38 @@ struct Engine {
   bool has(const std::string& name) { return ten.find(name) != ten.end(); }
   const u16* bf(const std::string& name, long long count) { return (const u16*)need(name, count * 2); }
   const float* f32(const std::string& name, long long count) { return (const float*)need(name, count * 4); }
+  float host_f32(const std::string& name) {
+    need(name, 4);
+    float v;
+    memcpy(&v, ten[name].host.data(), 4);
+    return v;
+  }
+  // A dense matrix [rows, cols]: "name" alone = bfloat16; with "name_scale" = packed, nvfp4 when
+  // "name_factor" (float32 [1], amax / 2688) is there, else mxfp8; "name" bfloat16 with
+  // "name_factor" = decoded nvfp4 values without the matrix factor (used to check the packed path).
+  DMat dmat(const std::string& name, long long rows, long long cols) {
+    DMat m;
+    long long n = rows * cols;
+    bool hasf = has(name + "_factor");
+    if (has(name + "_scale")) {
+      if (cols % 32) fail("packed matrix " + name + ": columns must be a multiple of 32");
+      if (hasf) {
+        m.fmt = INK2_DFMT_NVFP4;
+        m.w = need(name, n / 2);
+        m.sc = (const u8*)need(name + "_scale", n / 16);
+        m.fac = host_f32(name + "_factor") * 0.5f;  // the kernels decode the codes as twice the E2M1 value
+      } else {
+        m.fmt = INK2_DFMT_MXFP8;
+        m.w = need(name, n);
+        m.sc = (const u8*)need(name + "_scale", n / 32);
+      }
+    } else {
+      m.w = need(name, n * 2);
+      if (hasf) m.fac = host_f32(name + "_factor");
+    }
+    if (m.fmt != INK2_DFMT_BF16) ++packed_dense;
+    return m;
+  }
 
   void load_experts(const std::string& base, long long rows, long long cols, int* fmt_out, const u8** w, const u8** s,
                     const float** factor) {
@@ -277,10 +338,11 @@ struct Engine {
     if (chunk > max_rows) chunk = max_rows;
     const size_t MR = (size_t)max_rows;
 
-    embed = bf("embed", (long long)c.embed_rows * H);
+    embed = dmat("embed", (long long)c.embed_rows, H);
+    if (embed.fmt == INK2_DFMT_NVFP4 || embed.fac != 0.0f) fail("the embedding may be bfloat16 or mxfp8 only");
     embed_norm = bf("embed_norm", H);
     final_norm = bf("norm", H);
-    unembed = bf("unembed", (long long)c.vocab * H);
+    unembed = dmat("unembed", (long long)c.vocab, H);
     output_query = f32("output_query", H);
     int nloop = c.loop_end - c.loop_start;
     if (c.loop_passes > 1) msg_q = f32("msg_q", (long long)nloop * 4 * H);
@@ -316,23 +378,23 @@ struct Engine {
         L.norm_v = bf(p + "v_norm", H);
         L.k_w = bf(p + "k_static", K * C);
         L.v_w = bf(p + "v_static", K * C);
-        L.k_wproj = bf(p + "k_wproj", (long long)L.nkv * K * H);
-        L.v_wproj = bf(p + "v_wproj", (long long)L.nkv * K * H);
+        L.k_wproj = dmat(p + "k_wproj", (long long)L.nkv * K, H);
+        L.v_wproj = dmat(p + "v_wproj", (long long)L.nkv * K, H);
       }
       L.mlp_norm = bf(p + "mlp_norm", H);
-      L.wq = bf(p + "wq", A * H);
-      L.wk = bf(p + "wk", C * H);
-      L.wv = bf(p + "wv", C * H);
-      L.wr = bf(p + "wr", (long long)L.nh * c.d_rel * H);
-      L.wo = bf(p + "wo", H * A);
-      L.w_gate = bf(p + "w_gate", A * H);
-      L.w_sink = bf(p + "w_sink", (long long)L.nh * H);
+      L.wq = dmat(p + "wq", A, H);
+      L.wk = dmat(p + "wk", C, H);
+      L.wv = dmat(p + "wv", C, H);
+      L.wr = dmat(p + "wr", (long long)L.nh * c.d_rel, H);
+      L.wo = dmat(p + "wo", H, A);
+      L.w_gate = dmat(p + "w_gate", A, H);
+      L.w_sink = dmat(p + "w_sink", (long long)L.nh, H);
       L.q_scale = bf(p + "q_scale", A);
       L.rel_scale = bf(p + "rel_scale", (long long)L.nh * c.d_rel);
       L.rel_proj = bf(p + "rel_proj", (long long)c.d_rel * L.rel_extent);
       L.attn_sconv = bf(p + "attn_sconv", H * K);
       L.mlp_sconv = bf(p + "mlp_sconv", H * K);
-      L.router_w = bf(p + "router_w", E * H);
+      L.router_w = dmat(p + "router_w", E, H);
       L.router_bias = f32(p + "router_bias", E);
       load_experts(p + "w13", 2 * I, H, &L.fmt13, &L.w13, &L.w13s, &L.f13);
       load_experts(p + "w2", H, I, &L.fmt2, &L.w2, &L.w2s, &L.f2);
@@ -340,9 +402,9 @@ struct Engine {
         static const char* gname[4] = {"q", "k", "v", "mlp"};
         for (int g = 0; g < 4; ++g) {
           std::string gp = p + "gate_" + gname[g];
-          L.g_down[g] = bf(gp + "_down", R * 2 * H);
-          L.g_forget[g] = bf(gp + "_forget", H * R);
-          L.g_gain[g] = bf(gp + "_gain", H * R);
+          L.g_down[g] = dmat(gp + "_down", R, 2 * H);
+          L.g_forget[g] = dmat(gp + "_forget", H, R);
+          L.g_gain[g] = dmat(gp + "_gain", H, R);
         }
       }
     }
@@ -481,6 +543,11 @@ struct Engine {
   }
 
   // -- kernels with their launch shapes -------------------------------------
+  static bool any_packed(const GemvArgs& a) {
+    for (int j = 0; j < a.njobs; ++j)
+      if (a.job[j].fmt != INK2_DFMT_BF16) return true;
+    return false;
+  }
   // y = W x for every job; R right-hand sides (rows of the pass)
   void k_gemv(GemvArgs& a, int cat, int R = 1) {
     a.total_rows = 0;
@@ -493,6 +560,20 @@ struct Engine {
     }
     int cols = a.job[0].cols;
     bool colowner = use_gemvc && same_cols && cols % 256 == 0 && cols / 8 <= 1024;
+    if (any_packed(a)) {  // packed rows; R > 1: one set of blocks per row
+      a.nrhs = R;
+      int lpr = cols / 8;
+      if (colowner) {
+        k_pgemvc(a, pgemvc_rows, cat, R);
+      } else if (use_pgemvn && same_cols && lpr <= 32 && (lpr & (lpr - 1)) == 0) {
+        a.blocks = (a.total_rows + 8 * (32 / lpr) - 1) / (8 * (32 / lpr));
+        run(KID_pgemvn, &a, a.blocks * R, 256, cat);
+      } else {
+        a.blocks = (a.total_rows + 7) / 8;
+        run(KID_pgemv, &a, a.blocks * R, 256, cat);
+      }
+      return;
+    }
     if (R == 1) {
       if (colowner) run(KID_gemvc, &a, chunks, cols / 8, cat);  // column-owner form
       else run(KID_gemv, &a, (a.total_rows + 7) / 8, 256, cat);
@@ -512,6 +593,19 @@ struct Engine {
   void k_gemvw(GemvArgs& a, int cat, int R = 1) {
     a.total_rows = 0;
     for (int j = 0; j < a.njobs; ++j) a.total_rows += a.job[j].rows;
+    if (any_packed(a)) {
+      a.nrhs = R;
+      bool same_cols = true;
+      for (int j = 0; j < a.njobs; ++j) same_cols = same_cols && a.job[j].cols == a.job[0].cols;
+      int cols = a.job[0].cols;
+      if (pgemvw_rows > 0 && same_cols && cols % 256 == 0 && cols / 8 <= 1024) {
+        k_pgemvc(a, pgemvw_rows, cat, R);  // column owner with few rows per block
+        return;
+      }
+      a.blocks = a.total_rows;
+      run(KID_pgemvw, &a, a.total_rows * R, 256, cat);
+      return;
+    }
     if (R == 1) {
       run(KID_gemvw, &a, a.total_rows, 256, cat);
       return;
@@ -521,9 +615,39 @@ struct Engine {
     run(KID_gemvwm, &a, a.total_rows * ((R + 7) / 8), 256, cat);
   }
   int quad_block() const { return ((c.hidden / 4) + 31) / 32 * 32; }  // H / 4 threads in whole warps
-  static GemvJob job(const u16* w, const float* x, float* y, int rows, int cols, int epi = INK2_EPI_NONE, float cap = 0) {
+  // pgemvc with nr rows per block (2, 4, 8, 16); nr = 0: the largest of 16, 8, 4 that still gives
+  // pgemvc_min_blocks blocks (few rows: more blocks, so that the whole matrix is in flight at once)
+  void k_pgemvc(GemvArgs& a, int nr, int cat, int R) {
+    auto nblocks = [&](int n) {
+      int b = 0;
+      for (int j = 0; j < a.njobs; ++j) b += (a.job[j].rows + n - 1) / n;
+      return b;
+    };
+    if (nr == 0) {
+      nr = 16;
+      while (nr > 4 && nblocks(nr) < pgemvc_min_blocks) nr >>= 1;
+    }
+    a.blocks = nblocks(nr);
+    if (R > 1 && use_pgemvcm && R >= pgemvcm_min_rows) {  // 8 rows of the pass per block (same sums as R single blocks, for any rows per block)
+      int mr = pgemvcm_rows > 0 ? pgemvcm_rows : R <= 8 ? 2 : 16;
+      auto mkid = [](int n) { return n == 2 ? KID_pgemvcm2 : n == 4 ? KID_pgemvcm4 : n == 8 ? KID_pgemvcm8 : KID_pgemvcm; };
+      while (mr > 2 && be->max_block(mkid(mr)) < a.job[0].cols / 8) mr >>= 1;  // fewer rows: fewer registers
+      if (be->max_block(mkid(mr)) >= a.job[0].cols / 8) {
+        a.blocks = nblocks(mr);
+        a.nrhs = R;
+        run(mkid(mr), &a, a.blocks * ((R + 7) / 8), a.job[0].cols / 8, cat);  // K_NRHS
+        return;
+      }
+    }
+    int kid = nr == 2 ? KID_pgemvc2 : nr == 4 ? KID_pgemvc4 : nr == 8 ? KID_pgemvc8 : KID_pgemvc;
+    run(kid, &a, a.blocks * R, a.job[0].cols / 8, cat);
+  }
+  static GemvJob job(const DMat& m, const float* x, float* y, int rows, int cols, int epi = INK2_EPI_NONE, float cap = 0) {
     GemvJob j{};
-    j.w = w;
+    j.w = (const u16*)m.w;
+    j.sc = m.sc;
+    j.fac = m.fac;
+    j.fmt = m.fmt;
     j.x = x;
     j.split = cols;
     j.y = y;
@@ -927,7 +1051,9 @@ struct Engine {
     const int H = c.hidden;
     {
       NormArgs n{};
-      n.job[0].x = embed;
+      n.job[0].x = embed.w;
+      n.esc = embed.sc;
+      n.efmt = embed.fmt;
       n.job[0].x_bf16 = 1;
       n.job[0].w = embed_norm;
       n.job[0].out = emb;
@@ -959,10 +1085,12 @@ struct Engine {
       }
     }
     for (int i = c.loop_end; i < c.layers; ++i, ++vi) hidden = visit(vi, hidden, blocks, nullptr, R);
-    if (!with_logits) return;  // prompt tokens whose prediction nobody reads
+    if (!with_logits && !drf) return;  // prompt tokens whose prediction nobody reads (drafter hook: it reads fh)
     float* o1[1] = {fh};
     const u16* n1[1] = {final_norm};
     k_bar(bar_job(blocks, hidden, output_query, 1, o1, n1, nullptr), nullptr, R);
+    if (drf) drf_commit(R);  // drafter hook
+    if (!with_logits) return;
     GemvArgs a{};
     a.job[0] = job(unembed, fh, logits, c.vocab, H, INK2_EPI_SOFTCAP, c.logit_cap);
     a.njobs = 1;
@@ -1036,6 +1164,7 @@ struct Engine {
     }
     caps.clear();
     be->upload(st, st_host.data(), (size_t)R * sizeof(StepState));
+    if (drf) drf_before_pass(R);  // drafter hook
     if (prof) {
       be->sync();
       prof_mark = now_s();
@@ -1130,9 +1259,55 @@ INK2_API const char* ink2_build_info(void) {
 
 INK2_API int ink2_abi_version(void) { return INK2_ABI_VERSION; }
 
+INK2_API int ink2_capabilities(void) { return INK2_CAP_PACKED_DENSE | INK2_CAP_DRAFTER; }
+
+INK2_API int ink2_packed_dense(void* h) {
+  Engine* e = (Engine*)h;
+  return e && e->finalized ? e->packed_dense : 0;
+}
+
+// Values of the config that a division, a loop or a kernel launch depends on. Checked in ink2_create, so a config.json
+// the engine cannot take gives a clear error instead of a crash (finalize checks the tensor sizes later).
+static void check_config(const Ink2Config& c) {
+  auto need = [](bool ok, const char* what) {
+    if (!ok) fail(std::string("config: ") + what);
+  };
+  need(c.layers >= 1 && c.layers <= 64, "the number of layers must be 1 .. 64");
+  need(c.hidden >= 32 && c.hidden % 32 == 0, "hidden_size must be a positive multiple of 32");
+  need(c.vocab >= 1 && c.embed_rows >= c.vocab, "the vocabulary must be at least 1 and not larger than the embedding table");
+  bool any_full = false, any_sw = false;
+  for (int i = 0; i < c.layers; ++i) (c.sliding[i] ? any_sw : any_full) = true;
+  if (any_full) {
+    need(c.nh_full >= 1 && c.nkv_full >= 1, "the head counts of the full-attention layers must be at least 1");
+    need(c.nh_full % c.nkv_full == 0, "the heads of the full-attention layers must be a multiple of their key/value heads");
+    need(c.hd_full == 128, "the head size of the full-attention layers must be 128");
+    need(c.rel_extent >= 1, "rel_extent must be at least 1");
+  }
+  if (any_sw) {
+    need(c.nh_sw >= 1 && c.nkv_sw >= 1, "the head counts of the sliding-window layers must be at least 1");
+    need(c.nh_sw % c.nkv_sw == 0, "the heads of the sliding-window layers must be a multiple of their key/value heads");
+    need(c.hd_sw == 128, "the head size of the sliding-window layers must be 128");
+    need(c.window >= 1 && c.window <= 65536, "sliding_window_size must be 1 .. 65536");
+  }
+  need(c.d_rel >= 1 && c.d_rel <= 32, "d_rel must be 1 .. 32");
+  need(c.conv_k >= 2 && c.conv_k <= 8, "conv_kernel_size must be 2 .. 8");
+  need(c.expert_inner >= 32 && c.expert_inner % 32 == 0, "moe_intermediate_size must be a positive multiple of 32");
+  need(c.experts >= 1 && c.experts <= 1024, "n_routed_experts must be 1 .. 1024");
+  need(c.top_k >= 2 && c.top_k % 2 == 0 && c.top_k <= 32 && c.top_k <= c.experts,
+       "num_experts_per_tok must be even, 2 .. 32 and not more than the experts");
+  need(c.bar_block >= 1, "the layers per attention-residual block must be at least 1");
+  need(c.loop_passes >= 1, "the loop passes must be at least 1");
+  need(c.loop_start >= 1 && c.loop_end <= c.layers && c.loop_start < c.loop_end, "the loop range must lie inside the layers");
+  need(c.gate_rank >= 8 && c.gate_rank % 8 == 0, "the gate rank must be a positive multiple of 8");
+  need(c.n_floor >= 1, "the position floor of the log scaling must be at least 1");
+  need(c.max_positions >= 1, "max_positions must be positive");
+}
+
 INK2_API void* ink2_create(const Ink2Config* cfg, const char* backend) {
   Engine* e = nullptr;
   try {
+    if (!cfg) fail("no config");
+    check_config(*cfg);
     e = new Engine();
     e->c = *cfg;
     e->be = make_backend(backend);
@@ -1239,6 +1414,13 @@ INK2_API int ink2_set_option(void* h, const char* name, int value) {
   std::string n = name;
   if (n == "graph") e->use_graph = value != 0;
   else if (n == "gemvc") e->use_gemvc = value != 0;
+  else if (n == "pgemvc_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->pgemvc_rows = value;
+  else if (n == "pgemvw_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->pgemvw_rows = value;
+  else if (n == "pgemvc_min_blocks" && value >= 1) e->pgemvc_min_blocks = value;
+  else if (n == "pgemvn") e->use_pgemvn = value != 0;
+  else if (n == "pgemvcm") e->use_pgemvcm = value != 0;
+  else if (n == "pgemvcm_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->pgemvcm_rows = value;
+  else if (n == "pgemvcm_min_rows" && value >= 2) e->pgemvcm_min_rows = value;
   else if (n == "exp13c") e->use_exp13c = value != 0;
   else if (n == "max_rows" || n == "rollback") {
     if (e->finalized) fail("option " + n + " must be set before finalize");
@@ -1391,3 +1573,5 @@ INK2_API int ink2_selftest(const char* backend, char* report, int report_cap) {
   if (report && report_cap > 0) snprintf(report, report_cap, "%s", text.c_str());
   return rc;
 }
+
+#include "ink2_drafter.inc"  // drafter hook

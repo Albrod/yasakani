@@ -7,9 +7,10 @@
 * ``Writer``: the writer (the converter, tools/convert/inkling2_convert.py).
 * ``CheckpointView``: the file seen through the interface of the safetensors reader that the engine binding uses
   (``names``, ``has``, ``info``, ``raw``, ``f32``, ``expert_format``, ``expert_weight``), with the checkpoint's tensor names.
-  Experts are handed over packed, as they are stored.  Dense matrices that are stored packed (NVFP4, MXFP8) are decoded on the
-  CPU to bfloat16, because the engine multiplies dense matrices from bfloat16 today; ``parts()`` gives the packed bytes for an
-  engine that takes them as they are.
+  Experts are handed over packed, as they are stored.  Dense matrices that are stored packed (NVFP4, MXFP8) are handed over
+  packed too (``parts()``: the stored bytes) when the engine library says through its capability query that it multiplies them as
+  stored (``ink2_capabilities``, bit CAPABILITY_PACKED_DENSE, engine interface version 3); for an older engine they are decoded
+  on the CPU to bfloat16.
 
 Number formats (the same as the experts of the published checkpoint):
   NVFP4  weight: two 4-bit E2M1 codes per byte, the even element in the low nibble; scale: one E4M3 byte per 16 consecutive values
@@ -49,6 +50,7 @@ EXPERT_SUFFIX = {"weight": "_weight", "scale": "_weight_scale", "amax": "_weight
 CKPT_DTYPE = {("nvfp4", "weight"): "U8", ("nvfp4", "scale"): "F8_E4M3", ("nvfp4", "amax"): "F32", ("nvfp4", "denominator"): "F32",
               ("mxfp8", "weight"): "F8_E4M3", ("mxfp8", "scale"): "U8"}
 CAPABILITY_PACKED_DENSE = 1   # the bit of the engine's capability query that says "dense matrices may be given packed"
+PACKED_DENSE_ABI = 3          # ink2_abi_version() of the first engine with the capability query
 
 
 class FormatError(ValueError):
@@ -450,7 +452,7 @@ class CheckpointView:
     """A .yskn file with the interface and the tensor names of the safetensors reader of the engine binding.
 
     dense="bf16": a dense matrix stored packed is decoded and rounded to bfloat16 (``raw`` gives the bits, ``f32`` the rounded
-    values): what the engine multiplies today.  dense="exact": ``f32`` gives the exact decoded float32 values (``raw`` still the
+    values): for an engine that multiplies dense matrices from bfloat16 only (interface version 2).  dense="exact": ``f32`` gives the exact decoded float32 values (``raw`` still the
     bfloat16 bits).  dense="packed" (an engine that takes packed matrices): ``info`` gives ("NVFP4" or "MXFP8", logical shape)
     for such a matrix, ``parts`` its stored parts, and ``raw`` refuses.  Experts are always given as stored (``raw`` of ``<prefix>_weight`` etc. is a view of the file).  A decoded
     tensor is made again on every call (nothing is kept)."""
@@ -541,8 +543,16 @@ class CheckpointView:
 
 
 def engine_takes_packed_dense(lib) -> bool:
-    """True when the engine library says (through ``ink2_capabilities``, bit CAPABILITY_PACKED_DENSE) that its dense matrix products
-    read NVFP4 / MXFP8 tensors as stored.  No such engine exists yet: today this is always False."""
+    """True when the engine library is of interface version 3 or newer (``ink2_abi_version``) and says through
+    ``ink2_capabilities`` (bit CAPABILITY_PACKED_DENSE) that its dense matrix products read NVFP4 / MXFP8 tensors as stored."""
+    abi = getattr(lib, "abi", None)
+    if abi is None:
+        try:
+            abi = int(lib.ink2_abi_version())
+        except (AttributeError, TypeError, ValueError, OSError):
+            abi = 1
+    if int(abi) < PACKED_DENSE_ABI:
+        return False
     fn = getattr(lib, "ink2_capabilities", None)
     if fn is None:
         return False

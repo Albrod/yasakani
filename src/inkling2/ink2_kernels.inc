@@ -11,7 +11,7 @@
 //   KSHFL_DOWN(v, d)     value of lane + d of the same warp (own value past the end)
 //   KSHFL(v, src)        value of lane src
 //   KSHARED(T, name, n)  block-shared array (kernel scope only)
-//   KLOAD64(p)           8 bytes, little endian (p 8-byte aligned)
+//   KLOAD64(p)           8 bytes, little endian (p 8-byte aligned);  KLOAD32(p)  4 bytes (p 4-byte aligned)
 //   KF4, KLOADF4(p)      4 floats .x .y .z .w in one load (p 16-byte aligned); KF4ZERO
 //   KFMA(a, b, c)        fused a * b + c;  KBITS2F(u)  float32 from its bits
 //   KUNROLL / KNOUNROLL  unroll / do not unroll the next loop (CUDA only)
@@ -25,6 +25,13 @@
 KINL float k_bf(unsigned b) { return KBITS2F(b << 16); }
 KINL float k_sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 KINL float k_softcap(float x, float cap) { return tanhf(x / cap) * cap; }
+// Table-free decoders of the packed formats. A code placed in the low bits of a float32 exponent is its
+// value times a power of two (the subnormal codes included), so one multiplication gives the exact value:
+//   E2M1 code (bits 0-3) -> twice its value (as k_e2m1x2);  E4M3 byte -> its value (NaN bytes 0x7F / 0xFF
+//   give 480 instead; the quantiser never writes them);  exponent byte b -> 2 ** (b - 127).
+KINL float k_fp4x2(unsigned c) { return KBITS2F(((c & 7u) << 22) | ((c & 8u) << 28)) * KBITS2F(0x7F000000u); }
+KINL float k_e4m3v(unsigned b) { return KBITS2F(((b & 0x7Fu) << 20) | ((b & 0x80u) << 24)) * KBITS2F(0x7B800000u); }
+KINL float k_exp2v(unsigned b) { return KBITS2F(b ? (b << 23) : 0x00400000u); }
 
 // Sum over the warp, returned to every lane.
 KINL float k_warp_sum(KCTXP float v) {
@@ -127,6 +134,12 @@ KINL float k_epilogue(float s, int epi, float cap) {
   if (epi == INK2_EPI_TANH) return tanhf(s);
   return s;
 }
+// End of a row sum of a gemv job: the row factor (fac != 0: packed nvfp4, or the decoded nvfp4 values
+// in bfloat16 without their matrix factor), then the epilogue.
+KINL float k_jout(const GemvJob& J, float s) {
+  if (J.fac != 0.0f) s = s * J.fac;
+  return k_epilogue(s, J.epi, J.cap);
+}
 
 // Slot of position p in a history ring of hr slots (p may be negative).
 KINL int k_slot(int p, int hr) { return ((p % hr) + hr) % hr; }
@@ -175,7 +188,7 @@ KERNEL(gemv, GemvArgs) {
   int cols = a.job[j].cols;
   float acc = k_bf_dot(a.job[j].w + (size_t)row * (size_t)cols, a.job[j].x, a.job[j].x2, a.job[j].split, cols, lane, 32);
   float s = k_warp_sum(KCTXA acc);
-  if (lane == 0) a.job[j].y[row] = k_epilogue(s, a.job[j].epi, a.job[j].cap);
+  if (lane == 0) a.job[j].y[row] = k_jout(a.job[j], s);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +205,7 @@ KERNEL(gemvw, GemvArgs) {
   int cols = a.job[j].cols;
   float acc = k_bf_dot(a.job[j].w + (size_t)row * (size_t)cols, a.job[j].x, a.job[j].x2, a.job[j].split, cols, KTID, KNT);
   float s = k_block_sum(KCTXA acc, sm);
-  if (KTID == 0) a.job[j].y[row] = k_epilogue(s, a.job[j].epi, a.job[j].cap);
+  if (KTID == 0) a.job[j].y[row] = k_jout(a.job[j], s);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,19 +220,28 @@ KERNEL(norm, NormArgs) {
   }
   const float* xf = (const float*)a.job[jb].x + (size_t)row * (size_t)a.n;
   const u16* xb = (const u16*)a.job[jb].x;
-  if (a.embed_stride > 0 && jb == 0) xb += (size_t)a.st[row].token * (size_t)a.embed_stride;
+  const u8* x8 = 0;  // packed table row (mxfp8) and its exponents
+  const u8* e8 = 0;
+  if (a.embed_stride > 0 && jb == 0) {
+    size_t tok = (size_t)a.st[row].token;
+    if (a.efmt == INK2_DFMT_MXFP8) {
+      x8 = (const u8*)a.job[0].x + tok * (size_t)a.embed_stride;
+      e8 = a.esc + tok * (size_t)(a.embed_stride >> 5);
+    }
+    xb += tok * (size_t)a.embed_stride;
+  }
   int isbf = a.job[jb].x_bf16;
   const u16* w = a.job[jb].w;
   float* out = a.job[jb].out + (size_t)row * (size_t)a.n;
   float ss = 0.0f;
   for (int j = KTID; j < a.n; j += KNT) {
-    float v = isbf ? k_bf(xb[j]) : xf[j];
+    float v = x8 ? k_e4m3v(x8[j]) * k_exp2v(e8[j >> 5]) : isbf ? k_bf(xb[j]) : xf[j];
     ss += v * v;
   }
   float tot = k_block_sum(KCTXA ss, sm);
   float scv = 1.0f / sqrtf(tot / (float)a.n + a.eps);
   for (int j = KTID; j < a.n; j += KNT) {
-    float v = (isbf ? k_bf(xb[j]) : xf[j]) * scv;
+    float v = (x8 ? k_e4m3v(x8[j]) * k_exp2v(e8[j >> 5]) : isbf ? k_bf(xb[j]) : xf[j]) * scv;
     if (w) v = k_bf(w[j]) * v;
     out[j] = v;
   }
@@ -843,7 +865,7 @@ KERNEL(gemvc, GemvArgs) {
   if (KTID < nrows) {
     float t = 0.0f;
     for (int w = 0; w < nw; ++w) t += sm[KTID * 32 + w];
-    a.job[j].y[row0 + KTID] = k_epilogue(t, a.job[j].epi, a.job[j].cap);
+    a.job[j].y[row0 + KTID] = k_jout(a.job[j], t);
   }
 }
 
@@ -1018,7 +1040,7 @@ KERNEL(gemvm, GemvArgs) {
   }
   float t = k_warp_sum8t(KCTXA acc);
   int i = lane >> 2;
-  if ((lane & 3) == 0 && i < nr) J.y[(size_t)(r0 + i) * J.rows + row] = k_epilogue(t, J.epi, J.cap);
+  if ((lane & 3) == 0 && i < nr) J.y[(size_t)(r0 + i) * J.rows + row] = k_jout(J, t);
 }
 
 // gemvwm: gemvw (one block per matrix row) for up to 8 right-hand sides.
@@ -1069,7 +1091,7 @@ KERNEL(gemvwm, GemvArgs) {
   if (KTID < nr) {
     float s = 0.0f;
     for (int w = 0; w < nw; ++w) s += sm[w * K_NRHS + KTID];
-    J.y[(size_t)(r0 + KTID) * J.rows + row] = k_epilogue(s, J.epi, J.cap);
+    J.y[(size_t)(r0 + KTID) * J.rows + row] = k_jout(J, s);
   }
 }
 
@@ -1148,7 +1170,7 @@ KERNEL(gemvcm, GemvArgs) {
     int r = t / nr, i = t - r * nr;
     float s = 0.0f;
     for (int w = 0; w < nw; ++w) s += sm[(r * K_NRHS + i) * 32 + w];
-    J.y[(size_t)(r0 + i) * J.rows + row0 + r] = k_epilogue(s, J.epi, J.cap);
+    J.y[(size_t)(r0 + i) * J.rows + row0 + r] = k_jout(J, s);
   }
 }
 
@@ -1592,3 +1614,361 @@ KERNEL(argmax, ArgmaxArgs) {
     a.val[KBID] = best;
   }
 }
+
+// ===========================================================================
+// Packed dense rows: pgemv / pgemvw / pgemvc are gemv / gemvw / gemvc on rows
+// stored as nvfp4 or mxfp8 (GemvJob.fmt; bfloat16 jobs may be mixed in). A
+// thread multiplies 8 consecutive columns c0 .. c0+7 (c0 % 8 == 0) of a row:
+//   bf16 : 16 bytes;
+//   nvfp4: 4 code bytes; the E4M3 scale of their 16-column block multiplies
+//          the sum of the 8 products;
+//   mxfp8: 8 E4M3 bytes; the exponent of their 32-column block multiplies
+//          the sum of the 8 products.
+// The row sum is multiplied by fac (nvfp4: amax / 2688 / 2) before the
+// epilogue (k_jout). Several right-hand sides (nrhs > 1): blocks * nrhs
+// blocks, block b of right-hand side r does exactly the work of block b of a
+// single row on input row r (x row stride split, x2 row stride cols - split,
+// y row stride rows), so that a pass gives bit for bit the single steps; the
+// weights are read once per right-hand side (from L2 after the first).
+// ===========================================================================
+#define K_FP4_8(c, xa, xb)                \
+  s = KFMA(k_fp4x2((c)), (xa).x, s);      \
+  s = KFMA(k_fp4x2((c) >> 4), (xa).y, s); \
+  s = KFMA(k_fp4x2((c) >> 8), (xa).z, s); \
+  s = KFMA(k_fp4x2((c) >> 12), (xa).w, s); \
+  s = KFMA(k_fp4x2((c) >> 16), (xb).x, s); \
+  s = KFMA(k_fp4x2((c) >> 20), (xb).y, s); \
+  s = KFMA(k_fp4x2((c) >> 24), (xb).z, s); \
+  s = KFMA(k_fp4x2((c) >> 28), (xb).w, s);
+#define K_E4M3_8(c, xa, xb)                            \
+  s = KFMA(k_e4m3v((unsigned)(c)), (xa).x, s);         \
+  s = KFMA(k_e4m3v((unsigned)((c) >> 8)), (xa).y, s);  \
+  s = KFMA(k_e4m3v((unsigned)((c) >> 16)), (xa).z, s); \
+  s = KFMA(k_e4m3v((unsigned)((c) >> 24)), (xa).w, s); \
+  s = KFMA(k_e4m3v((unsigned)((c) >> 32)), (xb).x, s); \
+  s = KFMA(k_e4m3v((unsigned)((c) >> 40)), (xb).y, s); \
+  s = KFMA(k_e4m3v((unsigned)((c) >> 48)), (xb).z, s); \
+  s = KFMA(k_e4m3v((unsigned)((c) >> 56)), (xb).w, s);
+
+// 8 columns from c0 of row r of one matrix (wb = code bytes, sb = scale bytes) times xa, xb
+KINL float k_pk8(const u8* wb, const u8* sb, int fmt, size_t r, int cols, int c0, KF4 xa, KF4 xb) {
+  float s = 0.0f;
+  if (fmt == INK2_DFMT_NVFP4) {
+    unsigned c = KLOAD32(wb + r * (size_t)(cols >> 1) + (size_t)(c0 >> 1));
+    K_FP4_8(c, xa, xb)
+    return s * k_e4m3v(sb[r * (size_t)(cols >> 4) + (size_t)(c0 >> 4)]);
+  }
+  if (fmt == INK2_DFMT_MXFP8) {
+    u64 c = KLOAD64(wb + r * (size_t)cols + (size_t)c0);
+    K_E4M3_8(c, xa, xb)
+    return s * k_exp2v(sb[r * (size_t)(cols >> 5) + (size_t)(c0 >> 5)]);
+  }
+  const u16* p = (const u16*)wb + r * (size_t)cols + (size_t)c0;
+  u64 w0 = KLOAD64(p), w1 = KLOAD64(p + 4);
+  s = KFMA(k_bf((unsigned)(w0 & 0xffffu)), xa.x, s);
+  s = KFMA(k_bf((unsigned)((w0 >> 16) & 0xffffu)), xa.y, s);
+  s = KFMA(k_bf((unsigned)((w0 >> 32) & 0xffffu)), xa.z, s);
+  s = KFMA(k_bf((unsigned)(w0 >> 48)), xa.w, s);
+  s = KFMA(k_bf((unsigned)(w1 & 0xffffu)), xb.x, s);
+  s = KFMA(k_bf((unsigned)((w1 >> 16) & 0xffffu)), xb.y, s);
+  s = KFMA(k_bf((unsigned)((w1 >> 32) & 0xffffu)), xb.z, s);
+  s = KFMA(k_bf((unsigned)(w1 >> 48)), xb.w, s);
+  return s;
+}
+// Part of row r of job J times input row rhs: the 8-column units u = first, first + stride, ...
+KINL float k_pk_dot(const GemvJob& J, int rhs, size_t r, int first, int stride) {
+  float acc = 0.0f;
+  int nunit = J.cols >> 3;
+  for (int u = first; u < nunit; u += stride) {
+    const float* xx = k_xrow(J, rhs, u << 3);
+    KF4 xa = KLOADF4(xx), xb = KLOADF4(xx + 4);
+    acc += k_pk8((const u8*)J.w, J.sc, J.fmt, r, J.cols, u << 3, xa, xb);
+  }
+  return acc;
+}
+
+// pgemv: one warp per row (as gemv)
+KERNEL(pgemv, GemvArgs) {
+  int lane = KTID & 31;
+  int b = KBID, rhs = 0;
+  if (a.nrhs > 1) {
+    rhs = b / a.blocks;
+    b -= rhs * a.blocks;
+  }
+  int row = b * (KNT >> 5) + (KTID >> 5);
+  if (row >= a.total_rows) return;
+  int j = 0;
+  while (row >= a.job[j].rows) {
+    row -= a.job[j].rows;
+    ++j;
+  }
+  const GemvJob& J = a.job[j];
+  float s = k_warp_sum(KCTXA k_pk_dot(J, rhs, (size_t)row, lane, 32));
+  if (lane == 0) J.y[(size_t)rhs * J.rows + row] = k_jout(J, s);
+}
+
+// pgemvw: one block per row (as gemvw)
+KERNEL(pgemvw, GemvArgs) {
+  KSHARED(float, sm, 33);
+  int row = KBID, rhs = 0;
+  if (a.nrhs > 1) {
+    rhs = row / a.blocks;
+    row -= rhs * a.blocks;
+  }
+  int j = 0;
+  while (row >= a.job[j].rows) {
+    row -= a.job[j].rows;
+    ++j;
+  }
+  const GemvJob& J = a.job[j];
+  float s = k_block_sum(KCTXA k_pk_dot(J, rhs, (size_t)row, KTID, KNT), sm);
+  if (KTID == 0) J.y[(size_t)rhs * J.rows + row] = k_jout(J, s);
+}
+
+// pgemvc: column owner (as gemvc). One block per chunk of NR rows of one job
+// (pgemvc: 16, pgemvc8: 8, pgemvc4: 4, pgemvc2: 2); all jobs have the same cols; cols / 8
+// threads, thread t owns the columns 8t .. 8t+7 (x in registers). The loads of
+// all rows of the chunk are issued before the sums; the row sums of a warp go
+// through k_warp_sum8t.
+#define K_PGEMVC_ROWS 16
+template <int NR>
+KINL void k_pgemvc(KCTXP const GemvArgs& a, float* sm) {
+  int lane = KTID & 31, warp = KTID >> 5, nw = KNT >> 5;
+  int b = KBID, rhs = 0, j = 0;
+  if (a.nrhs > 1) {
+    rhs = b / a.blocks;
+    b -= rhs * a.blocks;
+  }
+  for (;;) {
+    int nb = (a.job[j].rows + NR - 1) / NR;
+    if (b < nb) break;
+    b -= nb;
+    ++j;
+  }
+  const GemvJob& J = a.job[j];
+  int cols = J.cols;
+  int row0 = b * NR;
+  int nrows = J.rows - row0;
+  if (nrows > NR) nrows = NR;
+  int c0 = KTID * 8;
+  int act = c0 < cols;
+  KF4 xa = KF4ZERO, xb = KF4ZERO;
+  if (act) {
+    const float* xx = k_xrow(J, rhs, c0);
+    xa = KLOADF4(xx);
+    xb = KLOADF4(xx + 4);
+  }
+  const u8* wb = (const u8*)J.w;
+  const u8* sb = J.sc;
+  float part[NR < 8 ? 8 : NR];  // k_warp_sum8t sums 8 at a time
+  KUNROLL for (int r = 0; r < (NR < 8 ? 8 : NR); ++r) part[r] = 0.0f;
+  if (act) {
+    if (J.fmt == INK2_DFMT_NVFP4) {
+      KUNROLL for (int r = 0; r < NR; ++r) if (r < nrows) part[r] = k_pk8(wb, sb, INK2_DFMT_NVFP4, (size_t)(row0 + r), cols, c0, xa, xb);
+    } else if (J.fmt == INK2_DFMT_MXFP8) {
+      KUNROLL for (int r = 0; r < NR; ++r) if (r < nrows) part[r] = k_pk8(wb, sb, INK2_DFMT_MXFP8, (size_t)(row0 + r), cols, c0, xa, xb);
+    } else {
+      KUNROLL for (int r = 0; r < NR; ++r) if (r < nrows) part[r] = k_pk8(wb, sb, INK2_DFMT_BF16, (size_t)(row0 + r), cols, c0, xa, xb);
+    }
+  }
+  KUNROLL for (int g = 0; g < NR; g += 8) {
+    float s = k_warp_sum8t(KCTXA part + g);
+    if ((lane & 3) == 0) sm[(g + (lane >> 2)) * 32 + warp] = s;
+  }
+  KSYNC();
+  if (KTID < nrows) {
+    float t = 0.0f;
+    for (int w = 0; w < nw; ++w) t += sm[KTID * 32 + w];
+    J.y[(size_t)rhs * J.rows + row0 + KTID] = k_jout(J, t);
+  }
+}
+KERNEL(pgemvc, GemvArgs) {
+  KSHARED(float, sm, 16 * 32);
+  k_pgemvc<16>(KCTXA a, sm);
+}
+KERNEL(pgemvc8, GemvArgs) {
+  KSHARED(float, sm, 8 * 32);
+  k_pgemvc<8>(KCTXA a, sm);
+}
+KERNEL(pgemvc4, GemvArgs) {
+  KSHARED(float, sm, 8 * 32);
+  k_pgemvc<4>(KCTXA a, sm);
+}
+KERNEL(pgemvc2, GemvArgs) {
+  KSHARED(float, sm, 8 * 32);
+  k_pgemvc<2>(KCTXA a, sm);
+}
+
+// pgemvn: narrow rows (cols <= 256, all jobs the same cols, cols / 8 a power
+// of two): lpr = cols / 8 lanes per row, 32 / lpr rows per warp, 8 warps per
+// block; lane l of a row group multiplies the 8 columns 8 l .. 8 l + 7.
+KERNEL(pgemvn, GemvArgs) {
+  int lane = KTID & 31;
+  int b = KBID, rhs = 0;
+  if (a.nrhs > 1) {
+    rhs = b / a.blocks;
+    b -= rhs * a.blocks;
+  }
+  int lpr = a.job[0].cols >> 3, rpw = 32 / lpr;
+  int sub = lane / lpr, u = lane - sub * lpr;
+  int row = (b * (KNT >> 5) + (KTID >> 5)) * rpw + sub;
+  int live = row < a.total_rows;
+  int j = 0, r = live ? row : 0;
+  while (r >= a.job[j].rows) {
+    r -= a.job[j].rows;
+    ++j;
+  }
+  const GemvJob& J = a.job[j];
+  float s = 0.0f;
+  if (live) {
+    const float* xx = k_xrow(J, rhs, u << 3);
+    KF4 xa = KLOADF4(xx), xb = KLOADF4(xx + 4);
+    s = k_pk8((const u8*)J.w, J.sc, J.fmt, (size_t)r, J.cols, u << 3, xa, xb);
+  }
+  for (int o = lpr >> 1; o > 0; o >>= 1) s = s + KSHFL(s, lane ^ o);
+  if (live && u == 0) J.y[(size_t)rhs * J.rows + r] = k_jout(J, s);
+}
+
+// ---------------------------------------------------------------------------
+// pgemvcm: pgemvc (column owner, NR rows per block) for up to K_NRHS right-
+// hand sides per block, so that a pass of R rows reads the packed weights
+// once per group of 8 rows instead of once per row. Block b of group g does
+// the work of block b of pgemvc on the input rows 8g .. 8g+7: thread t owns
+// the columns 8t .. 8t+7, the 8 weights of a row are decoded once (k_pkload /
+// k_pkdec) and multiplied with every input row in the order of k_pk8 (FMA
+// chain from 0, then the block scale), the sums go through k_warp_sum8t (bit
+// for bit k_warp_sum) and the warps are added in order, as in pgemvc. So a
+// pass gives bit for bit the single steps with any NR. All code words of the
+// block are loaded before the first is used.
+// ---------------------------------------------------------------------------
+struct K_PKW {
+  u64 a, b;    // code bytes (nvfp4: 4 in a, mxfp8: 8 in a, bfloat16: 16 in a and b)
+  unsigned s;  // block scale byte (packed formats)
+};
+KINL K_PKW k_pkload(const u8* wb, const u8* sb, int fmt, size_t r, int cols, int c0) {
+  K_PKW w;
+  w.b = 0;
+  w.s = 0;
+  if (fmt == INK2_DFMT_NVFP4) {
+    w.a = (u64)KLOAD32(wb + r * (size_t)(cols >> 1) + (size_t)(c0 >> 1));
+    w.s = sb[r * (size_t)(cols >> 4) + (size_t)(c0 >> 4)];
+  } else if (fmt == INK2_DFMT_MXFP8) {
+    w.a = KLOAD64(wb + r * (size_t)cols + (size_t)c0);
+    w.s = sb[r * (size_t)(cols >> 5) + (size_t)(c0 >> 5)];
+  } else {
+    const u16* p = (const u16*)wb + r * (size_t)cols + (size_t)c0;
+    w.a = KLOAD64(p);
+    w.b = KLOAD64(p + 4);
+  }
+  return w;
+}
+// The 8 weights as floats (the values k_pk8 multiplies) -> f; returns the block scale (1 for bfloat16).
+KINL float k_pkdec(const K_PKW& w, int fmt, float* f) {
+  if (fmt == INK2_DFMT_NVFP4) {
+    unsigned c = (unsigned)w.a;
+    for (int e = 0; e < 8; ++e) f[e] = k_fp4x2(c >> (4 * e));
+    return k_e4m3v(w.s);
+  }
+  if (fmt == INK2_DFMT_MXFP8) {
+    for (int e = 0; e < 8; ++e) f[e] = k_e4m3v((unsigned)(w.a >> (8 * e)));
+    return k_exp2v(w.s);
+  }
+  K_BF8(w.a, w.b, f)
+  return 1.0f;
+}
+template <int NR>
+KINL void k_pgemvcm(KCTXP const GemvArgs& a, float* sm) {
+  int lane = KTID & 31, warp = KTID >> 5, nw = KNT >> 5;
+  int grp = KBID / a.blocks;
+  int b = KBID - grp * a.blocks, j = 0;
+  for (;;) {
+    int nb = (a.job[j].rows + NR - 1) / NR;
+    if (b < nb) break;
+    b -= nb;
+    ++j;
+  }
+  const GemvJob& J = a.job[j];
+  int r0 = grp * K_NRHS;
+  int nr = a.nrhs - r0;
+  if (nr > K_NRHS) nr = K_NRHS;
+  int cols = J.cols;
+  int row0 = b * NR;
+  int nrows = J.rows - row0;
+  if (nrows > NR) nrows = NR;
+  int c0 = KTID * 8;
+  int act = c0 < cols;
+  int fmt = J.fmt;
+  float x[K_NRHS][8];
+  for (int i = 0; i < K_NRHS; ++i) {
+    for (int e = 0; e < 8; ++e) x[i][e] = 0.0f;
+    if (act && i < nr) {
+      const float* xx = k_xrow(J, r0 + i, c0);
+      KF4 xa = KLOADF4(xx), xb = KLOADF4(xx + 4);
+      x[i][0] = xa.x;
+      x[i][1] = xa.y;
+      x[i][2] = xa.z;
+      x[i][3] = xa.w;
+      x[i][4] = xb.x;
+      x[i][5] = xb.y;
+      x[i][6] = xb.z;
+      x[i][7] = xb.w;
+    }
+  }
+  const u8* wb = (const u8*)J.w;
+  K_PKW wr[NR];
+  KUNROLL for (int r = 0; r < NR; ++r) {
+    wr[r].a = wr[r].b = 0;
+    wr[r].s = 0;
+    if (act && r < nrows) wr[r] = k_pkload(wb, J.sc, fmt, (size_t)(row0 + r), cols, c0);
+  }
+  KUNROLL for (int r = 0; r < NR; ++r) {
+    if (r < nrows) {
+      float acc[K_NRHS];
+      for (int i = 0; i < K_NRHS; ++i) acc[i] = 0.0f;
+      if (act) {
+        float f[8];
+        float scl = k_pkdec(wr[r], fmt, f);
+        for (int i = 0; i < K_NRHS; ++i) {
+          if (i < nr) {
+            float s = KFMA(f[0], x[i][0], 0.0f);
+            s = KFMA(f[1], x[i][1], s);
+            s = KFMA(f[2], x[i][2], s);
+            s = KFMA(f[3], x[i][3], s);
+            s = KFMA(f[4], x[i][4], s);
+            s = KFMA(f[5], x[i][5], s);
+            s = KFMA(f[6], x[i][6], s);
+            s = KFMA(f[7], x[i][7], s);
+            acc[i] = fmt == INK2_DFMT_BF16 ? s : s * scl;
+          }
+        }
+      }
+      float t = k_warp_sum8t(KCTXA acc);
+      if ((lane & 3) == 0) sm[(r * K_NRHS + (lane >> 2)) * 32 + warp] = t;
+    }
+  }
+  KSYNC();
+  for (int t = KTID; t < nrows * nr; t += KNT) {
+    int r = t / nr, i = t - r * nr;
+    float s = 0.0f;
+    for (int w = 0; w < nw; ++w) s += sm[(r * K_NRHS + i) * 32 + w];
+    J.y[(size_t)(r0 + i) * J.rows + row0 + r] = k_jout(J, s);
+  }
+}
+KERNEL(pgemvcm, GemvArgs) {
+  KSHARED(float, sm, 16 * K_NRHS * 32);
+  k_pgemvcm<16>(KCTXA a, sm);
+}
+KERNEL(pgemvcm8, GemvArgs) {
+  KSHARED(float, sm, 8 * K_NRHS * 32);
+  k_pgemvcm<8>(KCTXA a, sm);
+}
+KERNEL(pgemvcm4, GemvArgs) {
+  KSHARED(float, sm, 4 * K_NRHS * 32);
+  k_pgemvcm<4>(KCTXA a, sm);
+}
+KERNEL(pgemvcm2, GemvArgs) {
+  KSHARED(float, sm, 2 * K_NRHS * 32);
+  k_pgemvcm<2>(KCTXA a, sm);
+}
+
+#include "ink2_drafter_kernels.inc"  // drafter hook

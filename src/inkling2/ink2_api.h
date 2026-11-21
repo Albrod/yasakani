@@ -2,13 +2,27 @@
 // Copyright (c) 2026 the YASAKANI authors
 // C API of the Inkling-2 Mini engine (text only). One token per call
 // (ink2_step / ink2_feed), or R consecutive positions in one pass
-// (ink2_feed_many / ink2_step_many, ABI version 2).
+// (ink2_feed_many / ink2_step_many, ABI version 2); dense matrices bfloat16 or packed
+// (ABI version 3).
 #pragma once
 
 // 1: one token per call; 2: adds ink2_abi_version, ink2_feed_many, ink2_step_many,
 // ink2_truncate, ink2_position, ink2_limits, ink2_get_row and the options
 // "max_rows", "rollback", "chunk". Functions of version 1 are unchanged.
-#define INK2_ABI_VERSION 2
+// 3: adds ink2_capabilities and ink2_packed_dense: dense (non-expert) matrices may be
+// given packed (nvfp4 / mxfp8, see "Packed dense matrices" below), and the options
+// "pgemvc_rows", "pgemvw_rows", "pgemvc_min_blocks", "pgemvn". Nothing of version 2 is
+// removed or changed: a model sent as in version 2 (bfloat16 dense matrices) runs as before.
+// The drafter calls (ink2_drafter_api.h) are an addition within version 3, shown by INK2_CAP_DRAFTER.
+// ink2_create checks the config values (head counts, sizes, experts and top-k, kernel and window sizes)
+// and fails with a message in ink2_last_error(NULL) for values the kernels cannot take.
+#define INK2_ABI_VERSION 3
+
+// Bits of ink2_capabilities().
+enum {
+  INK2_CAP_PACKED_DENSE = 1,  // dense matrices are accepted packed (nvfp4 / mxfp8), multiplied as stored
+  INK2_CAP_DRAFTER = 2        // the model's drafter (ink2_drafter_api.h: ink2_draft_abi, ink2_spec_pass, ...)
+};
 
 #ifdef INK2_BUILD
 #define INK2_API extern "C" __declspec(dllexport)
@@ -74,6 +88,19 @@ INK2_API int ink2_feed(void* h, int token);
 // max(max_rows, rollback) extra positions); "chunk" = rows per pass of ink2_feed_many (default 128).
 INK2_API int ink2_set_option(void* h, const char* name, int value);
 
+// Packed dense matrices (version 3, INK2_CAP_PACKED_DENSE). A dense matrix "<name>" of [rows, cols]
+// (cols a multiple of 32) is bfloat16 when only "<name>" is set (version 2), else:
+//   nvfp4: "<name>" = codes u8 [rows, cols / 2] (two E2M1 codes per byte, the even column in the low
+//          nibble), "<name>_scale" = E4M3 bytes [rows, cols / 16] (one per 16 consecutive columns),
+//          "<name>_factor" = float32 [1] = amax / denominator (the matrix factor); value =
+//          e2m1[code] * e4m3[scale] * factor;
+//   mxfp8: "<name>" = E4M3 bytes [rows, cols], "<name>_scale" = u8 exponents [rows, cols / 32];
+//          value = e4m3[byte] * 2 ** (scale - 127); no "_factor".
+// The embedding may be bfloat16 or mxfp8; the router and the small tensors stay bfloat16. Every
+// other matrix of the model may be either format, independently ("unembed" with the unpadded rows).
+// "<name>" bfloat16 together with "<name>_factor" multiplies every row sum by the factor (bfloat16
+// values of nvfp4 without their matrix factor: the same numbers as packed, for checks).
+
 // ---- version 2 ----
 INK2_API int ink2_abi_version(void);  // INK2_ABI_VERSION of the DLL
 // n prompt tokens whose predictions are not needed, in passes of "chunk" rows (no output
@@ -92,6 +119,10 @@ INK2_API int ink2_position(void* h);  // positions seen so far
 INK2_API int ink2_limits(void* h, int* out4);
 // As ink2_get, for row `row` of the last pass (row 0 = the token of the last single step).
 INK2_API int ink2_get_row(void* h, int what, int visit, int row, void* out, long long out_bytes);
+
+// ---- version 3 ----
+INK2_API int ink2_capabilities(void);  // INK2_CAP_* bits of this DLL
+INK2_API int ink2_packed_dense(void* h);  // after ink2_finalize: dense matrices loaded packed (0 = all bfloat16)
 // out4: seconds spent queueing kernels, seconds waiting for the logits, steps, kernel launches (cleared).
 // Returns the number of graphs recorded so far.
 INK2_API int ink2_timing(void* h, double* out4);

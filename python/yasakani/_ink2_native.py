@@ -10,6 +10,10 @@
     eng.feed_many(ids)                    # prompt tokens in passes of several rows
     logits, top, top_logit = eng.step_many(ids)   # several positions in one pass, per-row outputs
     eng.truncate(n)                       # drop the positions from n on (drafted tokens that were rejected)
+  DLL ABI version 3 (eng.abi >= 3, eng.caps & CAP_PACKED_DENSE): dense matrices given packed
+    eng = Ink2Native().load(model_dir, backend="cuda", checkpoint=reader)
+        # reader: info() says "NVFP4" / "MXFP8" for a dense matrix, parts() gives its stored parts (ready bytes)
+    eng = Ink2Native().load(model_dir, backend="cuda", dense_dir="packed_q4g4un4")   # folder of ink2_pack_dense.py
 
 Needs numpy only (jinja2 and tokenizers for the chat helpers); no torch.
 The checkpoint is read through yasakani/_ink2_ckpt.py (memory map) and handed to
@@ -28,6 +32,11 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 from . import _ink2_ckpt as ink2_ckpt  # numpy only
+
+TAKES_PACKED_DENSE = True  # load() hands packed dense matrices to a DLL that accepts them (ABI 3, CAP_PACKED_DENSE)
+CAP_PACKED_DENSE = 1       # bit of ink2_capabilities()
+CAP_DRAFTER = 2            # bit of ink2_capabilities(): the drafter calls of ink2_drafter_api.h
+PACKED_ENCODINGS = {"NVFP4": "nvfp4", "MXFP8": "mxfp8"}  # info() dtype of a packed dense matrix -> its encoding
 
 FULL_WEIGHTS = "model-00001-of-00001.safetensors"
 TINY_WEIGHTS = "model.safetensors"
@@ -90,7 +99,8 @@ def text_config(config):
         "mlp_up_softcap": g("mlp_up_softcap", 25.0),
         "final_logit_softcapping": g("final_logit_softcapping", 30.0),
     }
-    assert g("scoring_func", "sigmoid") == "sigmoid"
+    if g("scoring_func", "sigmoid") != "sigmoid":
+        raise ValueError("config.json: scoring_func %r is not supported (sigmoid only)" % (g("scoring_func"),))
     loop = g("loop_config") or {}
     out["loop_start"] = loop.get("core_start", g("loop_layer_index_start", 6))
     out["loop_end"] = loop.get("core_end", g("loop_layer_index_end", 18))
@@ -100,7 +110,10 @@ def text_config(config):
     types = g("layer_types") or ["hybrid" if (i + 1) % 6 == 0 else "hybrid_sliding" for i in range(n)]
     local = g("local_layer_ids")
     if local is not None:
-        assert [i for i, t in enumerate(types) if t == "hybrid_sliding"] == list(local), "layer_types rule disagrees with local_layer_ids"
+        if [i for i, t in enumerate(types) if t == "hybrid_sliding"] != list(local):
+            raise ValueError("config.json: layer_types disagrees with local_layer_ids")
+    if len(types) != n:
+        raise ValueError("config.json: layer_types has %d entries for %d layers" % (len(types), n))
     out["sliding"] = [t == "hybrid_sliding" for t in types]
     return out
 
@@ -210,7 +223,19 @@ def open_dll(path):
         lib.ink2_position.argtypes = [vp]
         lib.ink2_limits.argtypes = [vp, ctypes.POINTER(ci)]
         lib.ink2_get_row.argtypes = [vp, ci, ci, ci, vp, cll]
+    lib.caps = 0
+    if lib.abi >= 3:
+        lib.ink2_capabilities.restype = ci
+        lib.ink2_capabilities.argtypes = []
+        lib.ink2_packed_dense.restype = ci
+        lib.ink2_packed_dense.argtypes = [vp]
+        lib.caps = int(lib.ink2_capabilities())
     return lib
+
+
+def capabilities(dll):
+    """ink2_capabilities() of a DLL (0 for a DLL before version 3)."""
+    return open_dll(dll).caps
 
 
 def selftest(backend="cuda", dll=None):
@@ -238,9 +263,21 @@ class Ink2Native:
 
     # -- loading -----------------------------------------------------------
     def load(self, model_dir, backend="host", max_positions=4096, dll=None, weights=None, log=None, max_rows=None,
-             rollback=None, chunk=None):
+             rollback=None, chunk=None, dense_dir=None, dense_mode="packed", dense_only=None, checkpoint=None):
         """max_rows / rollback / chunk (DLL version 2): largest pass, positions truncate() can always drop,
-        rows per pass of feed_many(); None = the defaults of the DLL."""
+        rows per pass of feed_many(); None = the defaults of the DLL.
+        dense_dir: folder of packed dense matrices (ink2_pack_dense.py); every matrix listed in its
+        manifest.json replaces the bfloat16 one of the checkpoint. dense_mode "packed" sends the packed bytes
+        (multiplied by the packed kernels); "decoded" sends the same values decoded to bfloat16 (exact), the
+        nvfp4 matrices without their matrix factor, which is sent as "<name>_factor" (check of the packed path).
+        dense_only: optional function name -> bool; only the matrices it accepts are taken from dense_dir.
+        checkpoint (DLL version 3): a reader object to take the weights from instead of opening the safetensors
+        file, with the interface of ink2_ckpt.Checkpoint (info, raw, f32, expert_format). A dense matrix whose
+        info() dtype is "NVFP4" or "MXFP8" is taken from reader.parts(name), ready bytes as stored: nvfp4 weight
+        u8 [R, C/2], scale e4m3 [R, C/16], amax f32 [1], denominator f32 [1] (the engine's factor is
+        amax / denominator in float32); mxfp8 weight e4m3 [R, C], scale u8 [R, C/32]. dense_mode "packed" sends
+        them as stored (needs CAP_PACKED_DENSE); "decoded" sends the same values in bfloat16 (check of the
+        packed path)."""
         t0 = time.perf_counter()
         self.model_dir = model_dir
         self.backend = backend
@@ -250,7 +287,7 @@ class Ink2Native:
         self.cfg = cfg = text_config(config["text_config"])
         if weights is None:
             weights = FULL_WEIGHTS if os.path.exists(os.path.join(model_dir, FULL_WEIGHTS)) else TINY_WEIGHTS
-        self.ckpt = ckpt = ink2_ckpt.Checkpoint(os.path.join(model_dir, weights))
+        self.ckpt = ckpt = checkpoint if checkpoint is not None else ink2_ckpt.Checkpoint(os.path.join(model_dir, weights))
 
         c = Ink2Config()
         c.vocab = cfg["unpadded_vocab_size"]
@@ -281,9 +318,31 @@ class Ink2Native:
                 self.set_option(name, value)
 
         sent = [0, 0]
+        dense = None
+        assert dense_mode in ("packed", "decoded"), dense_mode
+        if dense_dir is not None:
+            with open(os.path.join(dense_dir, "manifest.json"), encoding="utf-8") as f:
+                dense = json.load(f)["matrices"]
+        self.dense_dir, self.dense_mode = dense_dir, (dense_mode if dense is not None else "bf16")
+        self.dense_inexact = 0
+        self.dense_packed_sent = 0  # dense matrices handed over in a packed encoding (as stored, or decoded)
+        packed_ok = bool(self.lib.caps & CAP_PACKED_DENSE)
 
         def put(name, ckpt_name, dtype, rows=None):
+            if dense is not None and name in dense and (dense_only is None or dense_only(name)):
+                sent[1] += self._set_dense(name, dense[name], dense_dir, dense_mode, ckpt_name, rows)
+                sent[0] += 1
+                return
             stored, _ = ckpt.info(PREFIX + ckpt_name)
+            if stored in PACKED_ENCODINGS and "BF16" in dtype:  # a dense matrix the reader holds packed
+                if self.abi < 3 or (dense_mode == "packed" and not packed_ok):
+                    raise RuntimeError("%s is stored packed (%s) but this DLL (version %d, capabilities %d) does not take packed"
+                                       " dense matrices" % (ckpt_name, stored, self.abi, self.lib.caps))
+                if self.dense_mode == "bf16":
+                    self.dense_mode = dense_mode
+                sent[1] += self._send_packed(name, PACKED_ENCODINGS[stored], ckpt.parts(PREFIX + ckpt_name), dense_mode, rows)
+                sent[0] += 1
+                return
             assert stored in dtype, "%s: stored as %s, expected %s" % (ckpt_name, stored, dtype)
             view = ckpt.raw(PREFIX + ckpt_name)
             if rows is not None:
@@ -350,6 +409,7 @@ class Ink2Native:
         self.top_k, self.experts = c.top_k, c.experts
         self.stop_ids = stop_token_ids(model_dir)
         self.tensors_sent, self.bytes_sent = sent
+        self.packed_dense = int(self.lib.ink2_packed_dense(self.h)) if self.abi >= 3 else 0  # matrices the engine holds packed
         if backend == "cuda":  # replay the kernels of a token as one recorded graph (about 1.35 times faster)
             self.set_option("graph", 1)
         self.load_seconds = time.perf_counter() - t0
@@ -361,6 +421,64 @@ class Ink2Native:
             self.max_rows, self.max_step_rows, self.rollback = lim[0], lim[1], lim[2]
         self.reset()
         return self
+
+    def _set_dense(self, name, info, folder, mode, ckpt_name, rows):
+        """Sends one matrix of the packed folder (see load). Returns the bytes sent."""
+        stored, shape = self.ckpt.info(PREFIX + ckpt_name)
+        want = [shape[0] if rows is None else rows, shape[1]]
+        assert list(info["shape"]) == want, (name, info["shape"], want)
+        w = np.load(os.path.join(folder, name + ".w.npy"))
+        sc = np.load(os.path.join(folder, name + ".s.npy"))
+        nv = info["format"] == "nvfp4"
+        fac = np.load(os.path.join(folder, name + ".f.npy")).astype(np.float32).reshape(1) if nv else None
+        return self._send_dense(name, w, sc, fac, nv, mode, want)
+
+    def _send_packed(self, name, encoding, parts, mode, rows):
+        """Sends one dense matrix given as its stored parts (ready bytes of the caller's reader). rows: the rows
+        the engine uses (the unpadded vocabulary of the output projection), None = all. Returns the bytes sent."""
+        nv = encoding == "nvfp4"
+        w = np.asarray(parts["weight"])
+        sc = np.asarray(parts["scale"])
+        assert w.dtype.itemsize == 1 and sc.dtype.itemsize == 1 and w.ndim == 2 and sc.ndim == 2, (name, w.dtype, w.shape, sc.shape)
+        cols = w.shape[1] * (2 if nv else 1)
+        assert sc.shape == (w.shape[0], cols // (16 if nv else 32)), (name, w.shape, sc.shape)
+        r = w.shape[0] if rows is None else int(rows)
+        assert r <= w.shape[0], (name, r, w.shape)
+        w, sc = w[:r].view(np.uint8), sc[:r].view(np.uint8)
+        fac = None
+        if nv:  # the matrix factor amax / denominator, in float32 as the decode formula
+            amax = np.asarray(parts["amax"], dtype=np.float32).reshape(-1)
+            den = np.asarray(parts["denominator"], dtype=np.float32).reshape(-1)
+            assert amax.size == 1 and den.size == 1, (name, amax.shape, den.shape)
+            fac = (amax / den).astype(np.float32).reshape(1)
+        return self._send_dense(name, w, sc, fac, nv, mode, [r, cols])
+
+    def _send_dense(self, name, w, sc, fac, nv, mode, want):
+        """Packed bytes w / sc (+ the nvfp4 factor) of one matrix [want rows, want cols], as stored or decoded."""
+        self.dense_packed_sent += 1
+        if mode == "packed":
+            self._set(name, w)
+            self._set(name + "_scale", sc)
+            if nv:
+                self._set(name + "_factor", fac)
+            return w.nbytes + sc.nbytes + (4 if nv else 0)
+        # decoded: exact bfloat16 values (nvfp4 without the matrix factor), in row chunks
+        r, cols = want
+        assert w.shape[0] == r, (name, w.shape, want)
+        out = np.empty((r, cols), dtype=np.uint16)
+        step = 8192
+        for r0 in range(0, r, step):
+            if nv:
+                v = ink2_ckpt.decode_nvfp4(w[None, r0:r0 + step], sc[None, r0:r0 + step], np.ones(1, np.float32), np.float32(1.0))[0]
+            else:
+                v = ink2_ckpt.decode_mxfp8(w[None, r0:r0 + step], sc[None, r0:r0 + step])[0]
+            bits = np.ascontiguousarray(v, dtype=np.float32).view(np.uint32)
+            self.dense_inexact += int(np.count_nonzero(bits & 0xFFFF))  # values bfloat16 cannot hold (must stay 0)
+            out[r0:r0 + step] = (bits >> 16).astype(np.uint16)
+        self._set(name, out)
+        if nv:
+            self._set(name + "_factor", fac)
+        return out.nbytes + (4 if nv else 0)
 
     def _set(self, name, array):
         array = np.ascontiguousarray(array)
@@ -499,9 +617,9 @@ class Ink2Native:
         """Timing of every kernel alone: with reps > 0 each kernel of the following steps runs reps times in a row
         (those steps give no valid result; reset afterwards). Returns {kernel: (seconds of one run summed over the
         launches, launches)} since the last call."""
-        secs = (ctypes.c_double * 32)()
-        counts = (ctypes.c_longlong * 32)()
-        n = self.lib.ink2_bench(self.h, int(reps), secs, counts, 32)
+        secs = (ctypes.c_double * 128)()
+        counts = (ctypes.c_longlong * 128)()
+        n = min(128, self.lib.ink2_bench(self.h, int(reps), secs, counts, 128))
         return {self.lib.ink2_kernel_name(i).decode(): (secs[i], counts[i]) for i in range(n)}
 
     def capture(self, visit):
@@ -550,3 +668,7 @@ class Ink2Native:
         """One user message through chat_template.jinja -> (text, ids)."""
         text = render_chat(self.model_dir, [{"role": "user", "content": user_text}], **template_kwargs)
         return text, load_tokenizer(self.model_dir).encode(text, add_special_tokens=False).ids
+
+from . import _ink2_drafter_native as ink2_drafter_native  # noqa: E402  (the drafter calls)
+
+ink2_drafter_native.install(Ink2Native)

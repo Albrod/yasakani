@@ -10,8 +10,9 @@ The library is found as ``find_dll`` says.  Model folders are made by ``tools/co
 Two weights formats (the ``weights`` entry of yasakani.json): ``hf-safetensors`` (the published file, read by the binding) and
 ``yskn`` (a re-quantised ``.yskn`` file of version 2, yasakani/ink2_yskn.py).  For a ``.yskn`` file the CRC-32 of every tensor is
 checked first (``YASAKANI_INK2_SKIP_TENSOR_CHECK=1`` skips it), and the binding is given the file through an object with the interface of its safetensors reader: the experts as
-stored, the dense matrices that are stored packed decoded to bfloat16 (what the engine multiplies today), unless the engine says
-through its capability query that it takes them packed.
+stored, and the dense matrices that are stored packed as stored too when the engine (interface version 3) says through its
+capability query that it takes them packed and the binding hands them over (``TAKES_PACKED_DENSE``); otherwise they are decoded
+to bfloat16.  ``YASAKANI_INK2_DENSE=bf16`` decodes them even for such an engine (to compare).
 
 How the model writes a reply (``response_template`` of its tokenizer_config.json): blocks ``<|message_model|>[name]<|content_X|>
 text<|end_message|>``, where X is ``thinking`` (reasoning) or ``text`` (the answer), and ``<|content_model_end_sampling|>`` (the
@@ -400,7 +401,7 @@ class Sampler:
 # ---- engine ------------------------------------------------------------------------------------------------------------------------
 LIBRARY = "yskn_inkling2.dll"          # the Inkling-2 engine library, next to yskn.dll in the engine zip
 MAIN_LIBRARIES = ("yskn.dll", "libyskn.so")
-REQUIRED_ABI = 2                       # ink2_abi_version() of the library this binding was written for (or newer)
+REQUIRED_ABI = 3                       # ink2_abi_version() of the library this binding was written for (or newer)
 
 
 def find_dll(path: Optional[str] = None) -> Path:
@@ -658,6 +659,14 @@ class Ink2Engine:
         t_check = time.perf_counter() - t0
         # packed dense matrices only when the engine says it takes them AND the binding says it hands them over
         packed = Y.engine_takes_packed_dense(lib) and bool(getattr(self.mod, "TAKES_PACKED_DENSE", False))
+        want = (os.environ.get("YASAKANI_INK2_DENSE") or "auto").strip().lower()
+        if want not in ("auto", "packed", "bf16"):
+            raise ValueError("YASAKANI_INK2_DENSE must be auto, packed or bf16, not %r" % want)
+        if want == "packed" and not packed:
+            raise ValueError("YASAKANI_INK2_DENSE=packed, but this engine library or its binding does not take packed dense matrices"
+                             " (engine interface version 3 with the packed-dense capability is needed)")
+        if want == "bf16":
+            packed = False
         view = Y.CheckpointView(yf, dense="packed" if packed else "bf16")
         kw = dict(backend=self.backend, max_positions=self.max_ctx, dll=str(self.dll), weights=pack.weights.name, log=log)
         try:
@@ -683,8 +692,13 @@ class Ink2Engine:
                 native = self.mod.Ink2Native().load(str(pack.root), **kw)
             finally:
                 ckpt_mod.Checkpoint = original
+        n_packed = int(getattr(native, "packed_dense", 0) or 0)
+        if packed and n_packed == 0 and any(yf.entry(n)["encoding"] in ("nvfp4", "mxfp8") and yf.entry(n).get("role") != "experts"
+                                            for n in yf.tensors):
+            raise RuntimeError("the engine was given packed dense matrices but reports none held packed")
         self.weights_note = "yskn %s; tensor check %.1f s; dense matrices %s" % (
-            (pack.meta.get("weights") or {}).get("scheme", "?"), t_check, "packed" if packed else "decoded to bfloat16")
+            (pack.meta.get("weights") or {}).get("scheme", "?"), t_check,
+            ("packed (%d multiplied as stored)" % n_packed) if packed else "decoded to bfloat16")
         return native
 
     # -- state --------------------------------------------------------------------------------------------------------------------

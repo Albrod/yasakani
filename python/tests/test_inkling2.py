@@ -300,6 +300,34 @@ class HostEngineQualityTests(unittest.TestCase):
                 if k + 1 < len(TINY_QUALITY_TOKENS):
                     logits = eng.step(got[-1])
             self.assertEqual(got, TINY_QUALITY_TOKENS)
+            from yasakani import ink2_yskn as Y
+            packed = Y.engine_takes_packed_dense(eng.mod.open_dll(str(eng.dll))) and bool(getattr(eng.mod, "TAKES_PACKED_DENSE", False))
+            self.assertIn("packed (" if packed else "decoded to bfloat16", eng.weights_note)
+        finally:
+            eng.close()
+
+    def test_dense_decoded_on_request(self):
+        """YASAKANI_INK2_DENSE=bf16: the dense matrices decoded to bfloat16 even for an engine that takes them packed; the same
+        greedy tokens."""
+        pack = ink.Ink2Pack.load(tiny_quality_folder())
+        old = os.environ.get("YASAKANI_INK2_DENSE")
+        os.environ["YASAKANI_INK2_DENSE"] = "bf16"
+        try:
+            fmt, eng, runner = ink.open_runner(pack, 128, dll=DLL, warm=False)
+        finally:
+            if old is None:
+                del os.environ["YASAKANI_INK2_DENSE"]
+            else:
+                os.environ["YASAKANI_INK2_DENSE"] = old
+        try:
+            ids, _ = fmt.prompt(conv.OFFICIAL_MESSAGES, conv.OFFICIAL_TEMPLATE_KWARGS)
+            logits, _ = eng.read_prompt(ids)
+            got = []
+            for k in range(len(TINY_QUALITY_TOKENS)):
+                got.append(int(np.argmax(logits)))
+                if k + 1 < len(TINY_QUALITY_TOKENS):
+                    logits = eng.step(got[-1])
+            self.assertEqual(got, TINY_QUALITY_TOKENS)
             self.assertIn("decoded to bfloat16", eng.weights_note)
         finally:
             eng.close()
@@ -706,13 +734,13 @@ def standin_class(base):
 class HostDraftTests(unittest.TestCase):
     """The generation loop with bursts (a stand-in of the drafter calls on the host engine) against plain stepping: the same tokens,
     text, finish reason and engine state when the reply ends in the middle of a burst; prompt reuse afterwards; sampling with a seed;
-    the older library without drafter calls; selfcheck and the server."""
+    a drafter file the engine cannot load; selfcheck and the server."""
 
     @classmethod
     def setUpClass(cls):
         cls.pack = ink.Ink2Pack.load(tiny_folder())
         cls.fmt, cls.eng, cls.runner = ink.open_runner(cls.pack, 256, dll=DLL, warm=False)
-        cls.fallback_note = cls.eng.draft_note                  # the binding of the host library has no drafter calls
+        cls.fallback_note = cls.eng.draft_note                  # the stand-in drafter file does not fit the tiny model
         cls.eng.native.__class__ = standin_class(type(cls.eng.native))
         cls.note = cls.eng.set_drafter(cls.pack, "on", 3)
         cls.prompt = cls.fmt.encode("hi") + cls.fmt.answer_prefix          # short: the host engine reads one id per step
@@ -762,7 +790,8 @@ class HostDraftTests(unittest.TestCase):
         return got[0], want
 
     def test_notes(self):
-        self.assertIn("drafting is not available with this engine library", self.fallback_note)
+        self.assertIn("mtp.safetensors could not be loaded", self.fallback_note)
+        self.assertIn("generation without drafting", self.fallback_note)
         self.assertEqual(self.note, "drafter: mtp.safetensors loaded, mode on, depth 3")
 
     def test_greedy_bursts_equal_plain_greedy(self):

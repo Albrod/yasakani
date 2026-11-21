@@ -24,6 +24,7 @@
 #define KSHFL(v, src) __shfl_sync(0xffffffffu, (v), (src))
 #define KSHARED(T, name, n) __shared__ T name[n]
 #define KLOAD64(p) (*(const unsigned long long*)(p))
+#define KLOAD32(p) (*(const unsigned*)(p))
 #define KF4 float4
 #define KLOADF4(p) (*(const float4*)(p))
 #define KF4ZERO make_float4(0.0f, 0.0f, 0.0f, 0.0f)
@@ -95,6 +96,26 @@ struct CudaBackend : Backend {
     }
     cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) fail("kernel launch", e);
+  }
+  int max_block(int kid) override {
+    static int cache[KID_COUNT] = {};
+    if (kid < 0 || kid >= KID_COUNT) return 0;
+    if (cache[kid] == 0) {
+      cudaFuncAttributes fa{};
+      cudaError_t e = cudaErrorInvalidValue;
+      switch (kid) {
+#define X(name, A)                                   \
+  case KID_##name:                                   \
+    e = cudaFuncGetAttributes(&fa, kk_##name);       \
+    break;
+        INK2_KERNEL_LIST(X)
+#undef X
+        default:
+          break;
+      }
+      cache[kid] = e == cudaSuccess ? fa.maxThreadsPerBlock : 256;
+    }
+    return cache[kid];
   }
   size_t bytes_allocated() override { return used; }
   bool device_memory(long long* free_bytes, long long* total_bytes) override {

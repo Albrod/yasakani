@@ -112,6 +112,9 @@ def cmd_info(args) -> int:
               hashlib.sha256(dll.read_bytes()).hexdigest()[:16], lib_info, ink.backend_of(lib_info)))
         print("binding  %s  (drafter calls: %s)" % (binding.name, "yes" if all(callable(getattr(mod.Ink2Native, n, None))
                                                                              for n in ink.DRAFT_CALLS) else "no, drafting not available"))
+        caps = int(getattr(lib, "caps", 0) or 0)
+        names = [n for bit, n in ((1, "packed dense matrices"), (2, "drafter")) if caps & bit]
+        print("         engine capabilities: %s" % (", ".join(names) if names else "none"))
     except (YasakaniError, OSError, AttributeError) as ex:
         print("engine   NOT FOUND:", ex)
         ok = False

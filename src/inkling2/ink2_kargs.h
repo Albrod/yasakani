@@ -11,6 +11,8 @@ typedef unsigned long long u64;
 
 enum { INK2_EPI_NONE = 0, INK2_EPI_SIGMOID = 1, INK2_EPI_SOFTCAP = 2, INK2_EPI_TANH = 3 };
 enum { INK2_FMT_NVFP4 = 0, INK2_FMT_MXFP8 = 1 };
+// Storage of a dense (non-expert) matrix: GemvJob.fmt, NormArgs.efmt.
+enum { INK2_DFMT_BF16 = 0, INK2_DFMT_NVFP4 = 1, INK2_DFMT_MXFP8 = 2 };
 
 // What changes from token to token. The kernels read it from the backend
 // memory, so that the argument blocks of a step are the same for every token
@@ -36,12 +38,20 @@ struct StepState {
 // y = W x, W bfloat16 [rows, cols] (cols % 8 == 0), x and y float32.
 // The input may come in two pieces: x for the columns below split, x2 for the rest.
 struct GemvJob {
-  const u16* w;
+  const u16* w;  // bfloat16 [rows, cols]; packed (fmt != BF16): the code bytes, see below
   const float* x;
   const float* x2;
   float* y;
   int rows, cols, split, epi;
   float cap;
+  // Packed dense rows (kernels pgemv, pgemvw, pgemvc; fmt INK2_DFMT_*):
+  //   nvfp4: w = codes [rows, cols/2] (even element in the low nibble), sc = E4M3 block scales [rows, cols/16];
+  //   mxfp8: w = E4M3 bytes [rows, cols], sc = exponent bytes [rows, cols/32] (value * 2 ** (byte - 127)).
+  // fac != 0: factor of every row sum before the epilogue (nvfp4: amax / 2688 / 2, the codes being
+  // decoded as twice the E2M1 value); also applied by gemv, gemvw and gemvc to bfloat16 rows.
+  const u8* sc;
+  float fac;
+  int fmt;
 };
 // Multi-row forms (gemvm, gemvwm, gemvcm): nrhs right-hand sides, x row
 // stride split, x2 row stride cols - split, y row stride rows; groups of up to
@@ -66,6 +76,10 @@ struct NormArgs {
   int n;
   float eps;
   int rows, nj;  // block = row * nj + job; x and out [rows, n]
+  // efmt == INK2_DFMT_MXFP8: the table of job 0 (embed_stride > 0) is packed: x = E4M3 bytes
+  // [table rows, n], esc = exponent bytes [table rows, n / 32]
+  const u8* esc;
+  int efmt;
 };
 
 // Top-k routing from the router logits. One block of >= E threads.
@@ -243,6 +257,8 @@ struct ArgmaxArgs {
   int n;
 };
 
+#include "ink2_drafter_kargs.h"  // drafter hook
+
 #define INK2_KERNEL_LIST(X) \
   X(gemv, GemvArgs) \
   X(gemvw, GemvArgs) \
@@ -263,7 +279,8 @@ struct ArgmaxArgs {
   X(exp13cm, ExpMArgs) \
   X(exp2m, ExpMArgs) \
   X(ecomb, ECombArgs) \
-  X(argmax, ArgmaxArgs)
+  X(argmax, ArgmaxArgs)   X(pgemv, GemvArgs)   X(pgemvw, GemvArgs)   X(pgemvc, GemvArgs)   X(pgemvc8, GemvArgs)   X(pgemvc4, GemvArgs)   X(pgemvc2, GemvArgs)   X(pgemvn, GemvArgs)   X(pgemvcm, GemvArgs)   X(pgemvcm8, GemvArgs)   X(pgemvcm4, GemvArgs)   X(pgemvcm2, GemvArgs) \
+  INK2_DRAFT_KERNEL_LIST(X)  // drafter hook
 
 enum {
 #define X(name, A) KID_##name,
@@ -283,6 +300,8 @@ struct Backend {
   virtual void zero(void* dst, size_t bytes) = 0;
   virtual void sync() = 0;
   virtual void run(int kid, const void* args, int grid, int block) = 0;
+  // largest block of kernel kid that can be launched (registers of the build for this device)
+  virtual int max_block(int kid) { return 1024; }
   virtual size_t bytes_allocated() = 0;
   virtual bool device_memory(long long* free_bytes, long long* total_bytes) = 0;
   virtual const char* error() = 0;  // NULL when no error happened

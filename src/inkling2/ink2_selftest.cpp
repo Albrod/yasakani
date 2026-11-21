@@ -584,12 +584,222 @@ void t_argmax(TB& t) {
   t.b->run(KID_argmax, &a, rows, 1024);
 }
 
+// A packed (or bfloat16) dense job with random content: rows x cols, input in one or two pieces.
+void pk_job(TB& t, GemvJob& J, int fmtv, int rows, int cols, int split, int epi, float fac) {
+  size_t n = (size_t)rows * cols;
+  if (fmtv == INK2_DFMT_NVFP4) {
+    J.w = (const u16*)t.bytes(n / 2, 0, 255, false);
+    J.sc = t.bytes(n / 16, 0x28, 0x40, false);
+  } else if (fmtv == INK2_DFMT_MXFP8) {
+    J.w = (const u16*)t.bytes(n, 0, 255, true);
+    J.sc = t.bytes(n / 32, 110, 118, false);
+  } else {
+    J.w = t.bf(n, -0.05f, 0.05f);
+  }
+  J.fmt = fmtv;
+  J.fac = fac;
+  if (split < cols) {
+    J.x = t.f(split, -1, 1);
+    J.x2 = t.f(cols - split, -1, 1);
+  } else {
+    J.x = t.f(cols, -1, 1);
+  }
+  J.split = split;
+  J.y = t.zf(rows);
+  J.rows = rows;
+  J.cols = cols;
+  J.epi = epi;
+  J.cap = 30.0f;
+}
+
+void t_pgemvc(TB& t, int kid = KID_pgemvc, int nr = 16) {
+  GemvArgs a{};
+  const int cols = 2304;
+  // as the projections of a visit: mixed formats, epilogues, a factor, one split input, a short last chunk
+  pk_job(t, a.job[0], INK2_DFMT_NVFP4, 3072, cols, cols, INK2_EPI_NONE, 0.004f);
+  pk_job(t, a.job[1], INK2_DFMT_MXFP8, 384, cols, cols, INK2_EPI_NONE, 0.0f);
+  pk_job(t, a.job[2], INK2_DFMT_NVFP4, 37, cols, 1024, INK2_EPI_SIGMOID, 0.003f);
+  pk_job(t, a.job[3], INK2_DFMT_MXFP8, 24, cols, cols, INK2_EPI_NONE, 0.0f);
+  pk_job(t, a.job[4], INK2_DFMT_BF16, 21, cols, cols, INK2_EPI_SOFTCAP, 0.0f);
+  pk_job(t, a.job[5], INK2_DFMT_NVFP4, 1000, cols, cols, INK2_EPI_SOFTCAP, 0.002f);
+  const char* names[6] = {"nvfp4", "mxfp8", "nvfp4 sigmoid split", "mxfp8 24 rows", "bf16 softcap", "nvfp4 softcap"};
+  int chunks = 0;
+  a.njobs = 6;
+  for (int j = 0; j < a.njobs; ++j) {
+    a.total_rows += a.job[j].rows;
+    chunks += (a.job[j].rows + nr - 1) / nr;
+    t.out(names[j], a.job[j].y, a.job[j].rows);
+  }
+  t.b->run(kid, &a, chunks, cols / 8);
+}
+
+void t_pgemv(TB& t) {
+  GemvArgs a{};
+  // controllers (forget / gain: 64 columns) and a long row form
+  pk_job(t, a.job[0], INK2_DFMT_MXFP8, 2304, 64, 64, INK2_EPI_TANH, 0.0f);
+  pk_job(t, a.job[1], INK2_DFMT_NVFP4, 300, 2304, 2304, INK2_EPI_NONE, 0.004f);
+  pk_job(t, a.job[2], INK2_DFMT_MXFP8, 37, 512, 256, INK2_EPI_SIGMOID, 0.0f);
+  t.out("mxfp8 64 columns tanh", a.job[0].y, a.job[0].rows);
+  t.out("nvfp4", a.job[1].y, a.job[1].rows);
+  t.out("mxfp8 split sigmoid", a.job[2].y, a.job[2].rows);
+  a.njobs = 3;
+  for (int j = 0; j < a.njobs; ++j) a.total_rows += a.job[j].rows;
+  t.b->run(KID_pgemv, &a, (a.total_rows + 7) / 8, 256);
+}
+
+void t_pgemvw(TB& t) {
+  GemvArgs a{};
+  pk_job(t, a.job[0], INK2_DFMT_MXFP8, 64, 4608, 2304, INK2_EPI_NONE, 0.0f);  // controller down
+  pk_job(t, a.job[1], INK2_DFMT_NVFP4, 128, 2304, 2304, INK2_EPI_NONE, 0.004f);
+  t.out("mxfp8 split", a.job[0].y, a.job[0].rows);
+  t.out("nvfp4", a.job[1].y, a.job[1].rows);
+  a.njobs = 2;
+  for (int j = 0; j < a.njobs; ++j) a.total_rows += a.job[j].rows;
+  t.b->run(KID_pgemvw, &a, a.total_rows, 256);
+}
+
+// bfloat16 kernels with a row factor (the decoded nvfp4 matrices)
+void t_gemv_fac(TB& t) {
+  GemvArgs a{};
+  pk_job(t, a.job[0], INK2_DFMT_BF16, 40, 2304, 2304, INK2_EPI_NONE, 0.004f);
+  pk_job(t, a.job[1], INK2_DFMT_BF16, 17, 2304, 1024, INK2_EPI_SIGMOID, 0.003f);
+  a.njobs = 2;
+  a.total_rows = 57;
+  t.out("gemvc factor", a.job[0].y, 40);
+  t.out("gemvc factor sigmoid split", a.job[1].y, 17);
+  t.b->run(KID_gemvc, &a, 3 + 2, 2304 / 8);
+  GemvArgs b{};
+  pk_job(t, b.job[0], INK2_DFMT_BF16, 40, 512, 512, INK2_EPI_NONE, 0.004f);
+  b.njobs = 1;
+  b.total_rows = 40;
+  t.out("gemv factor", b.job[0].y, 40);
+  t.b->run(KID_gemv, &b, 5, 256);
+  GemvArgs c{};
+  pk_job(t, c.job[0], INK2_DFMT_BF16, 9, 4608, 2304, INK2_EPI_NONE, 0.004f);
+  c.njobs = 1;
+  c.total_rows = 9;
+  t.out("gemvw factor split", c.job[0].y, 9);
+  t.b->run(KID_gemvw, &c, 9, 256);
+}
+
+void t_norm_packed(TB& t) {
+  NormArgs a{};
+  const int n = 2304, trows = 4;
+  a.job[0].x = t.bytes((size_t)trows * n, 0, 255, true);
+  a.esc = t.bytes((size_t)trows * n / 32, 120, 130, false);
+  a.efmt = INK2_DFMT_MXFP8;
+  a.job[0].w = t.bf(n, 0.5f, 1.5f);
+  a.job[0].out = t.zf(n);
+  a.st = t.st(3, 0, 1.0f);
+  a.embed_stride = n;
+  a.n = n;
+  a.eps = 1e-6f;
+  t.out("packed table row with weight", a.job[0].out, n);
+  t.b->run(KID_norm, &a, 1, 256);
+}
+
+// pgemvn: narrow rows (64 and 128 columns), also with 3 right-hand sides
+void t_pgemvn(TB& t) {
+  GemvArgs a{};
+  pk_job(t, a.job[0], INK2_DFMT_MXFP8, 2304, 64, 64, INK2_EPI_TANH, 0.0f);
+  pk_job(t, a.job[1], INK2_DFMT_NVFP4, 1001, 64, 64, INK2_EPI_NONE, 0.004f);
+  a.njobs = 2;
+  a.total_rows = 3305;
+  a.blocks = (3305 + 31) / 32;
+  t.out("mxfp8 64 columns tanh", a.job[0].y, 2304);
+  t.out("nvfp4 64 columns", a.job[1].y, 1001);
+  t.b->run(KID_pgemvn, &a, a.blocks, 256);
+  GemvArgs b{};
+  const int R = 3;
+  pk_job(t, b.job[0], INK2_DFMT_MXFP8, 333, 128, 128, INK2_EPI_NONE, 0.0f);
+  b.job[0].x = t.f((size_t)R * 128, -1, 1);
+  b.job[0].y = t.zf((size_t)R * 333);
+  b.njobs = 1;
+  b.total_rows = 333;
+  b.nrhs = R;
+  b.blocks = (333 + 15) / 16;
+  t.out("mxfp8 128 columns 3 rows", b.job[0].y, (size_t)R * 333);
+  t.b->run(KID_pgemvn, &b, b.blocks * R, 256);
+}
+
+// pgemvc / pgemv / pgemvw with 3 right-hand sides (blocks * nrhs blocks)
+void t_packed_multi(TB& t) {
+  const int R = 3, cols = 2304;
+  GemvArgs a{};
+  pk_job(t, a.job[0], INK2_DFMT_NVFP4, 40, cols, cols, INK2_EPI_NONE, 0.004f);
+  pk_job(t, a.job[1], INK2_DFMT_MXFP8, 24, cols, 1024, INK2_EPI_SIGMOID, 0.0f);
+  a.job[0].x = t.f((size_t)R * cols, -1, 1);
+  a.job[0].y = t.zf((size_t)R * 40);
+  a.job[1].x = t.f((size_t)R * 1024, -1, 1);
+  a.job[1].x2 = t.f((size_t)R * (cols - 1024), -1, 1);
+  a.job[1].y = t.zf((size_t)R * 24);
+  a.njobs = 2;
+  a.total_rows = 64;
+  a.nrhs = R;
+  a.blocks = 3 + 2;
+  t.out("pgemvc 3 rows nvfp4", a.job[0].y, (size_t)R * 40);
+  t.out("pgemvc 3 rows mxfp8 split", a.job[1].y, (size_t)R * 24);
+  t.b->run(KID_pgemvc, &a, a.blocks * R, cols / 8);
+  GemvArgs b{};
+  pk_job(t, b.job[0], INK2_DFMT_MXFP8, 2304, 64, 64, INK2_EPI_TANH, 0.0f);
+  b.job[0].x = t.f((size_t)R * 64, -1, 1);
+  b.job[0].y = t.zf((size_t)R * 2304);
+  b.njobs = 1;
+  b.total_rows = 2304;
+  b.nrhs = R;
+  b.blocks = 2304 / 8;
+  t.out("pgemv 3 rows", b.job[0].y, (size_t)R * 2304);
+  t.b->run(KID_pgemv, &b, b.blocks * R, 256);
+  GemvArgs c{};
+  pk_job(t, c.job[0], INK2_DFMT_MXFP8, 64, 4608, 2304, INK2_EPI_NONE, 0.0f);
+  c.job[0].x = t.f((size_t)R * 2304, -1, 1);
+  c.job[0].x2 = t.f((size_t)R * 2304, -1, 1);
+  c.job[0].y = t.zf((size_t)R * 64);
+  c.njobs = 1;
+  c.total_rows = 64;
+  c.nrhs = R;
+  c.blocks = 64;
+  t.out("pgemvw 3 rows split", c.job[0].y, (size_t)R * 64);
+  t.b->run(KID_pgemvw, &c, 64 * R, 256);
+}
+
+// pgemvcm (packed column owner, 8 right-hand sides per block): R = 11 rows (a full and a partial group)
+void t_pgemvcm(TB& t, int kid, int nr) {
+  const int R = 11, cols = 2304;
+  GemvArgs a{};
+  pk_job(t, a.job[0], INK2_DFMT_NVFP4, 300, cols, cols, INK2_EPI_NONE, 0.004f);
+  pk_job(t, a.job[1], INK2_DFMT_MXFP8, 37, cols, 1024, INK2_EPI_SIGMOID, 0.0f);
+  pk_job(t, a.job[2], INK2_DFMT_BF16, 21, cols, cols, INK2_EPI_SOFTCAP, 0.0f);
+  pk_job(t, a.job[3], INK2_DFMT_NVFP4, 100, cols, cols, INK2_EPI_SOFTCAP, 0.002f);
+  const char* names[4] = {"nvfp4 11 rows", "mxfp8 sigmoid split 11 rows", "bf16 softcap 11 rows", "nvfp4 softcap 11 rows"};
+  a.njobs = 4;
+  int chunks = 0;
+  for (int j = 0; j < a.njobs; ++j) {
+    GemvJob& J = a.job[j];
+    if (J.split < cols) {
+      J.x = t.f((size_t)R * J.split, -1, 1);
+      J.x2 = t.f((size_t)R * (cols - J.split), -1, 1);
+    } else {
+      J.x = t.f((size_t)R * cols, -1, 1);
+    }
+    J.y = t.zf((size_t)R * J.rows);
+    a.total_rows += J.rows;
+    chunks += (J.rows + nr - 1) / nr;
+    t.out(names[j], J.y, (size_t)R * J.rows);
+  }
+  a.nrhs = R;
+  a.blocks = chunks;
+  t.b->run(kid, &a, chunks * ((R + 7) / 8), cols / 8);
+}
+
 }  // namespace
 
 int ink2_run_selftest(Backend* ref, Backend* dut, std::string& report) {
   const char* names[] = {"gemv",         "norm",      "bar",    "gmix",          "prep sliding", "prep full",
                          "attn sliding", "attn full", "experts nvfp4", "experts mxfp8", "gemvw", "topk", "gemvc", "exp13c",
-                         "gemv multi-row", "experts multi nvfp4", "experts multi mxfp8", "argmax"};
+                         "gemv multi-row", "experts multi nvfp4", "experts multi mxfp8", "argmax", "pgemvc", "pgemv", "pgemvw",
+                         "bf16 with factor", "norm packed table", "packed multi-row", "pgemvc8", "pgemvc4", "pgemvc2", "pgemvn",
+                         "pgemvcm", "pgemvcm8", "pgemvcm4", "pgemvcm2"};
   const int ntests = (int)(sizeof names / sizeof names[0]);
   int failures = 0;
   float t1[256], t2[256];
@@ -624,6 +834,20 @@ int ink2_run_selftest(Backend* ref, Backend* dut, std::string& report) {
         case 15: t_exp_multi(*t, INK2_FMT_NVFP4, e4, ex); break;
         case 16: t_exp_multi(*t, INK2_FMT_MXFP8, e4, ex); break;
         case 17: t_argmax(*t); break;
+        case 18: t_pgemvc(*t); break;
+        case 19: t_pgemv(*t); break;
+        case 20: t_pgemvw(*t); break;
+        case 21: t_gemv_fac(*t); break;
+        case 22: t_norm_packed(*t); break;
+        case 23: t_packed_multi(*t); break;
+        case 24: t_pgemvc(*t, KID_pgemvc8, 8); break;
+        case 25: t_pgemvc(*t, KID_pgemvc4, 4); break;
+        case 26: t_pgemvc(*t, KID_pgemvc2, 2); break;
+        case 27: t_pgemvn(*t); break;
+        case 28: t_pgemvcm(*t, KID_pgemvcm, 16); break;
+        case 29: t_pgemvcm(*t, KID_pgemvcm8, 8); break;
+        case 30: t_pgemvcm(*t, KID_pgemvcm4, 4); break;
+        case 31: t_pgemvcm(*t, KID_pgemvcm2, 2); break;
       }
       t->b->sync();
     }

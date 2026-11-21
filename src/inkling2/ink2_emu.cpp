@@ -211,6 +211,11 @@ void run_block(EmuPool* pool, Thunk thunk, const void* args, int bid, int nthr, 
   }
 }
 
+inline unsigned emu_load32(const void* p) {
+  unsigned v;
+  memcpy(&v, p, 4);
+  return v;
+}
 inline u64 emu_load64(const void* p) {
   u64 v;
   memcpy(&v, p, 8);
@@ -245,6 +250,7 @@ inline float emu_bits2f(unsigned u) {
 #define KSHFL(v, src) _t.shfl((v), (src))
 #define KSHARED(T, name, n) T* name = (T*)_t.shared(sizeof(T) * (n))
 #define KLOAD64(p) emu_load64(p)
+#define KLOAD32(p) emu_load32(p)
 #define KF4 EmuF4
 #define KLOADF4(p) emu_loadf4(p)
 #define KF4ZERO (EmuF4{0.0f, 0.0f, 0.0f, 0.0f})
