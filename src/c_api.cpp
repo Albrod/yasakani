@@ -46,9 +46,12 @@ static yskn::Engine& E(yskn_engine* e) { if (!e->e) throw std::runtime_error("th
 #if YSKN_WITH_INK2
 #define YSKN_INK2(...) if (e->ink) { __VA_ARGS__; } else
 #define YSKN_INK2_ONLY(...) __VA_ARGS__
+// YSKN_NO_INK2("name"): an entry the Inkling-2 engine does not have (without this it would read the null e->e and crash).
+#define YSKN_NO_INK2(name) if (e->ink) throw std::runtime_error(name ": not supported by the Inkling-2 engine of this library");
 #else
 #define YSKN_INK2(...)
 #define YSKN_INK2_ONLY(...)
+#define YSKN_NO_INK2(name)
 #endif
 // An engine that carries multi-stream passes finishes their pending work before it runs anything for its own sequence.
 static void ms_gate(yskn_engine* e) { if (e->q) e->q->ms_gate(); }
@@ -97,13 +100,13 @@ extern "C" YSKN_API const char* yskn_build_info(void) { return "cuda=" YSKN_STR(
 extern "C" YSKN_API const char* yskn_build_info(void) { return "cuda=" YSKN_STR(CUDART_VERSION) ";wide=1"; }
 #endif
 extern "C"  int yskn_debug_buffer(yskn_engine* e, int which, int M, uint16_t* out) { YSKN_TRY(E(e).debug_buffer(which, M, out)) }
-extern "C"  int yskn_debug_hidden(yskn_engine* e, const int32_t* ids, int n, int upto, int mode, float* out) { YSKN_TRY(ms_gate(e); if (e->q) e->q->debug_hidden(ids, n, upto, mode, out); else e->e->debug_hidden(ids, n, upto, mode, out)) }
-extern "C" int yskn_verify(yskn_engine* e, const int32_t* ids, int M, int use_graph, int32_t* out_argmax, int32_t* top_ids, float* top_vals) { YSKN_TRY(ms_gate(e); if (e->q) e->q->verify(ids, M, use_graph, out_argmax, top_ids, top_vals); else e->e->verify(ids, M, use_graph, out_argmax, top_ids, top_vals)) }
-extern "C" int yskn_verify_nll(yskn_engine* e, const int32_t* ids, const int32_t* targets, int M, int use_graph, int32_t* out_argmax, float* out_nll) { YSKN_TRY(ms_gate(e); if (e->q) e->q->verify(ids, M, use_graph, out_argmax, nullptr, nullptr, targets, out_nll); else e->e->verify(ids, M, use_graph, out_argmax, nullptr, nullptr, targets, out_nll)) }
-extern "C" int yskn_commit(yskn_engine* e, int n_accept) { YSKN_TRY(if (e->q) e->q->commit(n_accept); else e->e->commit(n_accept)) }
-extern "C" int yskn_prefill_rows(yskn_engine* e, const int32_t* ids, int n, int32_t* first, int32_t* out_argmax, int32_t* top_ids, float* top_vals) { YSKN_TRY(ms_gate(e); *first = e->q ? e->q->prefill_rows(ids, n, out_argmax, top_ids, top_vals) : e->e->prefill_rows(ids, n, out_argmax, top_ids, top_vals)) }
-extern "C" int yskn_hidden_rows(yskn_engine* e, int n, float* out) { YSKN_TRY(if (e->q) e->q->hidden_rows(n, out); else e->e->hidden_rows(n, out)) }
-extern "C" int yskn_logits_rows(yskn_engine* e, int row0, int n, float* out) { YSKN_TRY(if (e->q) e->q->logits_rows(row0, n, out); else e->e->logits_rows(row0, n, out)) }
+extern "C"  int yskn_debug_hidden(yskn_engine* e, const int32_t* ids, int n, int upto, int mode, float* out) { YSKN_TRY(YSKN_NO_INK2("debug_hidden") ms_gate(e); if (e->q) e->q->debug_hidden(ids, n, upto, mode, out); else e->e->debug_hidden(ids, n, upto, mode, out)) }
+extern "C" int yskn_verify(yskn_engine* e, const int32_t* ids, int M, int use_graph, int32_t* out_argmax, int32_t* top_ids, float* top_vals) { YSKN_TRY(YSKN_NO_INK2("verify") ms_gate(e); if (e->q) e->q->verify(ids, M, use_graph, out_argmax, top_ids, top_vals); else e->e->verify(ids, M, use_graph, out_argmax, top_ids, top_vals)) }
+extern "C" int yskn_verify_nll(yskn_engine* e, const int32_t* ids, const int32_t* targets, int M, int use_graph, int32_t* out_argmax, float* out_nll) { YSKN_TRY(YSKN_NO_INK2("verify_nll") ms_gate(e); if (e->q) e->q->verify(ids, M, use_graph, out_argmax, nullptr, nullptr, targets, out_nll); else e->e->verify(ids, M, use_graph, out_argmax, nullptr, nullptr, targets, out_nll)) }
+extern "C" int yskn_commit(yskn_engine* e, int n_accept) { YSKN_TRY(YSKN_NO_INK2("commit") if (e->q) e->q->commit(n_accept); else e->e->commit(n_accept)) }
+extern "C" int yskn_prefill_rows(yskn_engine* e, const int32_t* ids, int n, int32_t* first, int32_t* out_argmax, int32_t* top_ids, float* top_vals) { YSKN_TRY(YSKN_NO_INK2("prefill_rows") ms_gate(e); *first = e->q ? e->q->prefill_rows(ids, n, out_argmax, top_ids, top_vals) : e->e->prefill_rows(ids, n, out_argmax, top_ids, top_vals)) }
+extern "C" int yskn_hidden_rows(yskn_engine* e, int n, float* out) { YSKN_TRY(YSKN_NO_INK2("hidden_rows") if (e->q) e->q->hidden_rows(n, out); else e->e->hidden_rows(n, out)) }
+extern "C" int yskn_logits_rows(yskn_engine* e, int row0, int n, float* out) { YSKN_TRY(YSKN_NO_INK2("logits_rows") if (e->q) e->q->logits_rows(row0, n, out); else e->e->logits_rows(row0, n, out)) }
 // Test-only exports (a build with -DYSKN_TEST_EXPORTS): pass timing and the exact-sum wide GEMV check.
 #if defined(YSKN_TEST_EXPORTS) && defined(_WIN32)
 #  define YSKN_TEST_API __declspec(dllexport)
@@ -123,7 +126,7 @@ extern "C" YSKN_TEST_API int yskn_test_sparse_prompt_rows(yskn_engine* e, const 
 #endif
 extern "C" YSKN_TEST_API int yskn_test_xsum(yskn_engine* e, const char* name, int M, unsigned seed, int variant, long long* out4) {
   YSKN_TRY(if (!e->q) throw std::runtime_error("test_xsum: qwen3_5 engine only"); e->q->test_xsum(name, M, seed, variant, out4)) }
-extern "C" YSKN_TEST_API int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(ms_gate(e); *ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }
+extern "C" YSKN_TEST_API int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(YSKN_NO_INK2("time_verify") ms_gate(e); *ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }
 extern "C" YSKN_TEST_API int yskn_edit_stats(yskn_engine* e, int64_t* out) {
   if (!e || !out) return -1;
   for (int i = 0; i < 3; ++i) out[i] = e->edit_stats[i].load(std::memory_order_relaxed);
@@ -238,15 +241,15 @@ extern "C"  int yskn_kv16_read(yskn_engine* e, int layer, int pos0, int n, uint1
 extern "C"  int yskn_kv8_read(yskn_engine* e, int layer, int pos0, int n, int8_t* k8, float* ks, int8_t* v8, float* vs) {
   YSKN_TRY(if (!e->q) throw std::runtime_error("kv8_read: qwen3_5 engine only"); e->q->kv8_read(layer, pos0, n, k8, ks, v8, vs)) }
 extern "C" int yskn_capture_rows(yskn_engine* e, int k, int n, float* out) { YSKN_TRY(if (e->q) e->q->capture_rows(k, n, out); else E(e).capture_rows(k, n, out)) }
-extern "C" int yskn_load_draft(yskn_engine* e, const char* path, const char* head_ids) { YSKN_TRY(ms_gate(e); if (e->q) e->q->load_draft(path, head_ids ? head_ids : ""); else e->e->load_draft(path, head_ids)) }
-extern "C" int yskn_draft_round(yskn_engine* e, int mode, int a, int steps, int use_graph) { YSKN_TRY(ms_gate(e); if (e->q) e->q->draft_round(mode, a, steps, use_graph); else e->e->draft_round(mode, a, steps, use_graph)) }
-extern "C" int yskn_verify_device(yskn_engine* e, int M, int use_graph, int32_t* out_argmax, int32_t* out_toks, int32_t* top_ids) { YSKN_TRY(ms_gate(e); if (e->q) e->q->verify_device(M, use_graph, out_argmax, out_toks, top_ids); else e->e->verify_device(M, use_graph, out_argmax, out_toks, top_ids)) }
-extern "C" int yskn_set_verify_tokens(yskn_engine* e, const int32_t* ids, int first_row, int n) { YSKN_TRY(ms_gate(e); if (e->q) e->q->set_verify_tokens(ids, first_row, n); else e->e->set_verify_tokens(ids, first_row, n)) }
+extern "C" int yskn_load_draft(yskn_engine* e, const char* path, const char* head_ids) { YSKN_TRY(YSKN_NO_INK2("load_draft") ms_gate(e); if (e->q) e->q->load_draft(path, head_ids ? head_ids : ""); else e->e->load_draft(path, head_ids)) }
+extern "C" int yskn_draft_round(yskn_engine* e, int mode, int a, int steps, int use_graph) { YSKN_TRY(YSKN_NO_INK2("draft_round") ms_gate(e); if (e->q) e->q->draft_round(mode, a, steps, use_graph); else e->e->draft_round(mode, a, steps, use_graph)) }
+extern "C" int yskn_verify_device(yskn_engine* e, int M, int use_graph, int32_t* out_argmax, int32_t* out_toks, int32_t* top_ids) { YSKN_TRY(YSKN_NO_INK2("verify_device") ms_gate(e); if (e->q) e->q->verify_device(M, use_graph, out_argmax, out_toks, top_ids); else e->e->verify_device(M, use_graph, out_argmax, out_toks, top_ids)) }
+extern "C" int yskn_set_verify_tokens(yskn_engine* e, const int32_t* ids, int first_row, int n) { YSKN_TRY(YSKN_NO_INK2("set_verify_tokens") ms_gate(e); if (e->q) e->q->set_verify_tokens(ids, first_row, n); else e->e->set_verify_tokens(ids, first_row, n)) }
 extern "C" int yskn_draft_debug(yskn_engine* e, int which, int n, float* out) { YSKN_TRY(E(e).draft_debug(which, n, out)) }
 extern "C" int yskn_time_draft(yskn_engine* e, int mode, int a, int steps, int iters, float* ms) { YSKN_TRY(ms_gate(e); *ms = E(e).time_draft(mode, a, steps, iters)) }
 extern "C" int yskn_specx_load_static(const char* path) { try { yskn::specx_load_static(path); return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; } }
 extern "C" unsigned yskn_xsum_nonfinite(yskn_engine* e) { try { on_gpu(e); } catch (const std::exception&) { return 0u; } return e->e ? e->e->xsum_nonfinite() : 0u; }
-extern "C" int yskn_draft_catchup(yskn_engine* e, int p0, int n, const int32_t* toks, int use_graph) { YSKN_TRY(ms_gate(e); if (e->q) e->q->draft_catchup(p0, n, toks, use_graph); else e->e->draft_catchup(p0, n, toks, use_graph)) }
+extern "C" int yskn_draft_catchup(yskn_engine* e, int p0, int n, const int32_t* toks, int use_graph) { YSKN_TRY(YSKN_NO_INK2("draft_catchup") ms_gate(e); if (e->q) e->q->draft_catchup(p0, n, toks, use_graph); else e->e->draft_catchup(p0, n, toks, use_graph)) }
 extern "C"  int yskn_debug_kv_hash(yskn_engine* e, uint64_t* out) { YSKN_TRY(*out = E(e).debug_kv_hash()) }
 extern "C" YSKN_API int yskn_state_hash(yskn_engine* e, uint64_t* out, int max_out, int* n_out) { YSKN_TRY(if (!e->q) throw std::runtime_error("state_hash: qwen3_5 engine only"); *n_out = e->q->state_hash(out, max_out)) }
 extern "C"  int yskn_chk_set(yskn_engine* e, const char* name, const long long* c, int Kc, unsigned long long key, int w_max, int* idx) { YSKN_TRY(if (!e->q) throw std::runtime_error("chk: qwen3_5 engine only"); *idx = e->q->chk_set(name, c, Kc, key, w_max)) }

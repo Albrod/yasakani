@@ -490,6 +490,8 @@ class Engine:
     # ---- teacher forcing -------------------------------------------------------------------------------------------------------
     @property
     def supports_forced(self) -> bool:
+        if self.pack.is_inkling2:                # the Inkling-2 engine of #28 has no teacher-forcing pass (yskn_verify_nll refuses it)
+            return False
         return all(k in self._f for k in ("yskn_verify_nll", "yskn_commit"))
 
     def teacher_forced(self, ids: Sequence[int], *, rows: int = 16, margins: bool = False) -> Forced:
