@@ -2,7 +2,11 @@
 // Copyright (c) 2026 the YASAKANI authors
 #include "engine.hpp"
 #include "engine35.hpp"
+// The Inkling-2 engine of #28 (src/engine_ink2.cpp, Linux) is in the library only with the CMake option YSKN_WITH_INK2 (default off).
+// Its code here is inside YSKN_WITH_INK2 blocks: without the option this file is the same as before #28.
+#if YSKN_WITH_INK2
 #include "engine_ink2.hpp"
+#endif
 #include "specx.hpp"
 #include "gpu_caps.hpp"
 #include <chrono>
@@ -17,8 +21,12 @@
 namespace yskn { extern std::atomic<int> g_specx_cancel; }   
 static thread_local std::string g_err;
 struct yskn_engine {
+#if YSKN_WITH_INK2
   yskn::Engine* e = nullptr; yskn::Engine35* q = nullptr; yskn::EngineInk2* ink = nullptr;
   std::atomic<int> cancel{0}; int dev = -1;
+#else
+  yskn::Engine* e; yskn::Engine35* q; std::atomic<int> cancel{0}; int dev = -1;
+#endif
   std::atomic<int64_t> edit_stats[3]{};
 };
 // The CUDA current device belongs to the host thread, and callers use other threads than the one that opened the engine (the
@@ -33,8 +41,18 @@ static void on_gpu(const yskn_engine* e) {
 }
 static yskn::Engine& E(yskn_engine* e) { if (!e->e) throw std::runtime_error("this API is not available for the qwen3_5 engine yet"); return *e->e; }
 #define YSKN_TRY(body) try { on_gpu(e); body; return 0; } catch (const std::exception& ex) { g_err = ex.what(); return -1; }
+// YSKN_INK2(stmt): the Inkling-2 branch of an entry ("if (e->ink) { stmt; } else"); YSKN_INK2_ONLY(code): code for that engine.
+// Both are empty without YSKN_WITH_INK2.
+#if YSKN_WITH_INK2
+#define YSKN_INK2(...) if (e->ink) { __VA_ARGS__; } else
+#define YSKN_INK2_ONLY(...) __VA_ARGS__
+#else
+#define YSKN_INK2(...)
+#define YSKN_INK2_ONLY(...)
+#endif
 // An engine that carries multi-stream passes finishes their pending work before it runs anything for its own sequence.
 static void ms_gate(yskn_engine* e) { if (e->q) e->q->ms_gate(); }
+#if YSKN_WITH_INK2
 extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int flags) {
   try {
     yskn::select_gpu(device);
@@ -51,20 +69,33 @@ extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int
     return r;
   } catch (const std::exception& ex) { g_err = ex.what(); return nullptr; }
 }
-extern "C" void yskn_close(yskn_engine* e) { if (e) { try { on_gpu(e); } catch (const std::exception&) {} delete e->e; delete e->q; delete e->ink; delete e; } }
-extern "C" int yskn_reset(yskn_engine* e) { YSKN_TRY(ms_gate(e); if (e->ink) e->ink->reset(); else if (e->q) e->q->reset(); else e->e->reset()) }
-extern "C" int yskn_prefill(yskn_engine* e, const int32_t* ids, int n, int32_t* first) { YSKN_TRY(ms_gate(e); *first = e->ink ? e->ink->prefill(ids, n) : e->q ? e->q->prefill(ids, n) : e->e->prefill(ids, n)) }
-extern "C" int yskn_decode(yskn_engine* e, int32_t* out, int steps) { YSKN_TRY(ms_gate(e); if (e->ink) e->ink->decode(out, steps); else if (e->q) e->q->decode(out, steps); else e->e->decode(out, steps)) }
-extern "C" int yskn_nll(yskn_engine* e, const int32_t* ids, int n, float* out) { YSKN_TRY(ms_gate(e); if (e->ink) throw std::runtime_error("nll: not supported for inkling2"); else if (e->q) e->q->nll(ids, n, out); else e->e->nll(ids, n, out)) }
-extern "C" int yskn_logits(yskn_engine* e, float* out) { YSKN_TRY(if (e->ink) e->ink->logits(out); else if (e->q) e->q->logits(out); else e->e->logits(out)) }
-extern "C" int yskn_position(yskn_engine* e) { return e->ink ? e->ink->position() : e->q ? e->q->position() : e->e->position(); }
+#else
+extern "C" yskn_engine* yskn_open(const char* path, int max_ctx, int device, int flags) {
+  try { yskn::select_gpu(device); std::string arch; { yskn::Container c; c.open(path); arch = c.model.arch; }
+    yskn_engine* r = arch == "qwen3_5" ? new yskn_engine{nullptr, new yskn::Engine35(path, max_ctx, flags)}
+                                       : new yskn_engine{new yskn::Engine(path, max_ctx, flags), nullptr};
+    r->dev = device; return r; } catch (const std::exception& ex) { g_err = ex.what(); return nullptr; }
+}
+#endif
+extern "C" void yskn_close(yskn_engine* e) { if (e) { try { on_gpu(e); } catch (const std::exception&) {} delete e->e; delete e->q; YSKN_INK2_ONLY(delete e->ink;) delete e; } }
+extern "C" int yskn_reset(yskn_engine* e) { YSKN_TRY(ms_gate(e); YSKN_INK2(e->ink->reset()) if (e->q) e->q->reset(); else e->e->reset()) }
+extern "C" int yskn_prefill(yskn_engine* e, const int32_t* ids, int n, int32_t* first) { YSKN_TRY(ms_gate(e); YSKN_INK2(*first = e->ink->prefill(ids, n)) *first = e->q ? e->q->prefill(ids, n) : e->e->prefill(ids, n)) }
+extern "C" int yskn_decode(yskn_engine* e, int32_t* out, int steps) { YSKN_TRY(ms_gate(e); YSKN_INK2(e->ink->decode(out, steps)) if (e->q) e->q->decode(out, steps); else e->e->decode(out, steps)) }
+extern "C" int yskn_nll(yskn_engine* e, const int32_t* ids, int n, float* out) { YSKN_TRY(ms_gate(e); YSKN_INK2(throw std::runtime_error("nll: not supported for inkling2")) if (e->q) e->q->nll(ids, n, out); else e->e->nll(ids, n, out)) }
+extern "C" int yskn_logits(yskn_engine* e, float* out) { YSKN_TRY(YSKN_INK2(e->ink->logits(out)) if (e->q) e->q->logits(out); else e->e->logits(out)) }
+extern "C" int yskn_position(yskn_engine* e) { YSKN_INK2(return e->ink->position()) return e->q ? e->q->position() : e->e->position(); }
 extern "C" const char* yskn_last_error(void) { return g_err.c_str(); }
 // Which library this is: "cuda=13020;wide=1". cuda is the CUDA runtime version the library was built with (13020 = 13.2); wide=1: the
 // wide copy passes can be switched per GPU (YSKN_WIDE, set_opt 38..42, yskn_time_cycle, yskn_wide_state; 0.1.7). Libraries before it
 // have no yskn_build_info.
 #define YSKN_STR_(x) #x
 #define YSKN_STR(x) YSKN_STR_(x)
+// ink2=1: a library built with YSKN_WITH_INK2 (the Inkling-2 engine of #28 opens a folder of the published safetensors).
+#if YSKN_WITH_INK2
+extern "C" YSKN_API const char* yskn_build_info(void) { return "cuda=" YSKN_STR(CUDART_VERSION) ";wide=1;ink2=1"; }
+#else
 extern "C" YSKN_API const char* yskn_build_info(void) { return "cuda=" YSKN_STR(CUDART_VERSION) ";wide=1"; }
+#endif
 extern "C"  int yskn_debug_buffer(yskn_engine* e, int which, int M, uint16_t* out) { YSKN_TRY(E(e).debug_buffer(which, M, out)) }
 extern "C"  int yskn_debug_hidden(yskn_engine* e, const int32_t* ids, int n, int upto, int mode, float* out) { YSKN_TRY(ms_gate(e); if (e->q) e->q->debug_hidden(ids, n, upto, mode, out); else e->e->debug_hidden(ids, n, upto, mode, out)) }
 extern "C" int yskn_verify(yskn_engine* e, const int32_t* ids, int M, int use_graph, int32_t* out_argmax, int32_t* top_ids, float* top_vals) { YSKN_TRY(ms_gate(e); if (e->q) e->q->verify(ids, M, use_graph, out_argmax, top_ids, top_vals); else e->e->verify(ids, M, use_graph, out_argmax, top_ids, top_vals)) }
@@ -147,8 +178,8 @@ extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_p
           o[58] = (double)s.wide_backoffs; o[59] = s.t_copy[0]; o[60] = s.t_copy[1]; o[61] = s.t_copy[2]; o[62] = s.t_copy[3];   // 0.1.7
           o[63] = (double)s.wide_mask; } }
     };
+#if YSKN_WITH_INK2
     if (e->ink) {
-      using clk = std::chrono::steady_clock;
       double t_pf = 0.0, t_gen = 0.0;
       int64_t produced = 0;
       int eos = 0, cached = 0, passes = 0;
@@ -164,7 +195,9 @@ extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_p
         stats[31] = (double)eos;
         if (ns > 42) stats[42] = (double)cached;
       }
-    } else if (e->q) { yskn::Specx35 y(*e->q, c, e->q->vocab()); run(y);
+    } else
+#endif
+    if (e->q) { yskn::Specx35 y(*e->q, c, e->q->vocab()); run(y);
                 if (c.snap) { const auto& s = y.seq(); e->q->snap_note(s.data(), (int)s.size() - 1, s.back()); } }   // live = all but the frontier
     else { yskn::Specx y(*e->e, c, e->e->vocab()); run(y); }
     return 0;
@@ -184,7 +217,7 @@ extern "C" YSKN_API int yskn_set_suppress(yskn_engine* e, const int32_t* token_i
 }
 
 
-extern "C" YSKN_API int yskn_prepare_wide(yskn_engine* e, int max_rows) { YSKN_TRY(ms_gate(e); if (e->ink) return 0; if (!e->q) throw std::runtime_error("prepare_wide: qwen3_5 engine only"); e->q->prepare_wide(max_rows)) }
+extern "C" YSKN_API int yskn_prepare_wide(yskn_engine* e, int max_rows) { YSKN_TRY(ms_gate(e); YSKN_INK2_ONLY(if (e->ink) return 0;) if (!e->q) throw std::runtime_error("prepare_wide: qwen3_5 engine only"); e->q->prepare_wide(max_rows)) }
 extern "C" YSKN_API int yskn_time_cycle(yskn_engine* e, const int32_t* ids, int M, int iters, float* ms) {
   YSKN_TRY(ms_gate(e); if (!e->q) throw std::runtime_error("time_cycle: qwen3_5 engine only"); e->q->time_cycle(ids, M, iters, ms)) }
 extern "C" YSKN_API int yskn_wide_state(yskn_engine* e, int32_t* out, int n, int* n_out) {
@@ -195,7 +228,7 @@ extern "C" YSKN_API int yskn_snap_info(yskn_engine* e, int32_t* out4, int32_t* i
   out4[3] = (int32_t)lv.size(); if (ids) for (int i = 0; i < (int)lv.size() && i < max_ids; ++i) ids[i] = lv[i]) }
 extern "C" int yskn_lfrow_table(yskn_engine* e, const uint8_t* tab48) { YSKN_TRY(ms_gate(e); if (e->q) e->q->lfrow_table(tab48); else throw std::runtime_error("lfrow: 27B engine only")) }
 extern "C" int yskn_lfrow_promote(yskn_engine* e, int src, int dst) { YSKN_TRY(ms_gate(e); if (e->q) e->q->lfrow_promote(src, dst); else throw std::runtime_error("lfrow: 27B engine only")) }
-extern "C" int yskn_set_opt(yskn_engine* e, int key, int value) { YSKN_TRY(if (e->ink) e->ink->set_opt(key, value); else if (e->q) e->q->set_opt(key, value); else throw std::runtime_error("set_opt: 27B or inkling2 engine only")) }
+extern "C" int yskn_set_opt(yskn_engine* e, int key, int value) { YSKN_TRY(YSKN_INK2(e->ink->set_opt(key, value)) if (e->q) e->q->set_opt(key, value); else throw std::runtime_error("set_opt: 27B engine only")) }
 extern "C" int yskn_set_capture(yskn_engine* e, const int32_t* layers, int n) { YSKN_TRY(ms_gate(e); if (e->q) e->q->set_capture(layers, n); else E(e).set_capture(layers, n)) }
 extern "C"  int yskn_kz_debug(yskn_engine* e, int layer) { YSKN_TRY(if (!e->q) throw std::runtime_error("kz_debug: qwen3_5 engine only"); e->q->set_kz_debug(layer)) }
 extern "C"  int yskn_kz_debug_read(yskn_engine* e, int n, float* o, uint16_t* q) { YSKN_TRY(if (!e->q) throw std::runtime_error("kz_debug: qwen3_5 engine only"); e->q->kz_debug_read(n, o, q)) }
@@ -220,7 +253,7 @@ extern "C"  int yskn_chk_set(yskn_engine* e, const char* name, const long long* 
 extern "C"  int yskn_chk_stats(yskn_engine* e, unsigned long long* out, int reset) { YSKN_TRY(if (!e->q) throw std::runtime_error("chk: qwen3_5 engine only"); e->q->chk_stats(out, reset)) }
 extern "C"  int yskn_chk_fault(yskn_engine* e, int kind, const char* name, int a, int b) { YSKN_TRY(if (!e->q) throw std::runtime_error("chk: qwen3_5 engine only"); e->q->chk_fault(kind, name, a, b)) }
 extern "C"  int yskn_chk_enable(yskn_engine* e, int on) { YSKN_TRY(if (!e->q) throw std::runtime_error("chk: qwen3_5 engine only"); e->q->chk_enable(on)) }
-extern "C" YSKN_API int yskn_load_bdraft(yskn_engine* e, const char* path) { YSKN_TRY(ms_gate(e); if (e->ink) return 0; if (!e->q) throw std::runtime_error("bdraft: qwen3_5 engine only"); e->q->load_bdraft(path)) }
+extern "C" YSKN_API int yskn_load_bdraft(yskn_engine* e, const char* path) { YSKN_TRY(ms_gate(e); YSKN_INK2_ONLY(if (e->ink) return 0;) if (!e->q) throw std::runtime_error("bdraft: qwen3_5 engine only"); e->q->load_bdraft(path)) }
 extern "C" YSKN_API int yskn_bdraft_ctx(yskn_engine* e, int row0, int n, int pos0) { YSKN_TRY(ms_gate(e); if (!e->q) throw std::runtime_error("bdraft: qwen3_5 engine only"); e->q->bdraft_ctx(row0, n, pos0)) }
 extern "C" YSKN_API int yskn_prefill_rows_k20(yskn_engine* e, const int32_t* ids, int n, int32_t* out_first, int32_t* out_argmax, int32_t* k20_ids, float* k20_vals) {
   YSKN_TRY(if (!e->q) throw std::runtime_error("prefill_rows_k20: qwen3_5 engine only"); ms_gate(e); *out_first = e->q->prefill_rows_k20(ids, n, out_argmax, k20_ids, k20_vals)) }

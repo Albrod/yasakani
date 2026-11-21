@@ -28,8 +28,6 @@ add_library(yskn SHARED
   src/gemm_compressed.cu
   src/gemv_sigma_int.cu
   src/gpu_caps.cu
-  src/engine_ink2.cpp
-  src/ink2_kernels.cu
   src/kvx_probe.cu
   src/lnord.cu
   src/loader.cpp
@@ -66,4 +64,16 @@ else()
   # build/bin/libyskn.so is one of the places the Python package looks, so --dll is not needed.
   set_target_properties(yskn PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
-target_link_libraries(yskn PRIVATE CUDA::cudart CUDA::cublas)
+target_link_libraries(yskn PRIVATE CUDA::cudart)
+# The Inkling-2 engine contributed in #28 (src/engine_ink2.cpp, src/ink2_kernels.cu): Linux only, off by default. With it the library
+# needs cuBLAS (libcublas.so of the CUDA Toolkit) at run time, for every model. The released Windows yskn.dll is built without it.
+option(YSKN_WITH_INK2 "Build the Inkling-2 engine of #28 into the library (Linux; needs cuBLAS at run time)" OFF)
+if(YSKN_WITH_INK2)
+  if(WIN32)
+    message(FATAL_ERROR "YSKN_WITH_INK2 builds on Linux only (src/safetensors.hpp uses POSIX file calls). On Windows the Inkling-2 "
+                        "engine is yskn_inkling2.dll (BUILDING.md).")
+  endif()
+  target_sources(yskn PRIVATE src/engine_ink2.cpp src/ink2_kernels.cu)
+  target_compile_definitions(yskn PRIVATE YSKN_WITH_INK2=1)
+  target_link_libraries(yskn PRIVATE CUDA::cublas)
+endif()
