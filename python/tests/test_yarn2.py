@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import stat
 import tempfile
 import types
 import unittest
@@ -25,7 +26,7 @@ def _fake_pack_with_sizes(root: Path, weights_mib: int, draft_mib: int = 1144, h
 
     def fake_stat(self, *args, **kwargs):
         if self in sizes:
-            return types.SimpleNamespace(st_size=sizes[self])
+            return types.SimpleNamespace(st_size=sizes[self], st_mode=stat.S_IFREG | 0o644)    # Path.is_file reads st_mode (Python 3.12)
         return real_stat(self, *args, **kwargs)
 
     return pack, fake_stat
