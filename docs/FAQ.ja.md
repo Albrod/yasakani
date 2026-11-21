@@ -426,7 +426,7 @@ Inkling-2 Mini は、Thinking Machines Lab が 2026 年 11 月 20 日に公開�
 （うち KV キャッシュが 2.15 GB）。標準の先読みありでは 23.2 GB です。GPU 全体で使っていたのは、先読みなしで 24.2 GB、ありで 25.4 GB でした。
 `--scheme quality` で変換した重みでは、エンジンの確保が 18.3 / 19.4 GB、GPU 全体で 20.4 / 21.6 GB でした。`--draft off` では先読み用のモデルを読み込みません。24 GB 未満のカードにはモデルが入りません。
 24 GB のカード（RTX 3090・3090 Ti・4090）では試していません。画面の表示にも同じカードを使うと、空きはさらに減ります。`--max-ctx` を小さくすると、使うメモリーも減ります。
-Linux では試していません。
+Linux では、[#28](https://github.com/yasakani-dev/yasakani/pull/28) で寄稿されたエンジンをソースから組み立てて使います（[BUILDING.md](../BUILDING.md#linux-inkling-2)）。私たちはそれを RTX 5090 1枚の WSL2 だけで動かしました。
 
 ### どれくらい速い？ 条件は？
 

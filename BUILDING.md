@@ -137,8 +137,8 @@ The build takes a few minutes and writes `build\inkling2\yskn_inkling2.dll` (abo
 arch=compute_120,code=sm_120` before it builds for the RTX 50 series only. `src\inkling2\build.cmd host` builds
 `build\inkling2\ink2_host.dll`, the kernels on the CPU only: it is not released and serves the unit tests of the package
 (`YASAKANI_TEST_INK2_DLL`, with the tiny test checkpoint in `YASAKANI_TEST_INK2_SOURCE`; see `python/tests/test_inkling2.py`). The library
-is for Windows only; there is no Linux build of it. Then check it with `yasakani selfcheck` on the model folder: it compares the greedy
-tokens with those of the official test of the model.
+is for Windows only; there is no Linux build of it (on Linux, see [the Inkling-2 engine of #28](#linux-inkling-2) below). Then check it
+with `yasakani selfcheck` on the model folder: it compares the greedy tokens with those of the official test of the model.
 
 ## Linux (building from source)
 
@@ -280,6 +280,39 @@ with flash attention switched off. This is experimental and off by default: the 
 tried it. The measurements behind that choice, and its memory cost, are in [python/README.md](python/README.md#image-input-on-linux).
 Mind the GPU memory: the projector and its work memory stay on the GPU next to the model, and the memory of an encode grows with the
 square of the image tokens, so with the variable set `--vision-max-image-tokens` can be at most 2,048.
+
+<a name="linux-inkling-2"></a>
+
+### Inkling-2 Mini on Linux: the engine of #28 (`-DYSKN_WITH_INK2=ON`)
+
+日本語：Linux では、[#28](https://github.com/yasakani-dev/yasakani/pull/28) で寄稿された Inkling-2 Mini のエンジンを `libyskn.so` に入れて組み立てられます。CMake の `-DYSKN_WITH_INK2=ON` を付けます（標準は付けません）。この時は実行に cuBLAS（CUDA Toolkit の `libcublas.so`）が要ります。ダウンロードしたままのモデルのフォルダー（`yasakani.json` が無い物）を変換せずに読みます。配布する Windows の `yskn.dll` には入っていません。
+
+[#28](https://github.com/yasakani-dev/yasakani/pull/28) (@audreyt) contributed a second engine for Inkling-2 Mini, inside `libyskn.so`. It is
+built only when you ask for it, and the released Windows `yskn.dll` does not contain it:
+
+* Add `-DYSKN_WITH_INK2=ON` to the first `cmake` command of the [steps](#steps-1) above. The option stops with an error on Windows.
+* With it, `libyskn.so` also needs cuBLAS when it loads (`libcublas.so.13` and `libcublasLt.so.13` of the CUDA Toolkit), for every model,
+  the Qwen3.8 models too. NVIDIA's `cuda-toolkit` package has them.
+* It reads the folder of the published model as downloaded, with no `yasakani.json` in it (for example after
+  `hf download thinkingmachines/Inkling-2-Mini --local-dir ~/models/Inkling-2-Mini`). The package sends such a folder to this engine only
+  when the library was built with the option. A library built without it gives the error of earlier versions for such a folder, with a
+  hint. A folder made by `inkling2_convert.py` (with `"architecture": "inkling2"` in its `yasakani.json`) always takes the path of
+  `yskn_inkling2.dll` above, which is Windows only.
+* It runs the shapes of Inkling-2 Mini only. Before it loads anything it checks `config.json` and the type, shape and size of every
+  tensor in the weights file, and it stops with an error on anything else.
+* It does not use the drafter (`mtp.safetensors`), and it reads the published weights, not those of `--scheme quality`. Text only, one
+  request at a time; `yasakani serve` takes tool calls. `--yarn2`, `--suppress-tokens`, `--parallel` and `selfcheck` are not available
+  for this engine. Sampling uses the model's defaults (temperature 1.0, top-p 1.0, no top-k).
+* Its author ran it on an RTX 5090 and on a DGX Spark (GB10). We ran it on one RTX 5090 under WSL2 (Ubuntu 24.04, CUDA 13.1, November
+  22, 2026): the 30 tokens that the official test of the model expects, a chat in the terminal, and `yasakani serve` with a streamed
+  answer, a tool call and the answer to its result.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DYSKN_WITH_INK2=ON
+cmake --build build -j
+yasakani chat  --model-dir ~/models/Inkling-2-Mini --dll build/bin/libyskn.so
+yasakani serve --model-dir ~/models/Inkling-2-Mini --dll build/bin/libyskn.so
+```
 
 ## GPUs
 

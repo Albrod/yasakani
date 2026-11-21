@@ -609,6 +609,13 @@ New in 0.3.1. The package also runs [Inkling-2 Mini](https://huggingface.co/thin
 Text only, one request at a time, tested on the RTX 5090 under Windows 11 only. It runs on a second engine library, not on `yskn.dll`;
 the Qwen3.8-27B commands, settings and numbers in the rest of this document do not change.
 
+**Linux: the engine of [#28](https://github.com/yasakani-dev/yasakani/pull/28).** A folder of the published model as downloaded, with no
+`yasakani.json`, runs on the Inkling-2 engine contributed in #28 inside `libyskn.so`, when that library was built with `-DYSKN_WITH_INK2=ON`
+(its `yskn_build_info` then says `ink2=1`; [BUILDING.md](../BUILDING.md#linux-inkling-2)). A folder with `"architecture": "inkling2"` always
+takes the path below. With a library without that engine (the released Windows `yskn.dll` too), such a folder gives the error of 0.3.0
+(the Qwen3.8 files are missing), with a hint. This engine uses the model's sampling defaults (temperature 1.0, top-p 1.0, no top-k) and
+takes tool calls in `yasakani serve`; `--yarn2`, `--suppress-tokens` and `--parallel` are refused or not used for it.
+
 **The architecture field.** The commands read `"architecture"` in the folder's `yasakani.json`. With `"architecture": "inkling2"` they
 use the Inkling-2 path (`yasakani/inkling2.py` and `yasakani/inkling2_cli.py`); without the field, or with any other folder, they work as
 before. The manifest also names the source (`repository`, `revision`, `license`, `acceptable_use_policy`), the context (`max_ctx`, and

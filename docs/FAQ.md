@@ -525,7 +525,9 @@ We ran it on one RTX 5090 (32 GB) under Windows 11 only. With the default contex
 memory (2.15 GB of it the key/value cache), and 23.2 GB with the drafter loaded (the default). The GPU as a whole had 24.2 GB in use
 without and 25.4 GB with the drafter; with the converted weights of `--scheme quality` the engine allocated 18.3 / 19.4 GB, and the GPU
 had 20.4 / 21.6 GB in use. `--draft off` does not load the drafter. Cards under 24 GB cannot hold it. We have not run it on a 24 GB card (RTX 3090, 3090 Ti or 4090); with the desktop also on that card
-there is less room, and a smaller `--max-ctx` needs less memory. Linux is not tested.
+there is less room, and a smaller `--max-ctx` needs less memory. On Linux it runs on the engine contributed in
+[#28](https://github.com/yasakani-dev/yasakani/pull/28), built from source ([BUILDING.md](../BUILDING.md#linux-inkling-2)); we ran that one on one
+RTX 5090 under WSL2 only.
 
 ### How fast is it, and under which conditions?
 

@@ -168,7 +168,7 @@ yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
 
 Inkling-2 Mini は、Thinking Machines Lab が 2026 年 11 月 20 日に公開した言語モデルです（[thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)）。重みは 264 億個で、専門家を組み合わせる形です。各層は 128 個の専門家から、トークンごとに 8 個を選びます。ライセンスは Apache-2.0 です。モデルカードには利用の規定（[Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/)）も書かれています。この規定は重みと、手を加えた版に適用されます。YASAKANI は、エンジンの ZIP に入れた 2 つ目のライブラリでこのモデルを動かします。Qwen3.8-27B のモデルは、これまで通り `yskn.dll`（0.2.0 と同じファイル）で動きます。
 
-必要な物は次の 3 つです：Windows 11（64 ビット）・24 GB 以上の NVIDIA RTX のカード・YASAKANI 0.3.1 の起動ファイルかパッケージ。24 GB 未満のカードにはモデルが入りません。ダウンロードにはディスクの空きが約 20 GB 要ります。変換のプログラムは、同じドライブなら重みのファイルを新しいフォルダーにリンクするので、空きはほとんど減りません（別のドライブではコピーします）。
+必要な物は次の 3 つです：Windows 11（64 ビット）・24 GB 以上の NVIDIA RTX のカード・YASAKANI 0.3.1 の起動ファイルかパッケージ。24 GB 未満のカードにはモデルが入りません。ダウンロードにはディスクの空きが約 20 GB 要ります。変換のプログラムは、同じドライブなら重みのファイルを新しいフォルダーにリンクするので、空きはほとんど減りません（別のドライブではコピーします）。下の手順は Windows の物です。Linux では、[#28](https://github.com/yasakani-dev/yasakani/pull/28) で寄稿された別のエンジンで動きます。`-DYSKN_WITH_INK2=ON` を付けてソースから組み立て、ダウンロードしたフォルダーを変換せずに読みます（[BUILDING.md](BUILDING.md#linux-inkling-2)、英語）。
 
 1. 公開されているモデルを、Hugging Face のコマンド（`hf`）でダウンロードします。`hf` は Python のパッケージ `huggingface_hub` に入っています。版は私たちが確認した物を指定します。
 2. この版のソースにある `tools/convert/inkling2_convert.py` で変換します（公開ページのソースコードの ZIP か、このリポジトリの複製）。標準の設定では重みを変えません。パッケージが使うファイルを隣に作るだけです（各ファイルの SHA-256 を書いた `yasakani.json`・`selfcheck.json`・`NOTICE`）。ダウンロードに入っている画像の部分は使いません。先読み用のモデル（`mtp.safetensors`）は、重みと同じようにフォルダーにリンクかコピーします。
@@ -233,7 +233,7 @@ START.cmd --model-dir D:\models\inkling2-mini-quality
 * 多くのアプリは前の返事の思考を送り返しません。そのため次の依頼では前の返事を捨てます。エンジンは 512 位置までなら、会話を読み直さずに捨てられます（`YASAKANI_INK2_ROLLBACK`。0 でエンジンの標準の 64）。その分 GPU のメモリーが増えます。`--scheme quality` のフォルダーと文脈 32,768 では、エンジンの確保が 19.4 GB から 20.0 GB になり、GPU 全体では 0.8 GB 増えました。
 * 先読みは、自由な文章より予想しやすい文で良く効きます。効かない所では `--draft auto` が先読みをやめます。それでも時々試すので、少し遅くなります（私たちの測定では日本語の文章で最大 3.6%）。`--draft off` ならこの分は掛かりません。
 * このモデルでは `bench --edit` と画像入力も使えません。
-* 確認したのは RTX 5090 1枚と Windows 11 だけです。ほかの GPU と Linux では試していません。
+* Windows で確認したのは RTX 5090 1枚と Windows 11 だけです。ほかの GPU では試していません。Linux では [#28](https://github.com/yasakani-dev/yasakani/pull/28) のエンジンだけを使い、ソースから組み立てます。私たちは RTX 5090 1枚の WSL2 で動かしました。寄稿者の方は RTX 5090 と DGX Spark で動かしています（[BUILDING.md](BUILDING.md#linux-inkling-2)）。
 * 思考なしは私たちの設定です（[よくある質問](docs/FAQ.ja.md#inkling-2-mini)）。
 
 [よくある質問](docs/FAQ.ja.md#inkling-2-mini) · [コマンドと設定（英語）](python/README.md#inkling-2-mini-experimental)
