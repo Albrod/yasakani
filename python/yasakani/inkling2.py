@@ -114,6 +114,13 @@ class Ink2Pack:
         fmt = str(w.get("format") or "hf-safetensors")
         if fmt not in WEIGHTS_FORMATS or (fmt == "yskn" and int(w.get("version") or 2) != 2):
             raise YasakaniError("weights format %r is not supported by this version of the package" % fmt)
+        dr = meta.get("drafter")
+        named = [("weights", w.get("file")), ("drafter", dr.get("file") if isinstance(dr, dict) else None)]
+        sums = meta.get("sha256")
+        named += [("sha256", k) for k in sums] if isinstance(sums, dict) else []
+        for what, f in named:                               # every file the manifest names must be inside the model folder
+            if f and (not isinstance(f, str) or Path(f).is_absolute() or Path(f).drive or ".." in Path(f).parts):
+                raise YasakaniError("%s: the %s entry %r is not a file inside the model folder" % (MANIFEST, what, f))
         need = [w["file"], "config.json", "tokenizer.json", "chat_template.jinja"]
         missing = [n for n in need if not (root / n).is_file()]
         if missing:

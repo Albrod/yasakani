@@ -1064,6 +1064,35 @@ def safetensors_bytes(header, data: bytes = b"", header_len=None) -> bytes:
     return struct.pack("<Q", len(js) if header_len is None else header_len) + js + data
 
 
+class ManifestPathTests(unittest.TestCase):
+    """Every file the manifest names must be inside the model folder."""
+
+    def folder(self, **extra):
+        root = Path(tempfile.mkdtemp(prefix="ink2_paths_"))
+        self.addCleanup(shutil.rmtree, root, True)
+        m = root / "m"
+        m.mkdir()
+        for name in ("w.safetensors", "config.json", "tokenizer.json", "chat_template.jinja"):
+            (m / name).write_bytes(b"{}")
+        (root / "outside.safetensors").write_bytes(b"x")
+        meta = {"architecture": "inkling2", "weights": {"file": "w.safetensors"}}
+        meta.update(extra)
+        (m / "yasakani.json").write_text(json.dumps(meta), encoding="utf-8")
+        return m
+
+    def test_plain_names_are_taken(self):
+        pack = ink.Ink2Pack.load(str(self.folder()))
+        self.assertEqual(pack.weights.name, "w.safetensors")
+
+    def test_paths_that_leave_the_folder_are_refused(self):
+        outside = "C:/x.safetensors" if os.name == "nt" else "/x.safetensors"
+        for bad in ("../outside.safetensors", "sub/../../outside.safetensors", outside):
+            for extra in ({"drafter": {"file": bad}}, {"weights": {"file": bad}}, {"sha256": {bad: "00"}}):
+                with self.subTest(bad=bad, entry=list(extra)[0]):
+                    with self.assertRaisesRegex(YasakaniError, "is not a file inside the model folder"):
+                        ink.Ink2Pack.load(str(self.folder(**extra)))
+
+
 class MalformedFileTests(unittest.TestCase):
     def test_yskn_header_of_wrong_types(self):
         from yasakani import ink2_yskn as Y
