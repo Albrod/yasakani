@@ -11,7 +11,11 @@
 * Tool calling: ``tools`` (functions) with ``tool_choice`` "auto" or "none".  The model's own chat template describes the tools to
   the model; the calls it writes come back as ``tool_calls`` (in a stream: one chunk per finished call, with the whole arguments).
   ``tool_choice`` "required" or a named function is accepted but not enforced for Qwen3.8 models (no constrained decoding): it runs
-  as "auto", with only the named function offered when one is named.  Inkling-2 model folders enforce it (yasakani/inkling2.py).
+  as "auto", with only the named function offered when one is named.  Inkling-2 model folders enforce it (yasakani/inkling2.py):
+  after the thinking the call header is written for the model (a named function, or "required" with one function), or with
+  "required" and several functions the model may write nothing but one of the offered names as the header (constrained decoding
+  of the name).  The arguments are the model's own (not checked against the schema), and a reply cut by max_tokens before the
+  call has none.
 * ``thinking_budget`` (a request field; the default comes from the environment variable YASAKANI_THINKING_BUDGET, 0 = no limit):
   when the thinking has taken that many tokens it is closed and the model goes on to the answer.
 * Optional still-image input through ``image_url`` (configure --mmproj, --llama-dir and --vision-model).
@@ -110,8 +114,8 @@ def parse_chat_request(body: dict, cfg: ServerConfig, images: bool = False) -> C
     if choice == "none":
         tools = None
     elif choice == "required" or forced:
-        # The engine has no constrained decoding, so a call cannot be enforced: the request runs as "auto" (with only the
-        # named function offered, when one is named) and the model is left to make the call.
+        # Qwen3.8: the engine has no constrained decoding, so a call cannot be enforced: the request runs as "auto" (with only
+        # the named function offered, when one is named) and the model is left to make the call.  Inkling-2: enforced by its runner.
         if not tools:
             raise RequestError("tool_choice %s needs tools" % json.dumps(choice)[:80])
     elif choice not in (None, "auto"):

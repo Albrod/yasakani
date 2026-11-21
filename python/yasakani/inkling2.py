@@ -36,8 +36,12 @@ calls the same way (``tool_calls`` of the response_template: ``content.name`` an
 calls several tools.  ``OutputStream(tools=True)`` turns each such block into a ``("tool_call", {"name", "arguments"})`` item when it
 ends; a block that is not a JSON object with a name comes back as answer text.  ``tool_choice``: "auto" as it is; "none" offers no
 tools (the server); "required" with one function (a named function) writes the call header ``<|message_model|>NAME
-<|content_invoke_tool_json|>`` for the model after its thinking, "required" with several lets the model pick the name but not a
-text block (the block openers are masked at that one position).  With ``enable_thinking: false`` and tools the effort is 0 and the
+<|content_invoke_tool_json|>`` for the model after its thinking; "required" with several writes ``<|message_model|>`` for it and
+then lets it pick only ids that spell one of the offered names (``NameTrie``: the ids of each name as the template writes them, at
+every position of the name) and, where a name is complete, ``<|content_invoke_tool_json|>``; so the header is always that of a call
+of an offered function (masking the block openers only at the first position after ``<|message_model|>`` was not enough: the model
+wrote another id there and its answer as the block's name, and no call came).  The arguments are the model's; after its first
+call the rest of the reply is free, as the template allows (more calls, or text).  With ``enable_thinking: false`` and tools the effort is 0 and the
 model writes its own block header: it may think briefly (the model card: the lowest effort does not turn the thinking fully off),
 then answers or calls.  The answer block is not opened for it as without tools (that would rule out a call); masking only the
 thinking opener after ``<|message_model|>`` was tried and made the model call a tool for 1 + ... + 5 in 1 of 7 runs (greedy and
@@ -86,6 +90,32 @@ T_MODEL, T_THINKING, T_TEXT, T_END, T_STOP = ("<|message_model|>", "<|content_th
                                               "<|content_model_end_sampling|>")
 ANSWER_OPENERS = ("<|content_text|>", "<|content_tool_error|>", "<|content_invoke_tool_text|>", "<|content_invoke_tool_json|>")
 T_CALL = "<|content_invoke_tool_json|>"          # the block of one tool call (JSON {"name": ..., "args": {...}})
+
+
+class Allow(frozenset):
+    """Ids that are the only ones that may be picked (``masked`` keeps these and masks every other id); a plain list masks its ids."""
+
+
+class NameTrie:
+    """The names of the offered functions as a tree of their ids (each name encoded alone, as the template writes it between
+    ``<|message_model|>`` and ``<|content_invoke_tool_json|>``).  A node maps an id to the next node; where a name is complete the
+    node also holds ``<|content_invoke_tool_json|>`` (mapped to None), so a name that is the beginning of another name can end there
+    or go on."""
+
+    def __init__(self, fmt: "Ink2Formatter", names: Sequence[str]):
+        self.end = fmt.ids[T_CALL]
+        self.root: Dict[int, Optional[dict]] = {}
+        for name in names:
+            ids = fmt.encode(name)
+            if not ids or any(t in fmt.special for t in ids):
+                raise YasakaniError("the function name %r cannot be written as a call header" % name)
+            node = self.root
+            for t in ids:
+                node = node.setdefault(t, {})
+            node[self.end] = None
+
+    def allowed(self, node: dict) -> Allow:
+        return Allow(node)
 
 
 def architecture_of(folder) -> Optional[str]:
@@ -262,18 +292,18 @@ class Ink2Formatter:
         """The ids the model writes before the arguments of a call of ``name``: <|message_model|>NAME<|content_invoke_tool_json|>."""
         return [self.ids[T_MODEL]] + self.encode(name) + [self.ids[T_CALL]]
 
-    def openers(self) -> List[int]:
-        """Ids that would open a block other than the name of a call after <|message_model|> (masked for tool_choice required)."""
-        i = self.ids
-        return sorted({i[T_THINKING], i[T_TEXT], i[T_END], i[T_STOP], i[T_MODEL]} | {i[n] for n in ANSWER_OPENERS if n != T_CALL})
+    def name_trie(self, tools: Sequence[dict]) -> NameTrie:
+        """The NameTrie of the functions in ``tools`` (OpenAI form, as yasakani.chat.clean_tools gives them)."""
+        return NameTrie(self, [t["function"]["name"] for t in tools])
 
     def tool_prompt(self, messages: Sequence[dict], tools: Sequence[dict], template_kwargs: Optional[dict] = None,
                     call: Optional[str] = None) -> Tuple[List[int], str, List[int]]:
-        """A request with tools -> (prompt ids, start, ids masked at the first position).  ``call``: None (tool_choice auto), the
-        name of the function that must be called, or "" (a call of any of the tools must be made).  ``start``: what the reply's first
-        id continues: "free" (nothing: the model writes its block header; also with thinking off, at effort 0), "head" (after
-        <|message_model|>, tool_choice required among several tools), "reasoning" (inside a
-        thinking block the prompt opened) or "call" (inside the call block of ``call``; its header is in the prompt)."""
+        """A request with tools -> (prompt ids, start, mask of the first position: a list of masked ids, or an ``Allow`` of the
+        only ids allowed).  ``call``: None (tool_choice auto), the name of the function that must be called, or "" (a call of any
+        of the tools must be made).  ``start``: what the reply's first id continues: "free" (nothing: the model writes its block
+        header; also with thinking off, at effort 0), "head" (after <|message_model|>, tool_choice required among several tools:
+        the first id must begin one of the names, ``NameTrie``), "reasoning" (inside a thinking block the prompt opened) or "call"
+        (inside the call block of ``call``; its header is in the prompt)."""
         kw = dict(template_kwargs or {})
         thinking = kw.pop("enable_thinking", None)
         if thinking is False:
@@ -285,7 +315,8 @@ class Ink2Formatter:
         if thinking is False:
             if call:
                 return ids + self.call_header(call), "call", []
-            return ids + [i[T_MODEL]], "head", self.openers()
+            trie = self.name_trie(tools)
+            return ids + [i[T_MODEL]], "head", trie.allowed(trie.root)
         return ids + [i[T_MODEL], i[T_THINKING]], "reasoning", []
 
 
@@ -949,6 +980,7 @@ def bytes_per_position(config: dict) -> int:
 
 # ---- generation loop -----------------------------------------------------------------------------------------------------------------
 END, DROP = "end", "drop"        # on_token results: the reply ends with this token / ends before it (the token is not emitted)
+NAME = "name"                    # Ink2Runner: after the next <|message_model|> the model writes the name of an offered function
 
 
 def sampler_picks(sample: Sampler):
@@ -965,7 +997,12 @@ def sampler_picks(sample: Sampler):
 
 
 def masked(logits: np.ndarray, ids) -> np.ndarray:
-    """The logits with ``ids`` made impossible (a copy; the engine's array is not changed)."""
+    """The logits with ``ids`` made impossible, or with an ``Allow`` every id but those (a copy; the engine's array is not changed)."""
+    if isinstance(ids, Allow):
+        keep = np.fromiter(ids, np.int64)
+        x = np.full(np.shape(logits), -np.inf, np.float32)
+        x[keep] = np.asarray(logits, np.float32)[keep]
+        return x
     x = np.array(logits, np.float32, copy=True)
     x[list(ids)] = -np.inf
     return x
@@ -979,7 +1016,8 @@ def generate(eng: Ink2Engine, first: int, on_token, pick_at=None, ban=None) -> i
     (sampler_picks).  The engine state always matches what was emitted: every emitted token is fed except the last one, as in
     plain stepping, and the rest of a burst after the end is truncated away.  ``ban``: None, or a function that returns the ids that
     may not be picked next (asked after each on_token; while it returns some, the next token comes from a plain step whose logits
-    have them masked, not from a drafting pass).  Returns the passes of the model (the prompt's last pass counts as the one that
+    have them masked, or with an ``Allow`` all other ids masked, not from a drafting pass; inside a drafting pass's accepted ids too:
+    the rest of that pass is dropped).  Returns the passes of the model (the prompt's last pass counts as the one that
     gave ``first``)."""
     k, tok, forced, passes = 0, int(first), [], 1
     while True:
@@ -1004,11 +1042,17 @@ def generate(eng: Ink2Engine, first: int, on_token, pick_at=None, ban=None) -> i
                     eng.truncate(base + 2 + i)
                     forced = list(r)
                     break
+                banned = ban() if ban is not None else None
+                if banned:                                   # a mask from the next id on: the rest of the burst is not used,
+                    eng.truncate(base + 1 + i)               # accepted[i] is emitted and not fed (a plain step from it below)
+                    tok = a
+                    break
             else:
                 tok = nxt
                 continue
-            tok = forced.pop(0)
-            continue
+            if forced:
+                tok = forced.pop(0)
+                continue
         if len(eng.fed) >= eng.max_ctx:
             return passes
         logits = eng.step(tok)
@@ -1089,9 +1133,12 @@ class Ink2Runner:
             if getattr(p, "tool_choice", None) == "required":
                 call = p.tools[0]["function"]["name"] if len(p.tools) == 1 else ""
             ids, start, ban_first = self.fmt.tool_prompt(p.messages, p.tools, p.template_kwargs, call)
-            return ids, start, dict(call=call, ban_first=ban_first)
+            trie = self.fmt.name_trie(p.tools) if call == "" else None
+            return ids, start, dict(call=call, ban_first=ban_first, trie=trie)
         except TemplateError as ex:
             raise RequestError("the chat template does not accept these messages: %s" % ex)
+        except YasakaniError as ex:
+            raise RequestError(str(ex))
 
     def prepare_checked(self, p):
         from .chat import context_length_error
@@ -1123,7 +1170,13 @@ class Ink2Runner:
             stream = OutputStream(self.fmt, tools=True, start=in_answer, call_name=plan["call"] or "")
         stopf = StopFilter(p.stop)
         budget = max(0, int(getattr(p, "thinking_budget", 0) or 0))
-        ban_state = dict(pending=None, now=None)             # ids masked at the pick after a forced <|message_model|>
+        ban_state = dict(pending=None, now=None)             # the mask of the pick after a forced <|message_model|>, and of the next
+        trie = None                                          # tool_choice required among several: the names of the call header
+        name = dict(node=None)                               # the node of the trie while the model writes the name of the call
+        if plan is not None and plan["call"] == "":
+            trie = plan.get("trie") or self.fmt.name_trie(p.tools)
+            if in_answer == "head":                          # thinking off: the prompt ends with <|message_model|>
+                name["node"] = trie.root
 
         def deliver(events):
             for kind, text in events:
@@ -1150,7 +1203,7 @@ class Ink2Runner:
         if plan is not None:                                 # after the thinking: a call (tool_choice required) or any block
             call = plan["call"]
             after_thinking = self.fmt.call_header(call) if call else [ids[T_MODEL]]
-            after_ban = None if call else (self.fmt.openers() if call == "" else [ids[T_THINKING]])
+            after_ban = None if call else (NAME if call == "" else [ids[T_THINKING]])
             force = [ids[T_END]] + after_thinking
 
         def on_token(tok: int):
@@ -1159,8 +1212,18 @@ class Ink2Runner:
             state["n"] += 1
             was = stream.mode
             ban_state["now"] = None
-            if tok == ids[T_MODEL] and ban_state["pending"] is not None:
-                ban_state["now"], ban_state["pending"] = ban_state["pending"], None
+            if name["node"] is not None:                     # inside the name: the next id goes on with one of the names
+                node = name["node"].get(tok) if tok != trie.end else None
+                name["node"] = node
+                if node is not None:
+                    ban_state["now"] = trie.allowed(node)
+            elif tok == ids[T_MODEL] and ban_state["pending"] is not None:
+                if ban_state["pending"] is NAME:
+                    name["node"] = trie.root
+                    ban_state["now"] = trie.allowed(trie.root)
+                else:
+                    ban_state["now"] = ban_state["pending"]
+                ban_state["pending"] = None
             deliver(stream.feed(tok))
             if tok in stops or stopf.hit:
                 state["finish"] = "stop"
@@ -1170,6 +1233,11 @@ class Ink2Runner:
             if plan is not None and plan["call"] is not None and was == "reasoning" and tok == ids[T_END] and not stream.calls:
                 ban_state["pending"] = after_ban             # tool_choice required: the thinking has ended, the call comes next
                 return list(after_thinking)
+            if plan is not None and plan["call"] is not None and was == "reasoning" and tok == ids[T_MODEL] and not stream.calls:
+                if plan["call"]:                             # the thinking ended without <|end_message|>: the header goes on
+                    return list(self.fmt.call_header(plan["call"])[1:])
+                name["node"] = trie.root
+                ban_state["now"] = trie.allowed(trie.root)
             if budget and stream.mode == "reasoning" and stream.answer_at is None and stream.n >= budget:
                 if plan is not None:
                     ban_state["pending"] = after_ban

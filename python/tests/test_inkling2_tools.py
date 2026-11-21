@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inkling-2 Mini path: tool calls (the parsing draws on PR #28 by @audreyt).  The chat template with tools, the reply stream that
-turns call blocks into tool calls, tool_choice (the forced call header and the masked block openers), the thinking budget with
+turns call blocks into tool calls, tool_choice (the forced call header and the names the call header may take), the thinking budget with
 tools, and the OpenAI-compatible server on a stand-in engine (no engine library is needed).
 
 Needs (else the tests skip):
@@ -30,6 +30,12 @@ WEATHER = {"type": "function", "function": {"name": "get_weather", "description"
                                                            "required": ["city"]}}}
 SHELL = {"type": "function", "function": {"name": "run_command", "parameters": {"type": "object",
                                                                               "properties": {"command": {"type": "string"}}}}}
+WRITE = {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object",
+                                                                             "properties": {"path": {"type": "string"}}}}}
+
+
+def fn(name):
+    return {"type": "function", "function": {"name": name, "parameters": {"type": "object", "properties": {}}}}
 
 _FMT = {}
 
@@ -86,6 +92,27 @@ class FakeEngine:
 
     def reset(self):
         self.fed = []
+
+
+class DraftingFakeEngine(FakeEngine):
+    """FakeEngine with drafting passes: a pass feeds the anchor and ``depth`` ids, each the best of its logits (all accepted), and
+    gives the best id after them (as the engine's spec_step: the anchor and the accepted ids are fed, the next id is not)."""
+
+    def __init__(self, *a, depth=4, **k):
+        super().__init__(*a, **k)
+        self.depth, self.drafting, self.draft_mode, self.passes = depth, True, "on", 0
+
+    def can_draft(self):
+        return True
+
+    def spec_step(self, anchor, pick=None):
+        self.passes += 1
+        self.fed.append(int(anchor))
+        out = []
+        for _ in range(self.depth):
+            out.append(int(np.argmax(self._logits())))
+            self.fed.append(out[-1])
+        return out, int(np.argmax(self._logits()))
 
 
 def runner_for(eng, f):
@@ -175,11 +202,10 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(f.tool_prompt(msgs, tools, off, "get_weather"), (base0 + hdr, "call", []))
         self.assertEqual(f.tool_prompt(msgs, tools, {}, "get_weather"), (base + [i[ink.T_MODEL], i[ink.T_THINKING]], "reasoning", []))
         self.assertEqual(f.tool_prompt(msgs, tools, {}, ""), (base + [i[ink.T_MODEL], i[ink.T_THINKING]], "reasoning", []))
-        ids, start, ban = f.tool_prompt(msgs, tools, off, "")
+        ids, start, allow = f.tool_prompt(msgs, tools, off, "")
         self.assertEqual((ids, start), (base0 + [i[ink.T_MODEL]], "head"))
-        self.assertEqual(set(ban), {i[n] for n in (ink.T_THINKING, ink.T_TEXT, ink.T_END, ink.T_STOP, ink.T_MODEL,
-                                                    "<|content_tool_error|>", "<|content_invoke_tool_text|>")})
-        self.assertNotIn(i[ink.T_CALL], ban)
+        self.assertIsInstance(allow, ink.Allow)                              # only the first id of one of the names
+        self.assertEqual(set(allow), {f.encode("get_weather")[0], f.encode("run_command")[0]})
         self.assertIn("Thinking effort level: 0<", f.decode(base0))
 
 
@@ -294,7 +320,7 @@ class RunnerTests(unittest.TestCase):
                          ("Think.", [{"name": "get_weather", "arguments": {"city": "Kobe"}}], "tool_calls"))
 
     def test_required_among_several(self):
-        """tool_choice required with two functions: after the thinking a header, then the block openers are masked once."""
+        """tool_choice required with two functions: after the thinking a header, then only ids that spell one of the names."""
         f = fmt()
         i = f.ids
         head = self.ids('Think.<|end_message|><|message_model|>')
@@ -313,6 +339,131 @@ class RunnerTests(unittest.TestCase):
                                                     tool_choice="required", temperature=0.0, template_kwargs={"enable_thinking": False}))
         self.assertEqual((calls(got), u.finish), ([{"name": "run_command", "arguments": {"command": "dir"}}], "tool_calls"))
         self.assertEqual((joined(got, "reasoning"), joined(got, "content")), ("", ""))
+
+    def junk_header_run(self, tools, want, thinking=True, lead="Think.<|end_message|>"):
+        """tool_choice required, and a "model" that after <|message_model|> would rather write a junk id, then close the block and
+        stop (what the real model did: its answer as the name of a block, so no call) and only second best spells ``want``."""
+        f = fmt()
+        i = f.ids
+        junk = f.encode("\u4e00")[0]
+        head = self.ids(lead + "<|message_model|>") if thinking else []
+        body = f.encode(want) + [i[ink.T_CALL]] + self.ids('{"name":"%s","args":{}}<|end_message|><|content_model_end_sampling|>' % want)
+        g = len(head)
+        n = len(f.encode(want)) + 1                                      # the name and the call opener
+        decoys = {g + k: (junk, i[ink.T_END], i[ink.T_STOP], i[ink.T_TEXT])[min(k, 3)] for k in range(n)}
+        if thinking and lead.endswith("<|end_message|>"):
+            decoys[g - 1] = i[ink.T_TEXT]                                # it would open a text block instead of the header
+        eng = FakeEngine(f, lambda p: head + body, decoys=decoys)
+        kw = {} if thinking else {"template_kwargs": {"enable_thinking": False}}
+        u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "What is 17 times 3?"}],
+                                                    tools=clean_tools(tools), tool_choice="required", temperature=0.0, **kw))
+        return u, got, eng, head + body
+
+    def test_required_among_several_junk_header(self):
+        """The real model's failure (thinking on and off): a junk id after the header and the block closed.  The name is written."""
+        for thinking in (True, False):
+            u, got, eng, reply = self.junk_header_run([WEATHER, WRITE, SHELL], "run_command", thinking)
+            self.assertEqual((calls(got), u.finish), ([{"name": "run_command", "arguments": {}}], "tool_calls"), thinking)
+            self.assertEqual(joined(got, "content"), "", thinking)
+            self.assertEqual(eng.fed[eng.n_prompt:], reply[:-1], thinking)
+            self.assertEqual(joined(got, "reasoning"), "Think." if thinking else "")
+
+    def test_required_names_with_a_shared_beginning(self):
+        """get, get_weather and get_weather_week: a complete name that begins another may end or go on; each is reachable."""
+        f = fmt()
+        i = f.ids
+        tools = [fn("get"), fn("get_weather"), fn("get_weather_week")]
+        trie = f.name_trie(clean_tools(tools))
+        g, us, w, us2, wk = f.encode("get_weather_week")
+        self.assertEqual(us2, us)
+        self.assertEqual((f.encode("get"), f.encode("get_weather")), ([g], [g, us, w]))
+        self.assertEqual(set(trie.root), {g})
+        self.assertEqual(set(trie.root[g]), {us, i[ink.T_CALL]})               # "get" is complete and goes on
+        self.assertEqual(set(trie.root[g][us][w]), {us, i[ink.T_CALL]})        # "get_weather" too
+        self.assertEqual(set(trie.root[g][us][w][us][wk]), {i[ink.T_CALL]})
+        for want in ("get", "get_weather", "get_weather_week"):
+            for thinking in (True, False):
+                u, got, _, _ = self.junk_header_run(tools, want, thinking)
+                self.assertEqual((calls(got), u.finish), ([{"name": want, "arguments": {}}], "tool_calls"), (want, thinking))
+
+    def test_required_with_one_tool_junk_header(self):
+        """One function: the whole header is written for the model (thinking on) or is in the prompt (thinking off)."""
+        for thinking in (True, False):
+            f = fmt()
+            i = f.ids
+            junk = f.encode("\u4e00")[0]
+            head = self.ids("Think.<|end_message|>") if thinking else []
+            body = self.ids('{"name":"get_weather","args":{"city":"Kobe"}}<|end_message|><|content_model_end_sampling|>')
+            hdr = f.call_header("get_weather") if thinking else []
+            reply = head + hdr + body
+            decoys = {len(head) + k: (junk, i[ink.T_END], i[ink.T_STOP])[min(k, 2)] for k in range(len(hdr))}
+            eng = FakeEngine(f, lambda p: reply, decoys=decoys)
+            kw = {} if thinking else {"template_kwargs": {"enable_thinking": False}}
+            u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "Kobe"}], tools=clean_tools([WEATHER]),
+                                                        tool_choice="required", temperature=0.0, **kw))
+            self.assertEqual((calls(got), u.finish), ([{"name": "get_weather", "arguments": {"city": "Kobe"}}], "tool_calls"), thinking)
+            if not thinking:
+                self.assertEqual(eng.prompts[0][-len(f.call_header("get_weather")):], f.call_header("get_weather"))
+
+    def test_required_header_without_end_of_thinking(self):
+        """The thinking ends with <|message_model|> instead of <|end_message|>: the name is still held to the offered ones."""
+        u, got, _, _ = self.junk_header_run([WEATHER, SHELL], "get_weather", True, lead="Think.")
+        self.assertEqual((calls(got), u.finish), ([{"name": "get_weather", "arguments": {}}], "tool_calls"))
+        self.assertEqual(joined(got, "reasoning"), "Think.")
+
+    def test_required_header_inside_a_drafting_pass(self):
+        """The thinking ends with <|message_model|> inside a drafting pass whose next ids are junk: the rest of the pass is dropped
+        and the name is picked under the mask (the engine state still matches what was emitted)."""
+        f = fmt()
+        i = f.ids
+        junk = f.encode("\u4e00")[0]
+        head = self.ids("Think.<|message_model|>")
+        body = f.encode("get_weather") + [i[ink.T_CALL]] + self.ids('{"name":"get_weather","args":{}}<|end_message|>'
+                                                                    '<|content_model_end_sampling|>')
+        g = len(head)
+        decoys = {g: junk, g + 1: i[ink.T_END], g + 2: i[ink.T_STOP], g + 3: i[ink.T_STOP]}
+        eng = DraftingFakeEngine(f, lambda p: head + body, decoys=decoys, depth=6)
+        u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools([WEATHER, SHELL]),
+                                                    tool_choice="required", temperature=0.0))
+        self.assertGreater(eng.passes, 0)
+        self.assertEqual((calls(got), u.finish), ([{"name": "get_weather", "arguments": {}}], "tool_calls"))
+        self.assertEqual(eng.fed[eng.n_prompt:], (head + body)[:-1])
+
+    def test_thinking_budget_with_required_among_several(self):
+        """The budget closes the thinking; the header is written and the name held to the offered ones."""
+        f = fmt()
+        i = f.ids
+        junk = f.encode("\u4e00")[0]
+        think = self.ids("a b c d e f g h")
+        n = 4
+        body = f.encode("run_command") + [i[ink.T_CALL]] + self.ids('{"name":"run_command","args":{}}<|end_message|>'
+                                                                    '<|content_model_end_sampling|>')
+        reply = think[:n] + [i[ink.T_END], i[ink.T_MODEL]] + body
+        decoys = {n: think[n], n + 1: think[n + 1], n + 2: junk, n + 3: i[ink.T_END], n + 4: i[ink.T_STOP]}
+        eng = FakeEngine(f, lambda p: reply, decoys=decoys)
+        u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools([WEATHER, SHELL]),
+                                                    tool_choice="required", temperature=0.0, thinking_budget=n))
+        self.assertEqual((calls(got), u.finish), ([{"name": "run_command", "arguments": {}}], "tool_calls"))
+        self.assertEqual(eng.fed[eng.n_prompt:], reply[:-1])
+
+    def test_after_the_call_the_reply_is_free(self):
+        """required is met by the first call; a second call and a text block after it are the model's (the template allows them)."""
+        f = fmt()
+        reply = self.ids('Think.<|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}'
+                         '<|end_message|><|message_model|>run_command<|content_invoke_tool_json|>{"name":"run_command","args":{}}'
+                         '<|end_message|><|message_model|><|content_text|>ok<|end_message|><|content_model_end_sampling|>')
+        eng = FakeEngine(f, lambda p: reply)
+        u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools([WEATHER, SHELL]),
+                                                    tool_choice="required", temperature=0.0))
+        self.assertEqual([c["name"] for c in calls(got)], ["get_weather", "run_command"])
+        self.assertEqual((joined(got, "content"), u.finish, u.tool_calls), ("ok", "tool_calls", 2))
+        self.assertEqual(eng.fed[eng.n_prompt:], reply[:-1])
+
+    def test_masked_allow(self):
+        x = np.arange(6, dtype=np.float32)
+        self.assertEqual(list(ink.masked(x, ink.Allow({1, 3}))), [-np.inf, 1.0, -np.inf, 3.0, -np.inf, -np.inf])
+        self.assertEqual(list(ink.masked(x, [0, 5])), [-np.inf, 1.0, 2.0, 3.0, 4.0, -np.inf])
+        self.assertEqual(list(x), [0, 1, 2, 3, 4, 5])                      # the engine's array is not changed
 
     def test_thinking_budget_with_tools_leaves_room_for_a_call(self):
         f = fmt()
@@ -335,7 +486,8 @@ class RunnerTests(unittest.TestCase):
         f = fmt()
         reply = self.ids('get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{"city":"Kobe"}}<|end_message|>'
                          '<|content_model_end_sampling|>')
-        eng = FakeEngine(f, lambda p: reply, decoys={0: f.ids[ink.T_TEXT]})
+        junk = f.encode("\u4e00")[0]
+        eng = FakeEngine(f, lambda p: reply, decoys={0: f.ids[ink.T_TEXT], 1: junk, 2: f.ids[ink.T_END], 3: f.ids[ink.T_STOP]})
         eng_logit = eng._logits
 
         def sharp():                                                     # sampling at temperature 1 picks the best token here
