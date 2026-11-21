@@ -6,7 +6,7 @@
 
 An inference engine for running **Qwen3.8-27B** on your own Windows PC with **one NVIDIA RTX GPU** (tested on the RTX 5090). It is GPU kernels, a file format for the
 compressed model, and a runtime, with an OpenAI-compatible server, a terminal chat, a benchmark and a self-check. One person in Japan built it. It is
-not a general-purpose engine: one model, tuned on one card. Since 0.3.0 it also runs a second model, Inkling-2 Mini, as an experimental,
+not a general-purpose engine: one model, tuned on one card. Since 0.3.1 it also runs a second model, Inkling-2 Mini, as an experimental,
 text-only model ([below](#inkling-2-mini)).
 
 ## Which model should I download?
@@ -514,9 +514,9 @@ Known limits:
 
 <a name="inkling-2-mini"></a>
 
-## Inkling-2 Mini (experimental, new in 0.3.0)
+## Inkling-2 Mini (experimental, new in 0.3.1)
 
-Inkling-2 Mini is a language model by Thinking Machines Lab, published on November 20, 2026. Since 0.3.0 YASAKANI runs it as an
+Inkling-2 Mini is a language model by Thinking Machines Lab, published on November 20, 2026. Since 0.3.1 YASAKANI runs it as an
 experimental model, with a second engine library. How to download, convert and start it: [README](../README.md#inkling-2-mini).
 
 ### Which cards can run it, and why 24 GB?
@@ -597,14 +597,20 @@ versions. The model folder made by the converter has a `NOTICE` file that says w
 the converter changed. Read them for your own case; this FAQ is not legal advice. YASAKANI is not made by, and not endorsed by, Thinking
 Machines Lab.
 
+### Does it support tool calls?
+
+Since 0.3.1, in `yasakani serve`: the server accepts `tools` and `tool_choice` (`auto`, `none`, `required` or the name of a function) and
+returns the calls as `tool_calls`, with and without streaming. Terminal chat has no tools. The limits (the context, the thinking budget and
+the GPU memory for dropped replies) are in the [README](../README.md#inkling-2-mini).
+
 ### What is not supported yet?
 
-Images (the original model reads them; we support text only), tools and function calling, several requests at once (`--parallel`),
-`bench --edit`, Linux, and any GPU other than the RTX 5090 (not tested). This model is experimental in 0.3.0.
+Images (the original model reads them; we support text only), several requests at once (`--parallel`), tools in terminal chat,
+`bench --edit`, Linux, and any GPU other than the RTX 5090 (not tested). This model is experimental in 0.3.1.
 
 ## Can I use other models, for example Qwen4?
 
-Not in this release: it runs Qwen3.8-27B and, since 0.3.0, Inkling-2 Mini ([above](#inkling-2-mini)). Each has its own converter in
+Not in this release: it runs Qwen3.8-27B and, since 0.3.1, Inkling-2 Mini ([above](#inkling-2-mini)). Each has its own converter in
 [tools/convert/](../tools/convert/) and its own engine library, so another model needs changes in both.
 Whether other models can be supported is decided one by one, and nothing is promised.
 
@@ -617,7 +623,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7, 0.2.0 or 0.2.1 it offers 0.3.0. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.0.zip`) by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7, 0.2.0 or 0.2.1 it offers 0.3.1. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.1.zip`) by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, before it shows the menu or before it opens the browser page directly (from the second run on,
   `START.cmd` does that without a menu), the quickstart first prints that it asks github.com, then sends one HTTPS request:

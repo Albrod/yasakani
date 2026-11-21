@@ -53,7 +53,7 @@ SOFTWARE.
 
 ### NVIDIA CUDA Runtime (inside `yskn.dll` and `yskn_inkling2.dll`)
 
-* The prebuilt `yskn.dll` and, since 0.3.0, `yskn_inkling2.dll` (the engine for Inkling-2 Mini) each contain the NVIDIA CUDA Runtime library
+* The prebuilt `yskn.dll` and, since 0.3.1, `yskn_inkling2.dll` (the engine for Inkling-2 Mini) each contain the NVIDIA CUDA Runtime library
   (`cudart`), linked statically (`cudart_static.lib`; the release is built
   with CUDA Toolkit 13.2: nvcc 13.2.78, CUDA Runtime 13.2.75). NVIDIA's CUDA Toolkit End User License Agreement lets an application distribute the files that its
   Attachment A lists; for the CUDA Runtime on Windows the list is `cudart.dll`, `cudart_static.lib` and `cudadevrt.lib`. The runtime inside

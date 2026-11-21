@@ -15,8 +15,15 @@ Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building 
 | Build tools | CMake (3.24 or newer is required) and Ninja |
 | Target | one DLL with machine code for compute capability 8.6 (`sm_86`, RTX 30 series), 8.9 (`sm_89`, RTX 40 series) and 12.0 (`sm_120`, RTX 50 series), plus PTX for `compute_120`. Tested on the RTX 5090 only |
 
-The `yskn.dll` on the release page is the build of 0.2.0 (SHA-256 `c995bb24c297ae823dfc92eaaf3357401083a9922abe2fdfeb56509c323fd052`,
-64,498,688 bytes). It was made in two steps. The first step (SHA-256 `3e06622b…39e1`, 63,142,400 bytes) is the source of 0.1.7 plus the
+The `yskn.dll` on the release page is the build of 0.3.1 (SHA-256 `41a6bbd9bc1f865c79fb77274b84c26f7d167acb3a58097e7e5933bc723d3f5c`,
+64,692,736 bytes): the source of 0.2.0 plus two options that are off by default, `--suppress-tokens`
+([#26](https://github.com/yasakani-dev/yasakani/pull/26)) and `--yarn2` ([#27](https://github.com/yasakani-dev/yasakani/pull/27)), in
+`include/yskn_abi.h`, `src/args.hpp`, `src/c_api.cpp`, `src/engine35.cpp`, `src/engine35.hpp`, `src/misc_kernels.cu`, `src/pm_test.cu`,
+`src/q35.hpp` and `src/q35_kernels.cu`. These files were compiled again in a copy of the build folder of 0.2.0 with the tool versions of
+the table, and linked. The objects of `src/q35_atxpk.cu` and `src/q35_atxpk_ms.cu`, whose source did not change, are those of the 0.2.0
+build: nvcc 13.2 gives some kernels of these files different machine code from one compilation to the next, so we kept the tested ones.
+The `yskn.dll` of 0.2.0 (SHA-256 `c995bb24c297ae823dfc92eaaf3357401083a9922abe2fdfeb56509c323fd052`, 64,498,688 bytes) was made in two
+steps. The first step (SHA-256 `3e06622b…39e1`, 63,142,400 bytes) is the source of 0.1.7 plus the
 new prompt reading and the edit copy ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md),
 5.5 and chapter 8): GPU code for long passes (among others `src/q35_g6.cu`, `src/q35_g6_whole.cuh`, `src/kvq_fast.cuh`,
 `src/kvq_vit2.cuh`, `src/q35_atxpk.cu`, `src/q35_atxpk4.cuh`, `src/q35_kernels.cu`, `src/misc_kernels.cu`) and host code
@@ -85,13 +92,13 @@ reads prompts and runs passes of 64 rows as 0.1.7 did. `YSKN_EDIT_COPY=1` turns 
 set them yourself: the Python package sets both from `--prefill` (or `YASAKANI_PREFILL`) and `--edit-copy` (or `YASAKANI_EDIT_COPY`), also
 for a library you built and pass with `--dll` ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md), 5.5 and chapter 8).
 
-## The Inkling-2 Mini library (`yskn_inkling2.dll`, since 0.3.0)
+## The Inkling-2 Mini library (`yskn_inkling2.dll`, since 0.3.1)
 
-日本語：Inkling-2 Mini 用のエンジンは別の DLL（`yskn_inkling2.dll`）で、エンジンの zip の `yskn.dll` の隣に入っています。ソースは `src/inkling2/` です。「x64 Native Tools Command Prompt for VS 2022」で `src\inkling2\build.cmd cuda` を実行すると `build\inkling2\yskn_inkling2.dll` ができます。Qwen3.8 用の `yskn.dll` は変わりません。
+日本語：Inkling-2 Mini 用のエンジンは別の DLL（`yskn_inkling2.dll`）で、エンジンの zip の `yskn.dll` の隣に入っています。ソースは `src/inkling2/` です。「x64 Native Tools Command Prompt for VS 2022」で `src\inkling2\build.cmd cuda` を実行すると `build\inkling2\yskn_inkling2.dll` ができます。Qwen3.8 用の `yskn.dll` とはコードを共有しません。
 
-The engine zip of 0.3.0 holds a second library next to `yskn.dll`: `yskn_inkling2.dll`, the engine for Inkling-2 Mini (text only, one
-request at a time; experimental in 0.3.0). It has its own C interface (`src/inkling2/ink2_api.h`) and shares no code with `yskn.dll`, which
-stays the file of 0.2.0 (SHA-256 `c995bb24c297ae823dfc92eaaf3357401083a9922abe2fdfeb56509c323fd052`). The Python package loads it only for
+The engine zip of 0.3.1 holds a second library next to `yskn.dll`: `yskn_inkling2.dll`, the engine for Inkling-2 Mini (text only, one
+request at a time; experimental in 0.3.1). It has its own C interface (`src/inkling2/ink2_api.h`) and shares no code with `yskn.dll`.
+The Python package loads it only for
 a model folder whose `yasakani.json` says `"architecture": "inkling2"`, and finds it in this order: `--dll` when it names this library or a
 folder that holds it, the environment variable `YASAKANI_INK2_DLL`, then `yskn_inkling2.dll` next to `yskn.dll` (`--dll`, `YASAKANI_DLL` or
 the `bin` folder next to the package). The launcher passes the `yskn.dll` of its engine folder, so it needs no setting.

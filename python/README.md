@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.3.0`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)). 0.3.0 adds Inkling-2 Mini as an experimental, text-only model on a second engine library (see [Inkling-2 Mini](#inkling-2-mini-experimental)).
+Status: version `0.3.1`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)). 0.3.1 adds Inkling-2 Mini as an experimental, text-only model on a second engine library (see [Inkling-2 Mini](#inkling-2-mini-experimental)).
 
 ## What you need
 
@@ -408,7 +408,7 @@ platform path separator) to mask output token IDs (`-inf` logits before greedy a
   tokens that fits the free GPU memory (a multiple of 16,384, accounting for the larger 0.2.0 prefill buffers on cards with 30,000 MiB
   or more). Passing `--max-ctx` sets the length yourself (at most 524,288) and leaves out the draft output head (`bdraft2_k8.shead`)
   when it does not fit beside that context. With the shipped `bdraft2` drafter, per-token GPU memory stays 22,400 bytes/token
-  (~10.9 GiB at 524,288 tokens); the separate built-in MTP draft path (`yskn_load_draft`, not used by this package) also allocates a
+  (~10.9 GiB at 524,288 tokens); the engine's separate built-in draft path (`yskn_load_draft`, not used by this package) also allocates a
   `max_ctx × 5,120 × 2` byte hidden-state history (~5.4 GB at 524,288).
 * `yasakani selfcheck` does not accept `--yarn2`, because `selfcheck.json` references are made with the native rotary table.
 * Qwen3.8 model folders only: with an Inkling-2 model folder, `--yarn2` is refused.
@@ -604,7 +604,7 @@ the command passed 12 of 12 times, but if a case fails, run the command once mor
 
 ## Inkling-2 Mini (experimental)
 
-New in 0.3.0. The package also runs [Inkling-2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) by Thinking Machines Lab
+New in 0.3.1. The package also runs [Inkling-2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) by Thinking Machines Lab
 (Apache-2.0, with the [Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/) named on its model card).
 Text only, one request at a time, tested on the RTX 5090 under Windows 11 only. It runs on a second engine library, not on `yskn.dll`;
 the Qwen3.8-27B commands, settings and numbers in the rest of this document do not change.
@@ -653,10 +653,22 @@ itself or a folder that holds it, and `YASAKANI_INK2_DLL` names it directly. Its
 | `yasakani serve --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | the OpenAI-compatible server, model id `inkling-2-mini`; `reasoning_effort` and `chat_template_kwargs` `{"enable_thinking": false}` as for the Qwen models |
 | `yasakani bench --model-dir D:\models\inkling2-mini --dll D:\yasakani\yskn.dll` | generation speed: greedy, thinking off, 256 tokens per test (`--n` changes it, `--think` turns thinking on), `--json` |
 
-**The drafter.** `chat`, `serve`, `bench` and `selfcheck` take `--draft auto|on|off` (default `auto`, or `YASAKANI_DRAFT`) and `--draft-depth N` (1 to 7, or `YASAKANI_DRAFT_DEPTH`; default: the engine's). `auto` lets the engine use the drafter only while it makes generation faster; `on` always drafts; `off` does not load it. The output does not change: greedy gives the same tokens as without the drafter, and sampling picks each token with the same probabilities (one random number per emitted token, so a seed gives the same tokens as long as the engine's logits are the same). The start-up lines say whether the drafter was loaded and the mode; `info` shows the `drafter` entry, whether the binding has the drafter calls and the capabilities of the engine library (packed dense matrices, drafter). The package needs a library of interface version 3 (the one of 0.3.0); an older `yskn_inkling2.dll` stops with a message. `chat` and `bench` print the tokens per pass, and `serve` adds `draft_mode`, `draft_passes`, `tokens_per_pass`, `draft_n` and `draft_n_accepted` to `timings`. `selfcheck` gives the same tokens with `--draft on` and `--draft off`.
+**The drafter.** `chat`, `serve`, `bench` and `selfcheck` take `--draft auto|on|off` (default `auto`, or `YASAKANI_DRAFT`) and `--draft-depth N` (1 to 7, or `YASAKANI_DRAFT_DEPTH`; default: the engine's). `auto` lets the engine use the drafter only while it makes generation faster; `on` always drafts; `off` does not load it. The output does not change: greedy gives the same tokens as without the drafter, and sampling picks each token with the same probabilities (one random number per emitted token, so a seed gives the same tokens as long as the engine's logits are the same). The start-up lines say whether the drafter was loaded and the mode; `info` shows the `drafter` entry, whether the binding has the drafter calls and the capabilities of the engine library (packed dense matrices, drafter). The package needs a library of interface version 3 (the one of 0.3.1); an older `yskn_inkling2.dll` stops with a message. `chat` and `bench` print the tokens per pass, and `serve` adds `draft_mode`, `draft_passes`, `tokens_per_pass`, `draft_n` and `draft_n_accepted` to `timings`. `selfcheck` gives the same tokens with `--draft on` and `--draft off`.
 
 `--max-ctx`, `--device` and `--seed` work as for the Qwen models. These stop with a message instead: `--parallel` and `--concurrency`
-above 1, `bench --edit`, image input (`--mmproj`) and `selfcheck --write`. Requests with `tools` are refused by the server.
+above 1, `bench --edit`, image input (`--mmproj`) and `selfcheck --write`.
+
+**Tool calls** (new in 0.3.1). `serve` accepts `tools` and `tool_choice` (`auto`, `none`, `required` or the name of a function) and returns
+`tool_calls` (finish reason `tool_calls`), with and without streaming; `chat` has no tools. The model writes each call as a block of its
+own format (`<|content_invoke_tool_json|>`), which the server turns into a tool call; a block it cannot read comes back as text. Assistant
+messages with `tool_calls` and `tool` messages with their `tool_call_id` go back into the chat template. `tool_choice` with one function
+writes the start of that call after the thinking (with thinking off, at the end of the prompt); `required` with several tools blocks the
+other kinds of block at the start of the reply (only there). With tools and thinking off the reply starts at thinking effort 0, so the model
+writes a short thinking, returned in `reasoning_content`. `thinking_budget` (a request field, or `YASAKANI_THINKING_BUDGET`) cuts a long
+thinking so that the call fits in `max_tokens`. The engine is loaded with 512 rollback positions (`YASAKANI_INK2_ROLLBACK`, 0 = the
+engine's default of 64) for all commands, so that dropping the last reply, as clients do that do not send its thinking back, does not read
+the conversation again; with the `--scheme quality` folder and context 32,768 the engine allocated 20.0 instead of 19.4 GB, and the GPU had
+0.8 GB more in use. A conversation that no longer fits the context (32,768 tokens by default) gets an error (HTTP 400).
 
 **Thinking off.** The chat template takes a thinking effort (none, minimal, low, medium, high, xhigh, max or a number from 0 to 0.99;
 default 0.9). The model card says that even the lowest effort does not fully turn the thinking off, so `enable_thinking: false` (and
