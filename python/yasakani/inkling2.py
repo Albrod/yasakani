@@ -73,7 +73,7 @@ ROLLBACK_ENV = "YASAKANI_INK2_ROLLBACK"
 # request of a chat goes on from the ids already read only where it starts with them: a client that does not send the thinking of
 # the last reply back (most OpenAI clients) or that writes a tool call in another form drops the whole last reply, which the engine
 # can do without a new reading of the conversation up to this many positions.  Costs GPU memory for the rings of the sliding layers.
-DEFAULT_ROLLBACK = 1024
+DEFAULT_ROLLBACK = 512
 MAX_DRAFT_DEPTH = 7
 DRAFTER_FORMATS = ("hf-safetensors",)
 DRAFT_CALLS = ("draft_load", "draft_mode", "spec_step", "spec_stats")   # what the engine wrapper needs for drafting
