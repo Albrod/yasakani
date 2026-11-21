@@ -111,6 +111,7 @@ class EngineInk2 {
   void forward_tokens(const int32_t* ids, int T, int pos0, bool need_logits);
   int32_t sample_logits(int64_t step_pos);
   void* alloc_gpu(size_t bytes);
+  void free_all() noexcept;   // what the destructor frees (also when the constructor fails)
 
   std::string dir_;
   Ink2Config cfg_;

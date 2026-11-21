@@ -99,6 +99,61 @@ Ink2Config parse_ink2_config(const std::string& dir) {
   return c;
 }
 
+// The kernels and buffers of this engine are written for one model shape: Inkling-2 Mini (fixed-size arrays in ink2_kernels.cu and
+// engine_ink2.hpp, the visit schedule, the expert formats). A config.json of another shape is refused before anything is loaded.
+void check_mini_shape(const Ink2Config& c, const stjson::Val& t, const std::string& dir) {
+  const Ink2Config m;   // the defaults are the values of Inkling-2 Mini
+  std::string bad;
+  auto eq = [&](const char* key, int got, int want) {
+    if (got != want) bad += std::string(bad.empty() ? "" : ", ") + key + " " + std::to_string(got) + " (needs " + std::to_string(want) + ")";
+  };
+  eq("hidden_size", c.hidden, m.hidden);
+  eq("num_hidden_layers", c.num_layers, m.num_layers);
+  eq("vocab_size", c.vocab_padded, m.vocab_padded);
+  eq("unpadded_vocab_size", c.vocab, m.vocab);
+  eq("num_attention_heads", c.hq, m.hq);
+  eq("num_key_value_heads", c.hkv, m.hkv);
+  eq("head_dim", c.head_dim, m.head_dim);
+  eq("d_rel", c.d_rel, m.d_rel);
+  eq("rel_extent", c.rel_extent, m.rel_extent);
+  eq("sliding_window_size", c.swa, m.swa);
+  eq("n_layers_per_attn_res_block", c.block_sz, m.block_sz);
+  eq("n_routed_experts", c.n_experts, m.n_experts);
+  eq("num_experts_per_tok", c.top_k, m.top_k);
+  eq("intermediate_size", c.moe_I, m.moe_I);
+  eq("loop_config.core_start", c.core_start, m.core_start);
+  eq("loop_config.core_end", c.core_end, m.core_end);
+  eq("loop_config.num_passes", c.num_passes, m.num_passes);
+  eq("loop_config.gate_rank", c.gate_rank, m.gate_rank);
+  auto opt_eq = [&](const stjson::Val& v, const char* key, int want) {
+    if (v.kind == stjson::Val::Num) eq(key, int(v.i), want);
+    else if (v.kind == stjson::Val::Bool) eq(key, v.b ? 1 : 0, want);
+  };
+  opt_eq(t.at("sconv_kernel_size"), "sconv_kernel_size", 4);
+  opt_eq(t.at("n_shared_experts"), "n_shared_experts", 0);
+  opt_eq(t.at("loop_config").at("is_varloop"), "loop_config.is_varloop", 0);
+  if (bad.empty()) {   // the full-attention layers of Mini: 5, 11, 17, 23 (one per block of 6); every other layer is local
+    for (int i = 0; i < c.num_layers; ++i)
+      if (c.is_local[size_t(i)] != (i % 6 != 5)) { bad = "local_layer_ids (needs every layer but 5, 11, 17 and 23)"; break; }
+  }
+  if (!bad.empty())
+    throw std::runtime_error("config.json in " + dir + ": this Inkling-2 engine runs the shape of Inkling-2 Mini only; " + bad);
+}
+
+// The dtype and shape the engine needs for one tensor (it sizes its buffers and kernels by the model shape, not by the file).
+void expect_tensor(const StTensorInfo& t, const std::string& name, const char* dtype, std::initializer_list<int64_t> shape) {
+  if (t.dtype == dtype && t.shape.size() == shape.size() && std::equal(t.shape.begin(), t.shape.end(), shape.begin()) &&
+      t.nbytes == t.numel() * st_dtype_bytes(t.dtype))
+    return;
+  auto dims = [](const std::vector<int64_t>& v) {
+    std::string s = "[";
+    for (size_t i = 0; i < v.size(); ++i) s += (i ? ", " : "") + std::to_string(v[i]);
+    return s + "]";
+  };
+  throw std::runtime_error("Inkling-2 weights: " + name + " is " + t.dtype + " " + dims(t.shape) + " (" + std::to_string(t.nbytes) +
+                           " bytes); this engine needs " + dtype + " " + dims(std::vector<int64_t>(shape)) + " (Inkling-2 Mini)");
+}
+
 }  // namespace
 
 std::string EngineInk2::resolve_dir(const std::string& path) {
@@ -134,9 +189,14 @@ void* EngineInk2::alloc_gpu(size_t bytes) {
 }
 
 EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
+  try {
   dir_ = resolve_dir(path);
   if (!is_inkling2_dir(dir_)) throw std::runtime_error(path + " is not an Inkling-2 checkpoint");
   cfg_ = parse_ink2_config(dir_);
+  {
+    const stjson::Val root = stjson::parse(slurp_file(dir_ + "/config.json"));
+    check_mini_shape(cfg_, root.has("text_config") ? root.at("text_config") : root, dir_);
+  }
   max_ctx_ = max_ctx > 0 ? max_ctx : 32768;
   ring_rows_ = (cfg_.swa + kPrefillChunk + 15) / 16 * 16;
 
@@ -146,8 +206,11 @@ EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
   SafetensorsReader reader;
   reader.open_dir(dir_, "model.llm.");
 
-  auto upload_tensor = [&](const std::string& name) -> Ink2Tensor {
+  const int64_t H = cfg_.hidden, QD = int64_t(cfg_.hq) * cfg_.head_dim, KVD = int64_t(cfg_.hkv) * cfg_.head_dim;
+  const int64_t NE = cfg_.n_experts, I2 = 2 * int64_t(cfg_.moe_I);
+  auto upload_tensor = [&](const std::string& name, const char* dtype, std::initializer_list<int64_t> shape) -> Ink2Tensor {
     const StTensorInfo& info = reader.get(name);
+    expect_tensor(info, name, dtype, shape);
     Ink2Tensor t;
     t.f32 = (info.dtype == "F32");
     if (!t.f32 && info.dtype != "BF16") throw std::runtime_error("unexpected dtype " + info.dtype + " for " + name);
@@ -166,8 +229,9 @@ EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
     return t;
   };
 
-  auto upload_raw = [&](const std::string& name) -> uint8_t* {
+  auto upload_raw = [&](const std::string& name, const char* dtype, std::initializer_list<int64_t> shape) -> uint8_t* {
     const StTensorInfo& info = reader.get(name);
+    expect_tensor(info, name, dtype, shape);
     uint8_t* p = static_cast<uint8_t*>(alloc_gpu(info.nbytes));
     reader.upload_gpu(info, p, stream_);
     return p;
@@ -188,31 +252,37 @@ EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
     return out;
   };
 
-  embed_ = upload_tensor("model.llm.embed.weight");
-  embed_norm_ = upload_tensor("model.llm.embed_norm.weight");
-  final_norm_ = upload_tensor("model.llm.norm.weight");
-  unembed_ = upload_tensor("model.llm.unembed.weight");
+  embed_ = upload_tensor("model.llm.embed.weight", "BF16", {cfg_.vocab_padded, H});
+  embed_norm_ = upload_tensor("model.llm.embed_norm.weight", "BF16", {H});
+  final_norm_ = upload_tensor("model.llm.norm.weight", "BF16", {H});
+  unembed_ = upload_tensor("model.llm.unembed.weight", "BF16", {cfg_.vocab_padded, H});
 
   attn_queries_.resize(size_t(cfg_.num_layers - 1));
-  for (int i = 0; i < cfg_.num_layers - 1; ++i)
-    attn_queries_[size_t(i)] = upload_tensor("model.llm.attn_res.attn_queries." + std::to_string(i));
+  for (int i = 0; i < cfg_.num_layers - 1; ++i) {   // the queries before a full-attention layer read 3 inputs (q, k, v)
+    const std::string n = "model.llm.attn_res.attn_queries." + std::to_string(i);
+    attn_queries_[size_t(i)] = cfg_.is_local[size_t(i + 1)] ? upload_tensor(n, "F32", {H}) : upload_tensor(n, "F32", {3, H});
+  }
   mlp_queries_.resize(size_t(cfg_.num_layers));
   for (int i = 0; i < cfg_.num_layers; ++i)
-    mlp_queries_[size_t(i)] = upload_tensor("model.llm.attn_res.mlp_queries." + std::to_string(i));
-  output_query_ = upload_tensor("model.llm.attn_res.output_query");
+    mlp_queries_[size_t(i)] = upload_tensor("model.llm.attn_res.mlp_queries." + std::to_string(i), "F32", {H});
+  output_query_ = upload_tensor("model.llm.attn_res.output_query", "F32", {H});
 
   // Pre-interleave [ncore, 4, H] middle cycle cross-pass queries: (attn, k, v, mlp)
   const int ncore = cfg_.core_end - cfg_.core_start;
-  const std::vector<float> qam = read_f32_vec(reader.get("model.llm.middle_cycle_cross_pass_queries"));
-  const std::vector<float> qkv = read_f32_vec(reader.get("model.llm.middle_cycle_cross_pass_kv_queries"));
-  const size_t H = size_t(cfg_.hidden);
-  std::vector<float> mq(size_t(ncore) * 4 * H);
+  const StTensorInfo& qam_info = reader.get("model.llm.middle_cycle_cross_pass_queries");
+  const StTensorInfo& qkv_info = reader.get("model.llm.middle_cycle_cross_pass_kv_queries");
+  expect_tensor(qam_info, "model.llm.middle_cycle_cross_pass_queries", "F32", {2 * int64_t(ncore), H});
+  expect_tensor(qkv_info, "model.llm.middle_cycle_cross_pass_kv_queries", "F32", {2 * int64_t(ncore), H});
+  const std::vector<float> qam = read_f32_vec(qam_info);
+  const std::vector<float> qkv = read_f32_vec(qkv_info);
+  std::vector<float> mq(size_t(ncore) * 4 * size_t(H));
   for (int c = 0; c < ncore; ++c) {
-    for (size_t j = 0; j < H; ++j) {
-      mq[(size_t(c) * 4 + 0) * H + j] = qam[(size_t(c) * 2 + 0) * H + j];
-      mq[(size_t(c) * 4 + 1) * H + j] = qkv[(size_t(c) * 2 + 0) * H + j];
-      mq[(size_t(c) * 4 + 2) * H + j] = qkv[(size_t(c) * 2 + 1) * H + j];
-      mq[(size_t(c) * 4 + 3) * H + j] = qam[(size_t(c) * 2 + 1) * H + j];
+    for (size_t j = 0; j < size_t(H); ++j) {
+      const size_t h = size_t(H);
+      mq[(size_t(c) * 4 + 0) * h + j] = qam[(size_t(c) * 2 + 0) * h + j];
+      mq[(size_t(c) * 4 + 1) * h + j] = qkv[(size_t(c) * 2 + 0) * h + j];
+      mq[(size_t(c) * 4 + 2) * h + j] = qkv[(size_t(c) * 2 + 1) * h + j];
+      mq[(size_t(c) * 4 + 3) * h + j] = qam[(size_t(c) * 2 + 1) * h + j];
     }
   }
   d_msg_queries_ = static_cast<float*>(alloc_gpu(mq.size() * sizeof(float)));
@@ -221,8 +291,12 @@ EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
   cuda_ok(cudaStreamSynchronize(stream_), "sync msg_queries");
 
   auto make_outer = [&](const std::string& base) -> float* {
-    const std::vector<float> amax = read_f32_vec(reader.get(base + "_amax"));
-    const std::vector<float> denom = read_f32_vec(reader.get(base + "_outer_scale_denominator"));
+    const StTensorInfo& amax_info = reader.get(base + "_amax");
+    const StTensorInfo& denom_info = reader.get(base + "_outer_scale_denominator");
+    expect_tensor(amax_info, base + "_amax", "F32", {NE});
+    expect_tensor(denom_info, base + "_outer_scale_denominator", "F32", {1});
+    const std::vector<float> amax = read_f32_vec(amax_info);
+    const std::vector<float> denom = read_f32_vec(denom_info);
     std::vector<float> out(size_t(cfg_.n_experts));
     for (int e = 0; e < cfg_.n_experts; ++e) out[size_t(e)] = amax[size_t(e)] / denom[0];
     float* dp = static_cast<float*>(alloc_gpu(out.size() * sizeof(float)));
@@ -238,55 +312,68 @@ EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
     const std::string p = "model.llm.layers." + std::to_string(i) + ".";
     L.is_swa = cfg_.is_local[size_t(i)];
     L.has_ctrl = (i >= cfg_.core_start && i < cfg_.core_end);
-    L.wq_du = upload_tensor(p + "attn.wq_du.weight");
-    L.wk_dv = upload_tensor(p + "attn.wk_dv.weight");
-    L.wv_dv = upload_tensor(p + "attn.wv_dv.weight");
-    L.wr_du = upload_tensor(p + "attn.wr_du.weight");
-    L.attn_sink_proj = upload_tensor(p + "attn.attn_sink_proj.weight");
-    L.gate_attn = upload_tensor(p + "attn.gate_attn.weight");
-    L.wo_ud = upload_tensor(p + "attn.wo_ud.weight");
-    L.q_scale = upload_tensor(p + "attn.q_l2_clip.scale");
-    L.rel_scale = upload_tensor(p + "attn.rel_l2_clip.scale");
-    L.rel_proj = upload_tensor(p + "attn.rel_logits_proj.proj");
-    L.mlp_norm = upload_tensor(p + "mlp_norm.weight");
-    L.attn_sconv = upload_tensor(p + "attn_sconv.weight");
-    L.mlp_sconv = upload_tensor(p + "mlp_sconv.weight");
+    const int64_t HQ = cfg_.hq, DREL = cfg_.d_rel, GR = cfg_.gate_rank;
+    L.wq_du = upload_tensor(p + "attn.wq_du.weight", "BF16", {QD, H});
+    L.wk_dv = upload_tensor(p + "attn.wk_dv.weight", "BF16", {KVD, H});
+    L.wv_dv = upload_tensor(p + "attn.wv_dv.weight", "BF16", {KVD, H});
+    L.wr_du = upload_tensor(p + "attn.wr_du.weight", "BF16", {HQ * DREL, H});
+    L.attn_sink_proj = upload_tensor(p + "attn.attn_sink_proj.weight", "BF16", {HQ, H});
+    L.gate_attn = upload_tensor(p + "attn.gate_attn.weight", "BF16", {QD, H});
+    L.wo_ud = upload_tensor(p + "attn.wo_ud.weight", "BF16", {H, QD});
+    L.q_scale = upload_tensor(p + "attn.q_l2_clip.scale", "BF16", {HQ, cfg_.head_dim});
+    L.rel_scale = upload_tensor(p + "attn.rel_l2_clip.scale", "BF16", {HQ, DREL});
+    L.rel_proj = upload_tensor(p + "attn.rel_logits_proj.proj", "BF16", {DREL, cfg_.rel_extent});
+    L.mlp_norm = upload_tensor(p + "mlp_norm.weight", "BF16", {H});
+    L.attn_sconv = upload_tensor(p + "attn_sconv.weight", "BF16", {H, 1, 4});
+    L.mlp_sconv = upload_tensor(p + "mlp_sconv.weight", "BF16", {H, 1, 4});
     if (L.is_swa) {
-      L.attn_norm = upload_tensor(p + "attn_norm.weight");
-      L.k_sconv = upload_tensor(p + "attn.k_sconv.weight");
-      L.v_sconv = upload_tensor(p + "attn.v_sconv.weight");
+      L.attn_norm = upload_tensor(p + "attn_norm.weight", "BF16", {H});
+      L.k_sconv = upload_tensor(p + "attn.k_sconv.weight", "BF16", {KVD, 1, 4});
+      L.v_sconv = upload_tensor(p + "attn.v_sconv.weight", "BF16", {KVD, 1, 4});
     } else {
-      L.q_norm = upload_tensor(p + "q_input_norm.weight");
-      L.k_norm = upload_tensor(p + "k_input_norm.weight");
-      L.v_norm = upload_tensor(p + "v_input_norm.weight");
-      L.k_static = upload_tensor(p + "attn.k_sconv.static_w");
-      L.k_proj = upload_tensor(p + "attn.k_sconv.weight_proj");
-      L.v_static = upload_tensor(p + "attn.v_sconv.static_w");
-      L.v_proj = upload_tensor(p + "attn.v_sconv.weight_proj");
+      L.q_norm = upload_tensor(p + "q_input_norm.weight", "BF16", {H});
+      L.k_norm = upload_tensor(p + "k_input_norm.weight", "BF16", {H});
+      L.v_norm = upload_tensor(p + "v_input_norm.weight", "BF16", {H});
+      L.k_static = upload_tensor(p + "attn.k_sconv.static_w", "BF16", {4, KVD});
+      L.k_proj = upload_tensor(p + "attn.k_sconv.weight_proj", "BF16", {int64_t(cfg_.hkv) * 4, H});
+      L.v_static = upload_tensor(p + "attn.v_sconv.static_w", "BF16", {4, KVD});
+      L.v_proj = upload_tensor(p + "attn.v_sconv.weight_proj", "BF16", {int64_t(cfg_.hkv) * 4, H});
     }
     if (L.has_ctrl) {
       auto load_ctrl = [&](const char* name) -> Ink2Ctrl {
         const std::string c = p + "controllers." + name + ".";
-        return Ink2Ctrl{upload_tensor(c + "down_weight"), upload_tensor(c + "forget_weight"),
-                        upload_tensor(c + "gain_weight")};
+        Ink2Ctrl r;
+        r.down = upload_tensor(c + "down_weight", "BF16", {GR, 2 * H});
+        r.forget = upload_tensor(c + "forget_weight", "BF16", {H, GR});
+        r.gain = upload_tensor(c + "gain_weight", "BF16", {H, GR});
+        return r;
       };
       L.ctrl_attn = load_ctrl("attn");
       L.ctrl_k = load_ctrl("k");
       L.ctrl_v = load_ctrl("v");
       L.ctrl_mlp = load_ctrl("mlp");
     }
-    L.router_w = upload_tensor(p + "mlp.gate.weight");
-    L.router_bias = upload_tensor(p + "mlp.gate.bias");
+    L.router_w = upload_tensor(p + "mlp.gate.weight", "BF16", {NE, H});
+    L.router_bias = upload_tensor(p + "mlp.gate.bias", "F32", {NE});
 
     const std::string m = p + "mlp.experts.";
     const StTensorInfo& w13_info = reader.get(m + "w13_weight");
     L.is_mxfp8 = (w13_info.dtype == "F8_E4M3");
     if (!L.is_mxfp8 && w13_info.dtype != "U8")
       throw std::runtime_error("unexpected expert dtype " + w13_info.dtype);
-    L.w13 = upload_raw(m + "w13_weight");
-    L.w13_sc = upload_raw(m + "w13_weight_scale");
-    L.w2 = upload_raw(m + "w2_weight");
-    L.w2_sc = upload_raw(m + "w2_weight_scale");
+    // NVFP4 (two values per byte, an E4M3 scale per 16) or MXFP8 (one E4M3 value per byte, an E8M0 scale byte per 32)
+    const int64_t I = cfg_.moe_I;
+    if (L.is_mxfp8) {
+      L.w13 = upload_raw(m + "w13_weight", "F8_E4M3", {NE, I2, H});
+      L.w13_sc = upload_raw(m + "w13_weight_scale", "U8", {NE, I2, H / 32});
+      L.w2 = upload_raw(m + "w2_weight", "F8_E4M3", {NE, H, I});
+      L.w2_sc = upload_raw(m + "w2_weight_scale", "U8", {NE, H, I / 32});
+    } else {
+      L.w13 = upload_raw(m + "w13_weight", "U8", {NE, I2, H / 2});
+      L.w13_sc = upload_raw(m + "w13_weight_scale", "F8_E4M3", {NE, I2, H / 16});
+      L.w2 = upload_raw(m + "w2_weight", "U8", {NE, H, I / 2});
+      L.w2_sc = upload_raw(m + "w2_weight_scale", "F8_E4M3", {NE, H, I / 16});
+    }
     if (!L.is_mxfp8) {
       L.w13_outer = make_outer(m + "w13_weight");
       L.w2_outer = make_outer(m + "w2_weight");
@@ -310,8 +397,6 @@ EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
 
   // Allocate activations sized for kPrefillChunk rows
   const size_t T = size_t(kPrefillChunk);
-  const size_t QD = size_t(cfg_.hq) * size_t(cfg_.head_dim);
-  const size_t KVD = size_t(cfg_.hkv) * size_t(cfg_.head_dim);
   const size_t V = size_t(cfg_.vocab);
 
   d_tokens_ = static_cast<int32_t*>(alloc_gpu(T * sizeof(int32_t)));
@@ -364,16 +449,27 @@ EngineInk2::EngineInk2(const std::string& path, int max_ctx, int /*flags*/) {
   cuda_ok(cudaMallocHost(&h_tok_, sizeof(int32_t)), "cudaMallocHost tok");
   cuda_ok(cudaMemsetAsync(d_suppress_, 0, V, stream_), "clear suppress");
   reset();
+  } catch (...) {   // a refused or damaged folder: give back what was taken before the error
+    free_all();
+    throw;
+  }
 }
 
-EngineInk2::~EngineInk2() {
+void EngineInk2::free_all() noexcept {
   if (stream_) cudaStreamSynchronize(stream_);
   if (h_logits_) cudaFreeHost(h_logits_);
   if (h_tok_) cudaFreeHost(h_tok_);
   if (cublas_) cublasDestroy(cublas_);
   for (void* p : gpu_allocs_) cudaFree(p);
   if (stream_) cudaStreamDestroy(stream_);
+  h_logits_ = nullptr;
+  h_tok_ = nullptr;
+  cublas_ = nullptr;
+  gpu_allocs_.clear();
+  stream_ = nullptr;
 }
+
+EngineInk2::~EngineInk2() { free_all(); }
 
 void EngineInk2::reset() {
   for (float* p : d_conv_)
@@ -660,7 +756,7 @@ int32_t EngineInk2::sample_logits(int64_t step_pos) {
     const float v = h_logits_[i];
     if (std::isfinite(v)) cand.emplace_back(v, i);
   }
-  if (cand.empty()) return 0;
+  if (cand.empty()) throw std::runtime_error("Inkling-2: no finite logit to sample from (the weights or a kernel gave NaN or inf)");
   const int take = std::min(k, int(cand.size()));
   auto cmp = [](const std::pair<float, int32_t>& a, const std::pair<float, int32_t>& b) {
     return a.first > b.first || (a.first == b.first && a.second < b.second);

@@ -34,8 +34,20 @@ struct StTensorInfo {
   }
 };
 
-// Minimal recursive-descent JSON parser (sufficient for safetensors header and config.json).
+// Bytes per element of a safetensors dtype; 0 for a dtype this reader does not know.
+inline size_t st_dtype_bytes(const std::string& dt) {
+  if (dt == "F64" || dt == "I64" || dt == "U64") return 8;
+  if (dt == "F32" || dt == "I32" || dt == "U32") return 4;
+  if (dt == "BF16" || dt == "F16" || dt == "I16" || dt == "U16") return 2;
+  if (dt == "F8_E4M3" || dt == "F8_E5M2" || dt == "F8_E8M0" || dt == "U8" || dt == "I8" || dt == "BOOL") return 1;
+  return 0;
+}
+
+// Minimal recursive-descent JSON parser (sufficient for safetensors header and config.json). Nesting deeper than kMaxDepth is
+// refused: a crafted header could otherwise overflow the stack, which no catch can stop.
 namespace stjson {
+
+constexpr int kMaxDepth = 64;
 
 struct Val {
   enum Kind { Null, Bool, Num, Str, Arr, Obj } kind = Null;
@@ -97,7 +109,8 @@ inline std::string parse_str(const char* p, size_t n, size_t& i) {
   throw std::runtime_error("json: unterminated string");
 }
 
-inline Val parse_val(const char* p, size_t n, size_t& i) {
+inline Val parse_val(const char* p, size_t n, size_t& i, int depth = 0) {
+  if (depth > kMaxDepth) throw std::runtime_error("json: nested deeper than " + std::to_string(kMaxDepth) + " levels");
   skip_ws(p, n, i);
   if (i >= n) throw std::runtime_error("json: unexpected eof");
   const char c = p[i];
@@ -122,7 +135,7 @@ inline Val parse_val(const char* p, size_t n, size_t& i) {
       skip_ws(p, n, i);
       if (i >= n || p[i] != ':') throw std::runtime_error("json: expected ':'");
       ++i;
-      v.obj.emplace(std::move(k), parse_val(p, n, i));
+      v.obj.emplace(std::move(k), parse_val(p, n, i, depth + 1));
       skip_ws(p, n, i);
       if (i < n && p[i] == ',') {
         ++i;
@@ -145,7 +158,7 @@ inline Val parse_val(const char* p, size_t n, size_t& i) {
       return v;
     }
     while (true) {
-      v.arr.push_back(parse_val(p, n, i));
+      v.arr.push_back(parse_val(p, n, i, depth + 1));
       skip_ws(p, n, i);
       if (i < n && p[i] == ',') {
         ++i;
@@ -217,8 +230,14 @@ class SafetensorsReader {
     for (const std::string& path : files) {
       const int fd = ::open(path.c_str(), O_RDONLY);
       if (fd < 0) throw std::runtime_error("cannot open " + path);
+      struct stat st {};
+      if (::fstat(fd, &st) != 0 || st.st_size < 8) {
+        ::close(fd);
+        throw std::runtime_error("cannot read the size of " + path + " (or it is shorter than a safetensors header)");
+      }
+      const uint64_t fsize = uint64_t(st.st_size);
       uint64_t hlen = 0;
-      if (::pread(fd, &hlen, 8, 0) != 8 || hlen == 0 || hlen > (64u << 20)) {
+      if (::pread(fd, &hlen, 8, 0) != 8 || hlen == 0 || hlen > (64u << 20) || 8u + hlen > fsize) {
         ::close(fd);
         throw std::runtime_error("bad safetensors header in " + path);
       }
@@ -235,12 +254,25 @@ class SafetensorsReader {
         if (key_prefix && name.rfind(key_prefix, 0) != 0) continue;
         StTensorInfo info;
         info.dtype = val.at("dtype").s;
-        for (const auto& d : val.at("shape").arr) info.shape.push_back(d.i);
+        uint64_t numel = 1;
+        for (const auto& d : val.at("shape").arr) {
+          if (d.kind != stjson::Val::Num || d.i < 0 || (d.i > 0 && numel > (uint64_t(1) << 48) / uint64_t(d.i)))
+            throw std::runtime_error("bad shape for " + name + " in " + path);
+          numel *= uint64_t(d.i);
+          info.shape.push_back(d.i);
+        }
         const auto& offs = val.at("data_offsets").arr;
-        if (offs.size() != 2 || offs[1].i < offs[0].i) throw std::runtime_error("bad offsets for " + name);
+        if (offs.size() != 2 || offs[0].i < 0 || offs[1].i < offs[0].i) throw std::runtime_error("bad offsets for " + name);
         info.file_offset = 8u + hlen + uint64_t(offs[0].i);
         info.nbytes = size_t(offs[1].i - offs[0].i);
         info.file_idx = fidx;
+        // the data must lie inside the file, and be as large as dtype x shape says (the engine sizes its buffers by the shape)
+        if (uint64_t(offs[1].i) > fsize - 8u - hlen)
+          throw std::runtime_error("tensor " + name + " lies past the end of " + path + " (truncated or damaged file)");
+        const size_t eb = st_dtype_bytes(info.dtype);
+        if (eb != 0 && uint64_t(info.nbytes) != numel * eb)
+          throw std::runtime_error("tensor " + name + " in " + path + ": " + std::to_string(info.nbytes) + " bytes of data, but dtype " +
+                                   info.dtype + " and its shape need " + std::to_string(numel * eb));
         tensors_.emplace(name, std::move(info));
       }
     }
