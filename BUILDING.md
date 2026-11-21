@@ -105,7 +105,7 @@ What is in `src/inkling2/`:
   `ink2_micro.cu`: launch and barrier measurements of the GPU.
 * `build.cmd`: the build. There is no CMake file for this library.
 
-The released `yskn_inkling2.dll` has SHA-256 `@@YSKN_INKLING2_SHA256@@` (@@YSKN_INKLING2_BYTES@@ bytes). It was built with the tools of
+The released `yskn_inkling2.dll` has SHA-256 `af783cdd41d701a2b112ba803b4b29501ebcd34f567066e7d317f76fb9fc1ffc` (2,253,824 bytes). It was built with the tools of
 the table above (Visual C++ 19.44, CUDA Toolkit 13.2) by `build.cmd cuda`. Like `yskn.dll` it has machine code for compute capability 8.6
 (RTX 30 series), 8.9 (RTX 40 series) and 12.0 (RTX 50 series), plus PTX for `compute_120`, and the CUDA runtime is linked statically. It
 also uses the OpenMP library of Visual C++ (`vcomp140.dll`, part of the Visual C++ 2015-2022 x64 runtime). Only the RTX 5090 has been
