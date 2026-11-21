@@ -933,7 +933,7 @@ class DispatchTests(unittest.TestCase):
     def test_chat_defaults_left_to_the_model(self):
         from yasakani import cli
         args = cli.build_parser().parse_args(["chat"])
-        self.assertEqual((args.temperature, args.top_p, args.top_k, args.prompt), (None, None, None, None))
+        self.assertEqual((args.temperature, args.top_p, args.top_k, args.ask), (None, None, None, None))
 
 
 # ---- the expected self-check tokens shipped for --scheme quality ---------------------------------------------------------------

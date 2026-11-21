@@ -645,8 +645,8 @@ CHAT_HELP = """commands:  /exit  quit      /reset  forget the conversation      
 
 def cmd_chat(args) -> int:
     from .chat import ChatParams, RequestError
-    if args.prompt is not None:
-        raise YasakaniError("--prompt is available for Inkling-2 model folders only; pipe the question into the chat instead")
+    if args.ask is not None:
+        raise YasakaniError("--ask is available for Inkling-2 model folders only; pipe the question into the chat instead")
     for k, v in (("temperature", 1.0), ("top_p", 0.95), ("top_k", 20)):     # the defaults of Qwen3.8 (generation_config.json)
         if getattr(args, k, None) is None:
             setattr(args, k, v)
@@ -1132,7 +1132,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--temperature", type=float, default=None, help="default: the model's (1.0 for Qwen3.8 and Inkling-2)")
     sp.add_argument("--top-p", type=float, default=None, help="default: the model's (0.95 for Qwen3.8, 1.0 for Inkling-2)")
     sp.add_argument("--top-k", type=int, default=None, help="default: the model's (20 for Qwen3.8, off for Inkling-2)")
-    sp.add_argument("--prompt", default=None, help="Inkling-2 models: ask this one question, print the answer and end")
+    sp.add_argument("--ask", default=None, metavar="QUESTION",
+                    help="Inkling-2 models: ask this one question, print the answer and end")
     sp.add_argument("--seed", type=int, default=None, help="fixed seed (same seed and prompt give the same answer)")
     sp.add_argument("--no-think", action="store_true", help="answer without a thinking phase")
     sp.add_argument("--effort", choices=("low", "medium", "xhigh"), help="how long the model thinks (default xhigh)")

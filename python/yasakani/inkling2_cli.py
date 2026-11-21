@@ -216,7 +216,7 @@ def cmd_chat(args) -> int:
         kw["reasoning_effort"] = args.effort
     base: List[dict] = [{"role": "system", "content": args.system}] if args.system else []
     messages = list(base)
-    one_shot = getattr(args, "prompt", None)
+    one_shot = getattr(args, "ask", None)
     if not one_shot:
         print("YASAKANI chat (%s) - type /help for commands, /exit to quit." % pack.model_id)
     try:
