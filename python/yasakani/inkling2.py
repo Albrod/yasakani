@@ -37,8 +37,11 @@ calls several tools.  ``OutputStream(tools=True)`` turns each such block into a 
 ends; a block that is not a JSON object with a name comes back as answer text.  ``tool_choice``: "auto" as it is; "none" offers no
 tools (the server); "required" with one function (a named function) writes the call header ``<|message_model|>NAME
 <|content_invoke_tool_json|>`` for the model after its thinking, "required" with several lets the model pick the name but not a
-text block (the block openers are masked at that one position).  With ``enable_thinking: false`` and tools the reply starts after
-``<|message_model|>`` (the thinking opener masked at the first position) so that the model can open an answer or a call.
+text block (the block openers are masked at that one position).  With ``enable_thinking: false`` and tools the effort is 0 and the
+model writes its own block header: it may think briefly (the model card: the lowest effort does not turn the thinking fully off),
+then answers or calls.  The answer block is not opened for it as without tools (that would rule out a call); masking only the
+thinking opener after ``<|message_model|>`` was tried and made the model call a tool for 1 + ... + 5 in 1 of 7 runs (greedy and
+6 seeds), the effort-0 start in none of the same 7.
 """
 from __future__ import annotations
 
@@ -262,7 +265,8 @@ class Ink2Formatter:
                     call: Optional[str] = None) -> Tuple[List[int], str, List[int]]:
         """A request with tools -> (prompt ids, start, ids masked at the first position).  ``call``: None (tool_choice auto), the
         name of the function that must be called, or "" (a call of any of the tools must be made).  ``start``: what the reply's first
-        id continues: "free" (nothing: the model writes its block header), "head" (after <|message_model|>), "reasoning" (inside a
+        id continues: "free" (nothing: the model writes its block header; also with thinking off, at effort 0), "head" (after
+        <|message_model|>, tool_choice required among several tools), "reasoning" (inside a
         thinking block the prompt opened) or "call" (inside the call block of ``call``; its header is in the prompt)."""
         kw = dict(template_kwargs or {})
         thinking = kw.pop("enable_thinking", None)
@@ -271,8 +275,6 @@ class Ink2Formatter:
         ids = self.encode(self.render(messages, tools=tools, **kw))
         i = self.ids
         if call is None:
-            if thinking is False:
-                return ids + [i[T_MODEL]], "head", [i[T_THINKING]]
             return ids, "free", []
         if thinking is False:
             if call:

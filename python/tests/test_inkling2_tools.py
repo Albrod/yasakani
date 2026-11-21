@@ -169,7 +169,7 @@ class TemplateTests(unittest.TestCase):
         base0 = f.encode(f.render(msgs, tools=tools, reasoning_effort="none"))
         off = {"enable_thinking": False}
         self.assertEqual(f.tool_prompt(msgs, tools, {}, None), (base, "free", []))
-        self.assertEqual(f.tool_prompt(msgs, tools, off, None), (base0 + [i[ink.T_MODEL]], "head", [i[ink.T_THINKING]]))
+        self.assertEqual(f.tool_prompt(msgs, tools, off, None), (base0, "free", []))      # effort 0; the model writes its header
         hdr = [i[ink.T_MODEL]] + f.encode("get_weather") + [i[ink.T_CALL]]
         self.assertEqual(f.call_header("get_weather"), hdr)
         self.assertEqual(f.tool_prompt(msgs, tools, off, "get_weather"), (base0 + hdr, "call", []))
@@ -261,13 +261,14 @@ class RunnerTests(unittest.TestCase):
 
     def test_plain_answer_with_tools_offered(self):
         f = fmt()
-        reply = self.ids('<|content_text|>15<|end_message|><|content_model_end_sampling|>')
-        eng = FakeEngine(f, lambda p: reply, decoys={0: f.ids[ink.T_THINKING]})   # it would rather think: masked at the first pick
+        reply = self.ids('<|message_model|><|content_thinking|>Easy.<|end_message|><|message_model|><|content_text|>15<|end_message|>'
+                         '<|content_model_end_sampling|>')
+        eng = FakeEngine(f, lambda p: reply)
         u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "1+...+5?"}], tools=clean_tools([WEATHER]),
                                                     temperature=0.0, template_kwargs={"enable_thinking": False}))
-        self.assertEqual((joined(got, "content"), calls(got), u.finish), ("15", [], "stop"))
-        self.assertEqual(eng.prompts[0][-1], f.ids[ink.T_MODEL])
-        self.assertEqual(u.reasoning_tokens, 0)
+        self.assertEqual((joined(got, "content"), joined(got, "reasoning"), calls(got), u.finish), ("15", "Easy.", [], "stop"))
+        self.assertIn("Thinking effort level: 0<", f.decode(eng.prompts[0]))
+        self.assertEqual(eng.prompts[0][-1], f.ids[ink.T_END])              # nothing opened for the model
 
     def test_named_function_thinking_off(self):
         f = fmt()
@@ -334,15 +335,15 @@ class RunnerTests(unittest.TestCase):
         f = fmt()
         reply = self.ids('get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{"city":"Kobe"}}<|end_message|>'
                          '<|content_model_end_sampling|>')
-        eng = FakeEngine(f, lambda p: reply, decoys={0: f.ids[ink.T_THINKING]})
+        eng = FakeEngine(f, lambda p: reply, decoys={0: f.ids[ink.T_TEXT]})
         eng_logit = eng._logits
 
         def sharp():                                                     # sampling at temperature 1 picks the best token here
             x = eng_logit()
             return x * 10.0
         eng._logits = sharp
-        u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "Kobe"}], tools=clean_tools([WEATHER]),
-                                                    temperature=1.0, top_p=1.0, top_k=0, seed=7,
+        u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "Kobe"}], tools=clean_tools([WEATHER, SHELL]),
+                                                    tool_choice="required", temperature=1.0, top_p=1.0, top_k=0, seed=7,
                                                     template_kwargs={"enable_thinking": False}))
         self.assertEqual((calls(got), u.finish), ([{"name": "get_weather", "arguments": {"city": "Kobe"}}], "tool_calls"))
         self.assertEqual((joined(got, "reasoning"), joined(got, "content")), ("", ""))
