@@ -521,32 +521,31 @@ experimental model, with a second engine library. How to download, convert and s
 
 ### Which cards can run it, and why 24 GB?
 
-We ran it on one RTX 5090 (32 GB) under Windows 11 only. With the default context of 32,768 tokens the engine allocated 22.1 GB of GPU
-memory (2.15 GB of it the key/value cache), and 23.2 GB with the drafter loaded (the default). The GPU as a whole had 24.2 GB in use
-without and 25.4 GB with the drafter; with the converted weights of `--scheme quality` the engine allocated 18.3 / 19.4 GB, and the GPU
-had 20.4 / 21.6 GB in use. `--draft off` does not load the drafter. Cards under 24 GB cannot hold it. We have not run it on a 24 GB card (RTX 3090, 3090 Ti or 4090); with the desktop also on that card
+We ran it on one RTX 5090 (32 GB) under Windows 11 only. With the default context of 32,768 tokens the engine allocated 22.7 GB of GPU
+memory (2.15 GB of it the key/value cache), and 23.8 GB with the drafter loaded (the default). The GPU as a whole had 25.0 GB in use
+without and 27.2 GB with the drafter (as the package reports it at the start); with the converted weights of `--scheme quality` and their
+4-bit drafter the engine allocated 18.9 / 19.5 GB, and the GPU had 21.2 / 21.9 GB in use. `--draft off` does not load the drafter. Cards under 24 GB cannot hold it. We have not run it on a 24 GB card (RTX 3090, 3090 Ti or 4090); with the desktop also on that card
 there is less room, and a smaller `--max-ctx` needs less memory. On Linux it runs on the engine contributed in
 [#28](https://github.com/yasakani-dev/yasakani/pull/28), built from source ([BUILDING.md](../BUILDING.md#linux-inkling-2)); we ran that one on one
 RTX 5090 under WSL2 only.
 
 ### How fast is it, and under which conditions?
 
-One RTX 5090, Windows 11, November 21, 2026, the published weights, one request at a time:
+One RTX 5090, Windows 11, November 22, 2026, the published weights, one request at a time:
 
-* Generation with greedy decoding, thinking off, 256 tokens: `yasakani bench --draft off` 166.3 tokens/s (mean of its 4 runs; 165.6
-  tokens/s with the engine alone in the same job), and 207.7 tokens/s with the default `--draft auto`. With the converted weights of
-  `--scheme quality`: 209.4 and 213.9 tokens/s in the same job. Speeds by kind of text with and without the drafter:
+* Generation with greedy decoding, thinking off, 256 tokens: `yasakani bench --draft off` 161.2 tokens/s (the mean of its 4 prompts,
+  median of 3 runs), and 212.5 tokens/s with the default `--draft auto`. With the converted weights of `--scheme quality` and their
+  4-bit drafter: 203.8 and 225.9 tokens/s in the same job. Speeds by kind of text with and without the drafter:
   [README](../README.md#inkling-2-mini).
-* Terminal chat with thinking on at low effort and `--draft auto`: 155.7 tokens/s (one question in Japanese, 207 tokens). The server,
-  streamed: 174 tokens/s (a short question in Japanese, 145 tokens with thinking), the first piece 0.08 s after the request.
-* The speed drops as the conversation grows: 6.0 ms per token at position 88, 6.7 ms at 536, 7.3 to 7.5 ms from position 1,024 on (133 to
-  138 tokens/s).
-* Prompt reading through the package: 1,000 tokens/s for a prompt of 4,056 tokens, 1,090 tokens/s for 1,011 tokens (3 runs each, from an
-  empty context). With the engine alone: 950 to 1,050 tokens/s from 1,000 to 4,000 tokens, 760 to 860 tokens/s at 16,000. A prompt that
-  starts like the one before (the next turn of a chat) reads only the new part.
-* Start until ready (files in the Windows file cache): published weights 6.4 s without the drafter and 8.4 s with it; converted
-  weights 2.5 s and 7.2 s (their tensors are checked at load, 0.8 s; the drafter is prepared on the CPU when it loads).
-* Prompt reading with the converted weights through the package: 925 tokens/s for 4,056 tokens, 1,002 tokens/s for 1,011 tokens.
+* Terminal chat with thinking on at low effort and `--draft auto`: 155.0 tokens/s (one question in Japanese, 375 tokens). The server,
+  streamed: 173 tokens/s (a short question in Japanese, 145 tokens with thinking), the first piece 0.08 s after the request.
+* The speed drops as the conversation grows (measured with the engine before the changes of 0.3.1): 6.0 ms per token at position 88,
+  6.7 ms at 536, 7.3 to 7.5 ms from position 1,024 on (133 to 138 tokens/s).
+* Prompt reading through the package: 1,063 tokens/s for a prompt of 1,079 tokens, 961 tokens/s for 4,900 tokens (median of 3 runs each,
+  from an empty context). A prompt that starts like the one before (the next turn of a chat) reads only the new part.
+* Start until ready (files in the Windows file cache): published weights 6.4 s without the drafter and 8.5 s with it; converted
+  weights 2.6 s and 3.0 s (their tensors are checked at load, 0.8 s).
+* Prompt reading with the converted weights through the package: 959 tokens/s for 1,079 tokens, 878 tokens/s for 4,900 tokens.
 
 `yasakani bench --model-dir <folder>` measures it on your PC (greedy, thinking off, 256 tokens per test). We have not measured other cards.
 
@@ -563,9 +562,10 @@ The converter can write the weights again in fewer bits (`inkling2_convert.py ..
 most dense matrices in 4 or 8 bits, and the 8-bit experts of layers 20 to 23 re-packed to 4 bits, in one `.yskn` file of 15.05 GB
 instead of 19.5 GB ([FORMAT](FORMAT.md)). Against the published model on 43 text windows (14,024 positions: the model's own thinking and
 answers, English and Japanese prose, code) the KL divergence was 0.0110, and the most likely next token was the same at 96.0 % of the
-positions. The engine multiplies these matrices as they are stored (interface version 3 of the library), so the folder is faster and
-needs less memory: `yasakani bench --draft off` 209.4 against 166.3 tokens/s for the published weights in the same job on the RTX 5090,
-and 18.3 instead of 22.1 GB allocated at a context of 32,768 tokens. The conversion takes about 4 minutes on the CPU.
+positions. The drafter is written again in 4 bits as well (`mtp_d4.yskn`, 209.7 MB instead of 635.8 MB). The engine multiplies these
+matrices as they are stored (interface version 3 of the library), so the folder is faster and needs less memory: `yasakani bench --draft
+off` 203.8 against 161.2 tokens/s for the published weights in the same job on the RTX 5090, and 18.9 instead of 22.7 GB allocated at a
+context of 32,768 tokens (with the drafter 19.5 instead of 23.8 GB). The conversion takes about 4 minutes on the CPU.
 `yasakani verify` checks every file and every tensor. `yasakani selfcheck` compares the greedy output of three short prompts (English,
 Japanese, code) with the tokens that a reference implementation of the model gave on the same converted weights, decoded exactly as the
 engine multiplies them. At every one of the 48 tokens the chosen token leads the next best one by at least 0.11 in the logits, so small

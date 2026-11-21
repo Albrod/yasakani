@@ -126,8 +126,8 @@ from `src/inkling2/` of this release. It was built with the tools of
 the table above (Visual C++ 19.44, CUDA Toolkit 13.2) by `build.cmd cuda`. Like `yskn.dll` it has machine code for compute capability 8.6
 (RTX 30 series), 8.9 (RTX 40 series) and 12.0 (RTX 50 series), plus PTX for `compute_120`, and the CUDA runtime is linked statically. It
 also uses the OpenMP library of Visual C++ (`vcomp140.dll`, part of the Visual C++ 2015-2022 x64 runtime). Only the RTX 5090 has been
-tested. At a context of 32,768 tokens the engine allocates about 22 GB of GPU memory for the published weights (23 GB with the drafter)
-and about 18 GB for the weights of `--scheme quality` (19 GB with the drafter), so cards with less than 24 GB cannot run it.
+tested. At a context of 32,768 tokens the engine allocates about 23 GB of GPU memory for the published weights (24 GB with the drafter)
+and about 19 GB for the weights of `--scheme quality` (19.5 GB with their 4-bit drafter), so cards with less than 24 GB cannot run it.
 
 To build it, open the **x64 Native Tools Command Prompt for VS 2022** with the CUDA Toolkit 13 installed (the installer sets `CUDA_PATH`;
 without it `nvcc` must be on the path), go to the source folder and run:
