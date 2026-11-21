@@ -482,6 +482,7 @@ private:
   uint16_t *xn_ = nullptr, *q16_ = nullptr, *gate16_ = nullptr; int8_t* qx_ = nullptr;
   float *pm_ = nullptr, *pl_ = nullptr, *pacc_ = nullptr; float2* rope_ = nullptr; float* part_ = nullptr;
   uint8_t* suppressed_ = nullptr; bool suppress_on_ = false;
+  bool yarn2_ = false;
   float *tc_h_ = nullptr, *tc_al_ = nullptr, *tc_S_ = nullptr; uint16_t* tc_xn_ = nullptr; int8_t* tc_qx_ = nullptr; int* tc_ids_ = nullptr; int tc_rows_ = 0;
   int8_t* tq_qx_ = nullptr; float* tq_al_ = nullptr; int8_t* scr_qx_ = nullptr; float* scr_al_ = nullptr;   
   
