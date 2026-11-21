@@ -14,8 +14,8 @@
   as "auto", with only the named function offered when one is named.  Inkling-2 model folders enforce it (yasakani/inkling2.py):
   after the thinking the call header is written for the model (a named function, or "required" with one function), or with
   "required" and several functions the model may write nothing but one of the offered names as the header (constrained decoding
-  of the name).  The arguments are the model's own (not checked against the schema), and a reply cut by max_tokens before the
-  call has none.
+  of the name).  The reply then ends after that call (one call per reply).  The arguments are the model's own (not checked
+  against the schema), and a reply cut by max_tokens before the call has none.
 * ``thinking_budget`` (a request field; the default comes from the environment variable YASAKANI_THINKING_BUDGET, 0 = no limit):
   when the thinking has taken that many tokens it is closed and the model goes on to the answer.
 * Optional still-image input through ``image_url`` (configure --mmproj, --llama-dir and --vision-model).

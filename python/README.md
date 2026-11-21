@@ -666,14 +666,15 @@ itself or a folder that holds it, and `YASAKANI_INK2_DLL` names it directly. Its
 above 1, `bench --edit`, image input (`--mmproj`) and `selfcheck --write`.
 
 **Tool calls** (new in 0.3.1). `serve` accepts `tools` and `tool_choice` (`auto`, `none`, `required` or the name of a function) and returns
-`tool_calls` (finish reason `tool_calls`), with and without streaming; `chat` has no tools. The model writes each call as a block of its
-own format (`<|content_invoke_tool_json|>`), which the server turns into a tool call; a block it cannot read comes back as text. Assistant
-messages with `tool_calls` and `tool` messages with their `tool_call_id` go back into the chat template. `tool_choice` with one function
-(or `required` with one tool) writes the start of that call after the thinking (with thinking off, at the end of the prompt); with
-`required` and several tools the model may write only one of the offered names as the call header (constrained decoding of the name).
-The arguments are the model's own and are not checked against the schema; a reply cut by `max_tokens` before the call has none. With tools and thinking off the reply starts at thinking effort 0, so the model
-writes a short thinking, returned in `reasoning_content`. `thinking_budget` (a request field, or `YASAKANI_THINKING_BUDGET`) cuts a long
-thinking so that the call fits in `max_tokens`. The engine is loaded with 512 rollback positions (`YASAKANI_INK2_ROLLBACK`, 0 = the
+`tool_calls` (finish reason `tool_calls`), with and without streaming; `chat` has no tools. The model writes each call as a block of its own
+format (`<|content_invoke_tool_json|>`), which the server turns into a tool call; a block it cannot read comes back as text. Assistant
+messages with `tool_calls` and `tool` messages with their `tool_call_id` go back into the chat template. `tool_choice` with one function (or
+`required` with one tool) writes the start of that call after the thinking (with thinking off, at the end of the prompt); with `required`
+and several tools the model may write only one of the offered names as the call header (constrained decoding of the name). With `required`
+or a named function the reply ends after that call (one call per reply). The arguments are the model's own and are not checked against the
+schema; a reply cut by `max_tokens` before the call has none. With tools and thinking off the reply starts at thinking effort 0, so the
+model writes a short thinking, returned in `reasoning_content`. `thinking_budget` (a request field, or `YASAKANI_THINKING_BUDGET`) cuts a
+long thinking so that the call fits in `max_tokens`. The engine is loaded with 512 rollback positions (`YASAKANI_INK2_ROLLBACK`, 0 = the
 engine's default of 64) for all commands, so that dropping the last reply, as clients do that do not send its thinking back, does not read
 the conversation again; with the `--scheme quality` folder and context 32,768 the engine allocated 20.0 instead of 19.4 GB, and the GPU had
 0.8 GB more in use. A conversation that no longer fits the context (32,768 tokens by default) gets an error (HTTP 400).

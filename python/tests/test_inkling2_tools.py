@@ -446,30 +446,61 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((calls(got), u.finish), ([{"name": "run_command", "arguments": {}}], "tool_calls"))
         self.assertEqual(eng.fed[eng.n_prompt:], reply[:-1])
 
-    def test_after_a_call_only_calls_or_the_end(self):
-        """After a call another call of an offered function may follow; a text or thinking block after it ends the reply there
-        (the template writes them before the calls).  Thinking on and off, several functions and a named one."""
+    def test_a_forced_call_ends_the_reply(self):
+        """required (several functions or one) and a named function: the reply ends after the first call that can be read, whatever
+        the model would write next (another call, text, thinking).  Thinking on and off."""
         f = fmt()
-        two = ('<|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}<|end_message|>'
-               '<|message_model|>run_command<|content_invoke_tool_json|>{"name":"run_command","args":{}}<|end_message|>')
-        cases = [("Think.<|end_message|>" + two, {}, [WEATHER, SHELL], ["get_weather", "run_command"]),
-                 (two[len("<|message_model|>"):], {"enable_thinking": False}, [WEATHER, SHELL], ["get_weather", "run_command"]),
-                 ('{"name":"get_weather","args":{}}<|end_message|>', {"enable_thinking": False}, [WEATHER], ["get_weather"]),
-                 ('Think.<|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}'
-                  '<|end_message|>', {}, [WEATHER], ["get_weather"])]
-        for lead, kw, tools, names in cases:
-            for tail in ('<|message_model|><|content_text|>51<|end_message|><|content_model_end_sampling|>',
+        one = '<|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}<|end_message|>'
+        cases = [("Think.<|end_message|>" + one, {}, [WEATHER, SHELL]),
+                 (one[len("<|message_model|>"):], {"enable_thinking": False}, [WEATHER, SHELL]),
+                 ('{"name":"get_weather","args":{}}<|end_message|>', {"enable_thinking": False}, [WEATHER]),
+                 ("Think.<|end_message|>" + one, {}, [WEATHER])]
+        for lead, kw, tools in cases:
+            for tail in ('<|message_model|>run_command<|content_invoke_tool_json|>{"name":"run_command","args":{}}<|end_message|>'
+                         '<|content_model_end_sampling|>',
+                         '<|message_model|><|content_text|>51<|end_message|><|content_model_end_sampling|>',
                          '<|message_model|><|content_thinking|>Now answer.<|end_message|><|content_model_end_sampling|>',
                          '<|content_model_end_sampling|>'):
                 reply = self.ids(lead + tail)
                 eng = FakeEngine(f, lambda p: reply)
                 u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools(tools),
                                                             tool_choice="required", temperature=0.0, template_kwargs=kw))
-                self.assertEqual([c["name"] for c in calls(got)], names, (lead, tail))
-                self.assertEqual((joined(got, "content"), u.finish, u.tool_calls), ("", "tool_calls", len(names)), (lead, tail))
-                n = len(self.ids(lead)) + (1 if tail.startswith("<|message_model|>") else 0)
-                self.assertEqual(eng.fed[eng.n_prompt:], reply[:n])           # a dropped block: its <|message_model|> stays fed
-                self.assertEqual(u.completion_tokens, n if tail.startswith("<|message_model|>") else n + 1)
+                self.assertEqual((calls(got), joined(got, "content")), ([{"name": "get_weather", "arguments": {}}], ""), (lead, tail))
+                self.assertEqual((u.finish, u.tool_calls, u.completion_tokens), ("tool_calls", 1, len(self.ids(lead)) + 1), (lead, tail))
+                self.assertEqual(eng.fed[eng.n_prompt:], self.ids(lead))             # the stop token is the last one, not fed
+
+    def test_an_unreadable_call_gets_another_header(self):
+        """A call block that is not JSON: another call header of an offered function may follow (here it does), or the end."""
+        f = fmt()
+        bad = 'run_command<|content_invoke_tool_json|>{"name":"run_command","args":<|end_message|>'
+        good = '<|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{}}<|end_message|>'
+        for tail, want in ((good + '<|content_model_end_sampling|>', [{"name": "get_weather", "arguments": {}}]),
+                           ('<|message_model|><|content_text|>51<|end_message|><|content_model_end_sampling|>', [])):
+            reply = self.ids(bad + tail)
+            eng = FakeEngine(f, lambda p: reply)
+            u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools([WEATHER, SHELL]),
+                                                        tool_choice="required", temperature=0.0,
+                                                        template_kwargs={"enable_thinking": False}))
+            self.assertEqual(calls(got), want, tail)
+            self.assertEqual(joined(got, "content"), '{"name":"run_command","args":', tail)   # the unreadable block, as text
+            self.assertEqual(u.finish, "tool_calls" if want else "stop", tail)
+
+    def test_forced_header_names_the_call(self):
+        """The arguments name another function: the call is that of the header the runner held (named and required)."""
+        f = fmt()
+        for tools, kw, reply_text in (([WEATHER], {"enable_thinking": False}, '{"name":"run_command","args":{"city":"Nara"}}'),
+                                      ([WEATHER, SHELL], {"enable_thinking": False},
+                                       'get_weather<|content_invoke_tool_json|>{"name":"other","args":{"city":"Nara"}}')):
+            reply = self.ids(reply_text + '<|end_message|><|content_model_end_sampling|>')
+            eng = FakeEngine(f, lambda p: reply)
+            u, got = run(runner_for(eng, f), ChatParams(messages=[{"role": "user", "content": "x"}], tools=clean_tools(tools),
+                                                        tool_choice="required", temperature=0.0, template_kwargs=kw))
+            self.assertEqual(calls(got), [{"name": "get_weather", "arguments": {"city": "Nara"}}])
+        out = []                                                         # tool_choice auto: the JSON name, as before
+        s = ink.OutputStream(f, tools=True)
+        for t in self.ids('<|message_model|>get_weather<|content_invoke_tool_json|>{"name":"other","args":{}}<|end_message|>'):
+            out += s.feed(t)
+        self.assertEqual(calls(out), [{"name": "other", "arguments": {}}])
 
     def test_after_a_call_junk_is_held_to_calls_or_the_end(self):
         """After a call the model would write a junk id: only <|message_model|> or the stop token may come (here the stop)."""

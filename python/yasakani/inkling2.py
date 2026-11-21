@@ -40,10 +40,12 @@ tools (the server); "required" with one function (a named function) writes the c
 then lets it pick only ids that spell one of the offered names (``NameTrie``: the ids of each name as the template writes them, at
 every position of the name) and, where a name is complete, ``<|content_invoke_tool_json|>``; so the header is always that of a call
 of an offered function (masking the block openers only at the first position after ``<|message_model|>`` was not enough: the model
-wrote another id there and its answer as the block's name, and no call came).  The arguments are the model's.  After a call
-(required or named) only another call header of an offered function or the stop token may follow, as in the template (which
-writes the thinking and the text before the calls): where the model would open another block after <|message_model|> the reply
-ends there (without that, a forced call was followed by thinking, text and in some runs by calls until max_tokens).  With ``enable_thinking: false`` and tools the effort is 0 and the
+wrote another id there and its answer as the block's name, and no call came).  The arguments are the model's; the name of the
+call is that of its header (a JSON object naming another function does not change it).  With required or a named function the
+reply ends after the first call that can be read (the stop token is written for the model): once its first call was forced, the
+model went on with thinking and text, and with thinking off in 2 of 5 runs with call after call until max_tokens (53 and 55
+calls).  A call block that cannot be read is followed only by another call header of an allowed function or the stop token
+(after <|message_model|> another kind of block ends the reply).  With ``enable_thinking: false`` and tools the effort is 0 and the
 model writes its own block header: it may think briefly (the model card: the lowest effort does not turn the thinking fully off),
 then answers or calls.  The answer block is not opened for it as without tools (that would rule out a call); masking only the
 thinking opener after ``<|message_model|>`` was tried and made the model call a tool for 1 + ... + 5 in 1 of 7 runs (greedy and
@@ -398,7 +400,7 @@ class OutputStream:
     block) or "call" (the prompt holds the header of a call of ``call_name``)."""
 
     def __init__(self, fmt: Ink2Formatter, in_answer: bool = False, tools: bool = False, start: Optional[str] = None,
-                 call_name: str = ""):
+                 call_name: str = "", pin_names: Sequence[str] = ()):
         self.fmt = fmt
         i = fmt.ids
         self.opens = {i[T_THINKING]: "reasoning"}
@@ -419,11 +421,14 @@ class OutputStream:
         self.head: List[int] = []                            # the ids after <|message_model|> (the name of the block)
         self.call_ids: List[int] = []
         self.call_name = call_name if self.mode == "call" else ""
+        self.pin_names = frozenset(pin_names)               # a header with one of these names names the call (tool_choice forced)
         self.calls = 0
 
     def _end_call(self, out: List[Tuple[str, object]]) -> None:
         text = self.fmt.decode(self.call_ids)
         call = parse_call(text, self.call_name)
+        if call is not None and self.call_name in self.pin_names:
+            call["name"] = self.call_name
         if call is None:
             if text:
                 out.append(("content", text))
@@ -1169,7 +1174,8 @@ class Ink2Runner:
         if plan is None:
             stream = OutputStream(self.fmt, in_answer)
         else:
-            stream = OutputStream(self.fmt, tools=True, start=in_answer, call_name=plan["call"] or "")
+            stream = OutputStream(self.fmt, tools=True, start=in_answer, call_name=plan["call"] or "",
+                                  pin_names=[t["function"]["name"] for t in p.tools] if plan["call"] is not None else ())
         stopf = StopFilter(p.stop)
         budget = max(0, int(getattr(p, "thinking_budget", 0) or 0))
         ban_state = dict(pending=None, now=None)             # the mask of the pick after a forced <|message_model|>, and of the next
@@ -1245,7 +1251,9 @@ class Ink2Runner:
             if state["n"] >= max_new:
                 return END
             if trie is not None and was == "call" and tok == ids[T_END]:
-                more["stage"] = "end"                        # a call ended: only another call header or the stop token
+                if stream.calls:                             # the call is made: the turn ends (the template's stop token)
+                    return [ids[T_STOP]]
+                more["stage"] = "end"                        # it could not be read: only another call header or the stop token
                 ban_state["now"] = Allow({ids[T_MODEL], ids[T_STOP]})
                 return None
             if plan is not None and plan["call"] is not None and was == "reasoning" and tok == ids[T_END] and not stream.calls:
