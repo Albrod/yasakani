@@ -99,10 +99,32 @@ class Yarn2CliTests(unittest.TestCase):
                  mock.patch.object(cli.widecheck, "setup", return_value=None), \
                  contextlib.redirect_stderr(err):
                 _, eng, _, _ = cli._open_stack(args, warm=False)
-            self.assertEqual(seen_ctx, [gpu.YARN2_MAX_CTX])
-            self.assertEqual(eng.max_ctx, gpu.YARN2_MAX_CTX)
+            self.assertEqual(seen_ctx, [None])
+            self.assertEqual(eng.max_ctx, pack.max_ctx)
+            self.assertIn("GPU free memory could not be read", err.getvalue())
+            self.assertIn("--max-ctx", err.getvalue())
             self.assertIn("experimental", err.getvalue())
             self.assertIn("5-bit KV cache", err.getvalue())
+
+            # With free GPU memory known (32 GB RTX 5090), --yarn2 without --max-ctx plans up to 524,288
+            seen_ctx.clear()
+            g5090 = gpu.GpuInfo(index=0, name="NVIDIA GeForce RTX 5090", uuid="GPU-1", compute_cap=(12, 0),
+                                total_mib=32607, used_mib=1100, driver="590.0")
+            det5090 = gpu.Detected(gpus=[g5090], candidates=[g5090], device=0, numbered=True)
+            pack_q, stat_q = _fake_pack_with_sizes(root / "q32", weights_mib=11826)
+            args_q = cli.build_parser().parse_args(["serve", "--model-dir", str(pack_q.root), "--dll", str(dll), "--yarn2"])
+            err_q = io.StringIO()
+            with mock.patch.object(gpu, "detect", return_value=det5090), \
+                 mock.patch.object(Path, "stat", stat_q), \
+                 mock.patch.object(engine, "Engine", FakeEngine), \
+                 mock.patch.object(textio, "ChatFormatter", return_value=object()), \
+                 mock.patch.object(chat, "ChatRunner", return_value=types.SimpleNamespace(vision=None)), \
+                 mock.patch.object(cli.widecheck, "setup", return_value=None), \
+                 contextlib.redirect_stderr(err_q):
+                _, eng_q, _, _ = cli._open_stack(args_q, warm=False)
+            self.assertEqual(seen_ctx, [gpu.YARN2_MAX_CTX])
+            self.assertEqual(eng_q.max_ctx, gpu.YARN2_MAX_CTX)
+            self.assertIn("2x YaRN", err_q.getvalue())
 
             # Explicit --max-ctx <= native 262144 notes that context is not extended
             args_short = cli.build_parser().parse_args(

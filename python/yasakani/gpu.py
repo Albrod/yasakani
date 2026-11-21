@@ -502,9 +502,10 @@ def _which_gpu(det: Detected, sizes: Sequence[int], model_max: int) -> str:
 
 def plan_context(pack, det: Detected, reserve_mib: int = 0, max_ctx_limit: Optional[int] = None) -> ContextPlan:
     """The context for ``pack`` on the detected GPU.  Unchanged (None) on cards with FULL_CONTEXT_MIN_TOTAL_MIB or more, and when
-    nvidia-smi gave no answer (unless ``max_ctx_limit`` exceeds ``pack.max_ctx``, e.g. ``--yarn2``, where the longer context is planned
-    against the free GPU memory on every card).  Raises YasakaniError when not even MIN_CONTEXT tokens fit.  ``reserve_mib``
-    (prefill_reserve_mib) is taken off the free memory before the context is chosen."""
+    nvidia-smi gave no answer (even with ``--yarn2``, so a card with 24 GB or less cannot silently spill into shared memory).  When free
+    memory is known and ``max_ctx_limit`` exceeds ``pack.max_ctx`` (e.g. ``--yarn2``), the longer context is planned against free GPU memory
+    on every card.  Raises YasakaniError when not even MIN_CONTEXT tokens fit.  ``reserve_mib`` (prefill_reserve_mib) is taken off the free
+    memory before the context is chosen."""
     plan = ContextPlan()
     limit = pack.max_ctx if max_ctx_limit is None else int(max_ctx_limit)
     extended = limit > pack.max_ctx
@@ -512,10 +513,11 @@ def plan_context(pack, det: Detected, reserve_mib: int = 0, max_ctx_limit: Optio
     _small_card_env(plan, g)
     if g is None or g.total_mib is None or g.free_mib is None:
         if extended:
-            plan.max_ctx = limit
+            plan.notes.append("note: GPU free memory could not be read, so --yarn2 keeps the model's native %d-token context; "
+                              "pass --max-ctx to set a longer context" % pack.max_ctx)
         if len(det.candidates) > 1:
             plan.notes.append("note: this PC has %d GPUs and their memory could not be read; the context stays %d tokens"
-                              % (len(det.candidates), limit))
+                              % (len(det.candidates), pack.max_ctx))
         return plan
     if not extended and g.total_mib >= FULL_CONTEXT_MIN_TOTAL_MIB:
         return plan
