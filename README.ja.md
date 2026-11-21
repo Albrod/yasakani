@@ -6,7 +6,7 @@
 
 YASAKANI は Windows PC の RTX 1枚で Qwen3.8-27B を動かす推論エンジンです。開発者が動作を確かめたのは RTX 5090 だけです。初回のセットアップのあとは、自分の PC だけでチャットやコード編集ができます。いつもの開発ツールからも OpenAI 互換 API でつなげます。
 
-**[Windows 版をダウンロード](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.0/yasakani-quickstart-0.2.0.zip)** · [8エンジンとの速度比較](docs/MEASUREMENTS.ja.md#思考なしreadme-と同じ表反復等を除いた平均toks) · [コード編集の実演動画](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.0/fast_live_uncut.mp4)
+**[Windows 版をダウンロード](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.1/yasakani-quickstart-0.2.1.zip)** · [8エンジンとの速度比較](docs/MEASUREMENTS.ja.md#思考なしreadme-と同じ表反復等を除いた平均toks) · [コード編集の実演動画](https://github.com/yasakani-dev/yasakani/releases/download/v0.2.1/fast_live_uncut.mp4)
 
 <a name="2-つのモデル"></a>
 <a name="必要なもの"></a>
@@ -40,7 +40,7 @@ Linux には寄稿者が検証したソースビルド手順があります。AM
 
 Windows 11（64 ビット）、Python 3.10 以上、NVIDIA ドライバー 580 以上、Visual C++ 2015–2022 ランタイム（x64）、ディスクの空き 20 GB を用意してください。
 
-1. Windows 起動用 ZIP（v0.2.0）を `C:\yasakani` などの英数字のフォルダーに展開します。[配布ファイルと SHA-256](https://github.com/yasakani-dev/yasakani/releases/tag/v0.2.0)
+1. Windows 起動用 ZIP（v0.2.1）を `C:\yasakani` などの英数字のフォルダーに展開します。[配布ファイルと SHA-256](https://github.com/yasakani-dev/yasakani/releases/tag/v0.2.1)
 2. **`START.cmd`** を開いてモデルを選びます。初回はエンジンとモデル一式を取得し、ファイルと GPU の自己点検まで行います。
 3. 最後にメニューが出ます。Enter を押すとブラウザーの画面が開き、モデルの読み込みの経過が出ます。読み込みが終わったら質問を入力します。画面のタブは「チャット」「スピード測定」「API 接続」「モデル・状態」の 4 つです。スピード測定はブラウザーの中で測る目安で、標準の測定は `yasakani bench` です。「モデル・状態」には GPU メモリーの使用量が出ます。ダウンロード済みのモデルが 2 つ以上ある時は、ここで切り替えられます。終了ボタンを押すとモデルが止まり、黒い画面も自動で閉じます。
 4. 2 回目から（モデルが点検を通ったあと）は、`START.cmd` を開くとこの画面が直接開きます。モデルの質問とメニューは出ません。メニュー（速さを測る・先読みあり・なしを比べる・ターミナルのチャット・サーバーの起動）を出す時は、そのフォルダーのコマンドプロンプトで `START.cmd --menu` と打ちます。
@@ -49,7 +49,7 @@ Windows 11（64 ビット）、Python 3.10 以上、NVIDIA ドライバー 580 �
 
 ターミナルでは `/effort medium` と入力すると思考が短くなり、`/think off` で思考がオフになります。[手動インストール](python/README.md#install) · [API の使い方](python/README.md#the-server)
 
-**更新。** 0.1.7 から、起動ファイルが自分で更新できます（v0.1.6 以前からは、0.2.0 の起動用 ZIP を一度だけ手で取得してください）。新しい版があるかを GitHub に問い合わせるのは、1 日に 1 回までです（問い合わせる前にそう表示します）。問い合わせるのは、メニューを出す前か、ブラウザーの画面を直接開く前です。新しい版があれば今の版と新しい版を示します。メニューの前では、変える前に必ず聞きます。ブラウザーの画面にも同じ案内と **更新する** のボタンが出ます。画面を直接開く時は黒い画面では聞かず、このボタンを押すまで何も変えません。メニューの「新しい版を確認する」、`START.cmd --action update`、`yasakani update` でも更新できます。モデルはそのまま使い、エンジンと Python のパッケージは入れ直します。前の版に戻す時は `START.cmd --action rollback` です。毎日の確認を止める時は `START.cmd --no-update-check` です。[何を送るか、ファイルをどう確認するか](docs/FAQ.ja.md#更新はどう動く)
+**更新。** 0.1.7 から、起動ファイルが自分で更新できます（v0.1.6 以前からは、0.2.1 の起動用 ZIP を一度だけ手で取得してください）。新しい版があるかを GitHub に問い合わせるのは、1 日に 1 回までです（問い合わせる前にそう表示します）。問い合わせるのは、メニューを出す前か、ブラウザーの画面を直接開く前です。新しい版があれば今の版と新しい版を示します。メニューの前では、変える前に必ず聞きます。ブラウザーの画面にも同じ案内と **更新する** のボタンが出ます。画面を直接開く時は黒い画面では聞かず、このボタンを押すまで何も変えません。メニューの「新しい版を確認する」、`START.cmd --action update`、`yasakani update` でも更新できます。モデルはそのまま使い、エンジンと Python のパッケージは入れ直します。前の版に戻す時は `START.cmd --action rollback` です。毎日の確認を止める時は `START.cmd --no-update-check` です。[何を送るか、ファイルをどう確認するか](docs/FAQ.ja.md#更新はどう動く)
 
 <a name="速さ"></a>
 

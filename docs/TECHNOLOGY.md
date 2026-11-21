@@ -3,9 +3,9 @@
 Technical notes by the author, written as a map for people who read the source code in this repository.
 日本語: [TECHNOLOGY.ja.md](TECHNOLOGY.ja.md)
 
-* Scope: versions 0.1.0 to 0.2.0. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
+* Scope: versions 0.1.0 to 0.2.1. The engine library is the same in 0.1.0 to 0.1.2; 0.1.3 adds builds for the RTX 30 and 40 series and
   one missing synchronization (chapter 7); 0.1.4 adds kernels for passes of 17 to 64 rows on compute capability 12.x and changes host
-  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4); 5.4 also describes the check of the wide copy passes on each card, new in 0.1.7. 0.2.0 reads prompts in a new way, with new GPU code for it (chapter 8), and adds the edit copy (5.5). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
+  code (5.4 and chapter 8); 0.1.5 and 0.1.6 change host code only (fixes; the GPU code is that of 0.1.4); 5.4 also describes the check of the wide copy passes on each card, new in 0.1.7. 0.2.0 reads prompts in a new way, with new GPU code for it (chapter 8), and adds the edit copy (5.5). 0.2.1 changes the Windows quickstart only (the engine library is that of 0.2.0). Windows 11, one NVIDIA GeForce RTX 5090, Qwen3.8-27B. Other GPUs: chapter 10.
 * Unless noted otherwise, the numbers here were measured on 12 November 2026 on the author's computer with the public `yskn.dll` and the
   fastest model (context 16,384, temperature 0, 768 tokens each, four tasks). Comparisons with other engines, and their conditions, are in
   [MEASUREMENTS.md](MEASUREMENTS.md).

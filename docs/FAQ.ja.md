@@ -425,7 +425,7 @@ yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
 
 ## 更新はどう動く？
 
-0.1.7 から、起動ファイル（`START.cmd`）が自分で更新できます。0.1.7 からは 0.2.0 への更新を案内します。v0.1.6 以前からは、今の版の起動用 ZIP（`yasakani-quickstart-0.2.0.zip`）を一度だけ手で取得して `START.cmd` を実行してください。モデルはそのまま使えます。
+0.1.7 から、起動ファイル（`START.cmd`）が自分で更新できます。0.1.7 と 0.2.0 からは 0.2.1 への更新を案内します。v0.1.6 以前からは、今の版の起動用 ZIP（`yasakani-quickstart-0.2.1.zip`）を一度だけ手で取得して `START.cmd` を実行してください。モデルはそのまま使えます。
 
 * **確認。** 確認は 1 日に 1 回までです。メニューを出す前か、ブラウザーの画面を直接開く前にします（2 回目からの `START.cmd` は、メニューを出さずに画面を開きます）。github.com に問い合わせると表示してから HTTPS のリクエストを 1 回送ります。送るのは `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest` だけで、User-Agent は `yasakani-quickstart` です。ID・Windows の版・GPU・質問など、パソコンの情報は送りません。待つのは 5 秒までで、GitHub につながらない時は 1 行で知らせて先に進みます。試験版（プレリリース）は案内しません。どのダウンロードとも同じく、GitHub には IP アドレスが届きます。
 * **止め方。** `START.cmd --no-update-check` で毎日の確認を止め、その設定を `quickstart_state.json` に残します。`START.cmd --update-check` で戻ります。環境変数 `YASAKANI_NO_UPDATE_CHECK=1` でも止まります。止めていても、メニューの「新しい版を確認する」と `START.cmd --action update` は使えます。

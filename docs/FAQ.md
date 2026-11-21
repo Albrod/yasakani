@@ -526,7 +526,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 it offers 0.2.0. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.2.0.zip`) by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 or 0.2.0 it offers 0.2.1. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.2.1.zip`) by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, before it shows the menu or before it opens the browser page directly (from the second run on,
   `START.cmd` does that without a menu), the quickstart first prints that it asks github.com, then sends one HTTPS request:
