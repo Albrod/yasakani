@@ -722,5 +722,63 @@ class PackageTests(unittest.TestCase):
         self.assertIn("def cmd_update(args) -> int:\n    from .update import", cli)
 
 
+class RemoveTreeTests(unittest.TestCase):
+    """The engine folder is replaced right after an update, while the server of the version before may still be ending."""
+
+    def setUp(self):
+        if QS is None:
+            self.skipTest("quickstart/quickstart.py not found (set YASAKANI_QUICKSTART)")
+        self.tmp = Path(tempfile.mkdtemp(prefix="yskn_rm_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def folder(self):
+        d = self.tmp / "engine"
+        d.mkdir()
+        (d / "yskn.dll").write_bytes(b"x")
+        return d
+
+    def test_plain_removal_and_missing_folder(self):
+        d = self.folder()
+        self.assertTrue(QS.remove_tree(str(d)))
+        self.assertFalse(d.exists())
+        self.assertTrue(QS.remove_tree(str(d)))             # already gone: nothing to do
+
+    def test_waits_while_a_file_is_in_use(self):
+        d = self.folder()
+        real, calls, said, slept = shutil.rmtree, [], [], []
+
+        def busy_twice(path, *a, **kw):
+            calls.append(path)
+            if len(calls) <= 2:
+                raise PermissionError(13, "in use", str(d / "yskn.dll"))
+            return real(path, *a, **kw)
+
+        QS.shutil.rmtree = busy_twice
+        self.addCleanup(setattr, QS.shutil, "rmtree", real)
+        self.assertTrue(QS.remove_tree(str(d), say=lambda: said.append(1), sleep=slept.append))
+        self.assertFalse(d.exists())
+        self.assertEqual((len(calls), len(said), slept), (3, 1, [0.5, 0.5]))      # said once, tried again twice
+
+    def test_gives_up_after_the_time(self):
+        d = self.folder()
+        real, now, said = shutil.rmtree, [0.0], []
+
+        def always_busy(path, *a, **kw):
+            raise PermissionError(13, "in use", str(d / "yskn.dll"))
+
+        QS.shutil.rmtree = always_busy
+        self.addCleanup(setattr, QS.shutil, "rmtree", real)
+        ok = QS.remove_tree(str(d), seconds=2.0, say=lambda: said.append(1),
+                            sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0])
+        self.assertFalse(ok)
+        self.assertTrue((d / "yskn.dll").is_file())
+        self.assertEqual(len(said), 1)
+
+    def test_main_uses_it_for_the_engine_folder(self):
+        src = QS_PATH.read_text(encoding="utf-8")
+        self.assertIn('remove_tree(edir, say=lambda: ui.say("engine_wait"))', src)
+        self.assertNotIn("shutil.rmtree(edir)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

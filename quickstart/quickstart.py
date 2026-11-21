@@ -259,6 +259,13 @@ T = {
     "engine_local": {"ja": "このフォルダーにある {z} を使います。", "en": "Using {z} from this folder."},
     "engine_get": {"ja": "ダウンロード中: {u}", "en": "Downloading: {u}"},
     "sha_ok": {"ja": "SHA-256 は公開ページの値と同じです。", "en": "The SHA-256 matches the published one."},
+    "engine_wait": {"ja": "前のサーバーが終わるのを待っています（数秒かかることがあります）。",
+                    "en": "Waiting for the server that ran before to end (this can take a few seconds)."},
+    "engine_busy": {
+        "ja": "エンジンのフォルダーを置き換えられませんでした。使用中のファイルがあります: {p}\n"
+              "ほかの YASAKANI の画面を閉じて、もう一度 START.cmd を開いてください。",
+        "en": "The engine folder could not be replaced: a file in it is in use: {p}\n"
+              "Close the other YASAKANI windows and run START.cmd again."},
     "sha_bad": {
         "ja": "SHA-256 が違います（ダウンロードが壊れたか、別のファイルです）。使わずに止めました。もう一度試してください。\n  期待: {e}\n  実際: {a}",
         "en": "The SHA-256 differs (broken download or a different file). It was not used; please try again.\n  expected: {e}\n  got:      {a}",
@@ -1707,6 +1714,27 @@ def wait_for_stop(proc, update, poll=0.2, control=None, session=None):
         time.sleep(poll)
 
 
+def remove_tree(path, seconds=60.0, say=None, sleep=time.sleep, clock=time.monotonic):
+    """Removes the folder ``path``.  -> True when it is gone, False when a file in it stayed in use for ``seconds``.
+    Right after an update the server of the version before can still be ending (the launcher ended the process it started, and
+    the real interpreter and its GPU memory go a moment later).  Until then Windows refuses to delete the engine library, so the
+    removal is tried again twice a second.  ``say`` is called once, before the first wait."""
+    end, told = clock() + seconds, False
+    while True:
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if clock() >= end:
+                return False
+            if not told and say is not None:
+                say()
+            told = True
+            sleep(0.5)
+
+
 def stop_process(proc, seconds=30):
     """Stops `yasakani serve`: terminate, wait up to ``seconds``, then kill.  (python.exe of the private environment starts the real
     interpreter as its child inside a job object that ends with it, so ending the one we started leaves nothing behind.)"""
@@ -2144,8 +2172,9 @@ def main(argv=None):
             ui.say("sha_bad", e=ENGINE_SHA256, a=got)
             return 3
         ui.say("sha_ok")
-        if os.path.isdir(edir):
-            shutil.rmtree(edir)
+        if os.path.isdir(edir) and not remove_tree(edir, say=lambda: ui.say("engine_wait")):
+            ui.say("engine_busy", p=edir)        # the state still names the engine before: the next start tries again
+            return 3
         safe_extract(zpath, edir)
         st["engine_sha"], st["venv_ok"] = ENGINE_SHA256, False
         save_state(state_path, st)
