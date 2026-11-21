@@ -24,6 +24,8 @@ UNSUPPORTED = {
     "edit": "--edit (the edit tasks of the speed tables) is not supported for Inkling-2 models yet",
     "mmproj": "image input is not supported for Inkling-2 models yet",
     "write": "selfcheck --write is not supported for Inkling-2 models yet",
+    "suppress_tokens": "--suppress-tokens is not supported for Inkling-2 models yet (it masks Qwen3.8 token IDs)",
+    "yarn2": "--yarn2 is not supported for Inkling-2 models (it scales the rotary table of Qwen3.8 models)",
 }
 
 
@@ -41,6 +43,9 @@ def refuse_unsupported(args) -> None:
         v = getattr(args, key, None)
         if (v not in (None, 1)) if key in ("parallel", "concurrency") else bool(v):
             raise YasakaniError(why)
+    if (os.environ.get("YASAKANI_SUPPRESS_TOKENS") or "").strip() and not getattr(args, "suppress_env_noted", False):
+        args.suppress_env_noted = True           # serve and bench come here twice
+        _say("note: ignoring YASAKANI_SUPPRESS_TOKENS: output token suppression is not supported for Inkling-2 models yet")
 
 
 def context_of(args, pack: ink.Ink2Pack) -> int:

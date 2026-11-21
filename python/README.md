@@ -393,6 +393,8 @@ platform path separator) to mask output token IDs (`-inf` logits before greedy a
   remain so the sampler's top-k candidate lists stay valid.
 * `yasakani selfcheck` and `yasakani bench` do not accept `--suppress-tokens` and ignore `YASAKANI_SUPPRESS_TOKENS` (with a note at
   start) so reference checks and speed measurements stay unmasked.
+* Qwen3.8 model folders only: with an Inkling-2 model folder, `--suppress-tokens` is refused and `YASAKANI_SUPPRESS_TOKENS` is
+  ignored with a note.
 
 ### Extended context with 2x YaRN (`--yarn2`, experimental)
 
@@ -409,6 +411,7 @@ platform path separator) to mask output token IDs (`-inf` logits before greedy a
   (~10.9 GiB at 524,288 tokens); the separate built-in MTP draft path (`yskn_load_draft`, not used by this package) also allocates a
   `max_ctx × 5,120 × 2` byte hidden-state history (~5.4 GB at 524,288).
 * `yasakani selfcheck` does not accept `--yarn2`, because `selfcheck.json` references are made with the native rotary table.
+* Qwen3.8 model folders only: with an Inkling-2 model folder, `--yarn2` is refused.
 
 ### Image input (optional)
 
