@@ -418,7 +418,9 @@ yasakani serve --model-dir D:\models\qwen38-quality --parallel 4
 ## Inkling-2 Mini（試験的。0.3.1 の新機能）
 
 Inkling-2 Mini は、Thinking Machines Lab が 2026 年 11 月 20 日に公開した言語モデルです。YASAKANI は 0.3.1 から、2 つ目のエンジンのライブラリで
-このモデルを試験的に動かします。ダウンロード・変換・起動の方法は [README](../README.ja.md#inkling-2-mini) にあります。
+このモデルを試験的に動かします。0.3.2 からは、`START.cmd` のモデルの質問の 4 番で選べます（`START.cmd --model inkling2` でも同じ）。
+起動ファイルが変換済みのコピーを Hugging Face から取得し（約 15.3 GB）、ほかのモデルと同じく点検します。手で取得・変換・起動する方法は
+[README](../README.ja.md#inkling-2-mini) にあります。
 
 ### どのカードで動く？ なぜ 24 GB？
 
@@ -426,6 +428,7 @@ Inkling-2 Mini は、Thinking Machines Lab が 2026 年 11 月 20 日に公開�
 （うち KV キャッシュが 2.15 GB）。標準の先読みありでは 23.8 GB です。GPU 全体で使っていたのは、先読みなしで 25.0 GB、ありで 27.2 GB でした（起動時のパッケージの表示）。
 `--scheme quality` で変換した重みと 4 ビットの先読み用のモデルでは、エンジンの確保が 18.9 / 19.5 GB、GPU 全体で 21.2 / 21.9 GB でした。`--draft off` では先読み用のモデルを読み込みません。24 GB 未満のカードにはモデルが入りません。
 24 GB のカード（RTX 3090・3090 Ti・4090）では試していません。画面の表示にも同じカードを使うと、空きはさらに減ります。`--max-ctx` を小さくすると、使うメモリーも減ります。
+0.3.2 からは、`--max-ctx` が無い時、32,768 トークンが空きメモリーに入らなければ文脈を短くします。8,192 トークンも入らない時は、読み込む前に止まります。どちらも起動の時に1行で出ます。
 Linux では、[#28](https://github.com/yasakani-dev/yasakani/pull/28) で寄稿されたエンジンをソースから組み立てて使います（[BUILDING.md](../BUILDING.md#linux-inkling-2)）。私たちはそれを RTX 5090 1枚の WSL2 だけで動かしました。
 
 ### どれくらい速い？ 条件は？
@@ -507,7 +510,7 @@ RTX 5090 以外の GPU も試していません。0.3.1 では試験的な対応
 
 ## 更新はどう動く？
 
-0.1.7 から、起動ファイル（`START.cmd`）が自分で更新できます。0.1.7・0.2.0・0.2.1 からは 0.3.1 への更新を案内します。v0.1.6 以前からは、今の版の起動用 ZIP（`yasakani-quickstart-0.3.1.zip`）を一度だけ手で取得して `START.cmd` を実行してください。モデルはそのまま使えます。
+0.1.7 から、起動ファイル（`START.cmd`）が自分で更新できます。0.1.7〜0.3.1 からは 0.3.2 への更新を案内します。v0.1.6 以前からは、今の版の起動用 ZIP（`yasakani-quickstart-0.3.2.zip`）を一度だけ手で取得して `START.cmd` を実行してください。モデルはそのまま使えます。
 
 * **確認。** 確認は 1 日に 1 回までです。メニューを出す前か、ブラウザーの画面を直接開く前にします（2 回目からの `START.cmd` は、メニューを出さずに画面を開きます）。github.com に問い合わせると表示してから HTTPS のリクエストを 1 回送ります。送るのは `GET https://api.github.com/repos/yasakani-dev/yasakani/releases/latest` だけで、User-Agent は `yasakani-quickstart` です。ID・Windows の版・GPU・質問など、パソコンの情報は送りません。待つのは 5 秒までで、GitHub につながらない時は 1 行で知らせて先に進みます。試験版（プレリリース）は案内しません。どのダウンロードとも同じく、GitHub には IP アドレスが届きます。
 * **止め方。** `START.cmd --no-update-check` で毎日の確認を止め、その設定を `quickstart_state.json` に残します。`START.cmd --update-check` で戻ります。環境変数 `YASAKANI_NO_UPDATE_CHECK=1` でも止まります。止めていても、メニューの「新しい版を確認する」と `START.cmd --action update` は使えます。

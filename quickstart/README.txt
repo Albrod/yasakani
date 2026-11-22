@@ -8,7 +8,7 @@ Windows 11 と NVIDIA の RTX 1 枚のパソコンで、YASAKANI をすぐに試
 使い方
   1. この zip を、C:\yasakani のような英数字だけの場所に展開します。
   2. START.cmd をダブルクリックします。
-  3. 画面の質問に番号で答えます（モデルは「品質モデル」「最速モデル」「最高品質モデル」のどれか）。
+  3. 画面の質問に番号で答えます（モデルは「品質モデル」「最速モデル」「最高品質モデル」「Inkling-2 Mini（試験的）」のどれか）。
   4. 最後にメニューが出ます。Enter を押すと、ブラウザーの画面が開きます。
   5. 点検まで済むと、次からは START.cmd をダブルクリックするだけで、ブラウザーの画面が直接開きます
      （モデルの質問とメニューは出ません）。メニューを出す時は、このフォルダーでコマンドプロンプトを開いて
@@ -18,7 +18,7 @@ START.cmd がすること
   - このパソコンの確認（Python 3.10 以上、GPU、NVIDIA のドライバー、空き容量）
   - エンジンの zip を公開ページからダウンロードして、SHA-256 を確かめる
   - このフォルダーの中に Python の環境を作って、パッケージを入れる
-  - モデル（約 13〜18 GB）を Hugging Face からダウンロードする
+  - モデル（約 13〜18 GB。Inkling-2 Mini は約 15.3 GB）を Hugging Face からダウンロードする
   - 点検（yasakani info・verify・selfcheck）
   - メニューを出す：1 番（Enter だけでも同じ）がブラウザーの画面です。ほかに、速さを測る／先読みあり・なしを比べる／
     黒い画面でチャットする／サーバーを起動する、を選べます
@@ -52,9 +52,10 @@ START.cmd がすること
     今すぐ確かめる：メニューの 7 か START.cmd --action update
     前の版に戻す：START.cmd --action rollback
     確認を止める：START.cmd --no-update-check（戻すときは --update-check）
-  - Inkling-2 Mini（0.3.1 から試験的に対応。文章だけ・24 GB 以上のカード）は、モデルの質問には出ません。
-    Hugging Face から取得して変換したフォルダーを、START.cmd --model-dir <フォルダー> で開きます。
-    手順はリポジトリの README.ja.md の「Inkling-2 Mini」にあります。
+  - Inkling-2 Mini（0.3.1 から試験的に対応。文章だけ・依頼は 1 件ずつ・24 GB 以上のカード）は、0.3.2 からモデルの質問の
+    4 番で選べます（START.cmd --model inkling2 でも同じ）。変換済みのコピー（約 15.3 GB）を Hugging Face から取得して、
+    ほかのモデルと同じく点検します。24 GB 未満のカードでは選べません。自分で取得や変換をしたフォルダーは、
+    これまで通り START.cmd --model-dir <フォルダー> で開けます。手順はリポジトリの README.ja.md の「Inkling-2 Mini」にあります。
   - 手で入れる手順と、くわしい説明は https://github.com/yasakani-dev/yasakani にあります。
 
 English
@@ -64,7 +65,8 @@ A starter for trying YASAKANI on a Windows 11 computer with one NVIDIA RTX card 
 How to use
   1. Unpack this zip to a plain path such as C:\yasakani
   2. Double-click START.cmd
-  3. Answer the questions with a number (the model is the "quality model", the "fastest model" or the "max-quality model").
+  3. Answer the questions with a number (the model is the "quality model", the "fastest model", the "max-quality model"
+     or Inkling-2 Mini, experimental).
   4. A menu comes last. Press Enter and the page opens in your browser.
   5. Once the checks have passed, a double-click on START.cmd opens the browser page directly (no model question, no menu).
      For the menu, open a command prompt in this folder and type START.cmd --menu
@@ -73,7 +75,7 @@ What START.cmd does
   - checks this computer (Python 3.10 or newer, the GPU, the NVIDIA driver, free disk space)
   - downloads the engine zip from the release page and checks its SHA-256
   - makes a Python environment inside this folder and installs the package
-  - downloads the model (about 13 to 18 GB) from Hugging Face
+  - downloads the model (about 13 to 18 GB; Inkling-2 Mini about 15.3 GB) from Hugging Face
   - runs the checks (yasakani info, verify, selfcheck)
   - shows a menu: 1 (or Enter alone) is the page in your browser; the other items measure the speed, compare look-ahead
     on and off, chat in the terminal, or start the server
@@ -104,9 +106,11 @@ Good to know
     An update copies the current start files to the backup folder and installs the engine and the package again
     (the models are kept). Check now: 7 in the menu or START.cmd --action update. Go back: START.cmd --action rollback.
     Turn the check off: START.cmd --no-update-check (on again: --update-check).
-  - Inkling-2 Mini (experimental since 0.3.1; text only; a card with 24 GB or more) is not in the model question.
-    Download it from Hugging Face, convert it, and open the folder with START.cmd --model-dir <folder>.
-    The steps are in the section "Inkling-2 Mini" of README.md in the repository.
+  - Inkling-2 Mini (experimental since 0.3.1; text only; one request at a time; a card with 24 GB or more) is choice 4
+    of the model question since 0.3.2 (or START.cmd --model inkling2). The quickstart downloads our converted copy (about
+    15.3 GB) from Hugging Face and checks it like the other models. Cards under 24 GB are not offered it. A folder you
+    downloaded or converted yourself still opens with START.cmd --model-dir <folder>. The steps are in the section
+    "Inkling-2 Mini" of README.md in the repository.
   - The manual steps and the full documentation are at https://github.com/yasakani-dev/yasakani
 
 License: Apache License 2.0 (see the repository).

@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.3.1`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)). 0.3.1 adds Inkling-2 Mini as an experimental, text-only model on a second engine library (see [Inkling-2 Mini](#inkling-2-mini-experimental)).
+Status: version `0.3.2`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)). 0.3.1 adds Inkling-2 Mini as an experimental, text-only model on a second engine library (see [Inkling-2 Mini](#inkling-2-mini-experimental)); 0.3.2 makes it the fourth model of the quickstart and chooses its context from the free GPU memory.
 
 ## What you need
 
@@ -607,7 +607,9 @@ the command passed 12 of 12 times, but if a case fails, run the command once mor
 New in 0.3.1. The package also runs [Inkling-2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) by Thinking Machines Lab
 (Apache-2.0, with the [Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/) named on its model card).
 Text only, one request at a time, tested on the RTX 5090 under Windows 11 only. It runs on a second engine library, not on `yskn.dll`;
-the Qwen3.8-27B commands, settings and numbers in the rest of this document do not change.
+the Qwen3.8-27B commands, settings and numbers in the rest of this document do not change. Since 0.3.2 the quickstart offers our converted
+folder as the fourth model of its model question (`START.cmd --model inkling2`; about 15.3 GB from Hugging Face, no conversion); the steps
+below stay for a folder of your own.
 
 **Linux: the engine of [#28](https://github.com/yasakani-dev/yasakani/pull/28).** A folder of the published model as downloaded, with no
 `yasakani.json`, runs on the Inkling-2 engine contributed in #28 inside `libyskn.so`, when that library was built with `-DYSKN_WITH_INK2=ON`
@@ -662,7 +664,13 @@ itself or a folder that holds it, and `YASAKANI_INK2_DLL` names it directly. Its
 
 **The drafter.** `chat`, `serve`, `bench` and `selfcheck` take `--draft auto|on|off` (default `auto`, or `YASAKANI_DRAFT`) and `--draft-depth N` (1 to 7, or `YASAKANI_DRAFT_DEPTH`; default: the engine's). `auto` lets the engine use the drafter only while it makes generation faster; `on` always drafts; `off` does not load it. The output does not change: greedy gives the same tokens as without the drafter, and sampling picks each token with the same probabilities (one random number per emitted token, so a seed gives the same tokens as long as the engine's logits are the same). The start-up lines say whether the drafter was loaded and the mode; `info` shows the `drafter` entry (for a converted drafter file also its scheme), whether the binding has the drafter calls and the capabilities of the engine library (packed dense matrices, drafter, converted drafter files). With `--draft auto` the drafter guesses up to 7 tokens per pass, and the model checks them up to the first one the drafter is unsure of. A converted drafter file needs a library that multiplies it as stored (the one of 0.3.1); with an older library the package generates without drafting and says so (with `--draft on` it stops with a message). The package needs a library of interface version 3 (the one of 0.3.1); an older `yskn_inkling2.dll` stops with a message. `chat` and `bench` print the tokens per pass, and `serve` adds `draft_mode`, `draft_passes`, `tokens_per_pass`, `draft_n` and `draft_n_accepted` to `timings`. `selfcheck` gives the same tokens with `--draft on` and `--draft off`.
 
-`--max-ctx`, `--device` and `--seed` work as for the Qwen models. These stop with a message instead: `--parallel` and `--concurrency`
+**Context** (new in 0.3.2). Without `--max-ctx` the commands take the folder's default (32,768 tokens for our folders) when it fits the
+free GPU memory that nvidia-smi reports, else the longest multiple of 4,096 that fits; when not even 8,192 fit they stop before loading
+and name `--max-ctx`. The rule counts the weights file, the drafter file when it is loaded, the engine's memory per position of context
+(77,824 bytes, 87,296 with the drafter), the rollback positions and a fixed part, as measured on the RTX 5090 with the `--scheme quality`
+folder. Without an answer of nvidia-smi the default stays. One line at start says what was chosen.
+
+`--max-ctx` (256 to the model's limit), `--device` and `--seed` work as for the Qwen models. These stop with a message instead: `--parallel` and `--concurrency`
 above 1, `bench --edit`, image input (`--mmproj`) and `selfcheck --write`.
 
 **Tool calls** (new in 0.3.1). `serve` accepts `tools` and `tool_choice` (`auto`, `none`, `required` or the name of a function) and returns

@@ -517,7 +517,9 @@ Known limits:
 ## Inkling-2 Mini (experimental, new in 0.3.1)
 
 Inkling-2 Mini is a language model by Thinking Machines Lab, published on November 20, 2026. Since 0.3.1 YASAKANI runs it as an
-experimental model, with a second engine library. How to download, convert and start it: [README](../README.md#inkling-2-mini).
+experimental model, with a second engine library. Since 0.3.2 it is choice 4 of the model question of `START.cmd` (or `START.cmd --model inkling2`):
+the quickstart downloads our converted copy from Hugging Face (about 15.3 GB) and checks it like the other models. How to download, convert
+and start it by hand: [README](../README.md#inkling-2-mini).
 
 ### Which cards can run it, and why 24 GB?
 
@@ -525,7 +527,8 @@ We ran it on one RTX 5090 (32 GB) under Windows 11 only. With the default contex
 memory (2.15 GB of it the key/value cache), and 23.8 GB with the drafter loaded (the default). The GPU as a whole had 25.0 GB in use
 without and 27.2 GB with the drafter (as the package reports it at the start); with the converted weights of `--scheme quality` and their
 4-bit drafter the engine allocated 18.9 / 19.5 GB, and the GPU had 21.2 / 21.9 GB in use. `--draft off` does not load the drafter. Cards under 24 GB cannot hold it. We have not run it on a 24 GB card (RTX 3090, 3090 Ti or 4090); with the desktop also on that card
-there is less room, and a smaller `--max-ctx` needs less memory. On Linux it runs on the engine contributed in
+there is less room, and a smaller `--max-ctx` needs less memory. Since 0.3.2, without `--max-ctx` the package takes a shorter context when
+32,768 tokens do not fit the free GPU memory, and stops before loading when not even 8,192 fit; a line at start says which. On Linux it runs on the engine contributed in
 [#28](https://github.com/yasakani-dev/yasakani/pull/28), built from source ([BUILDING.md](../BUILDING.md#linux-inkling-2)); we ran that one on one
 RTX 5090 under WSL2 only.
 
@@ -628,7 +631,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7, 0.2.0 or 0.2.1 it offers 0.3.1. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.1.zip`) by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 to 0.3.1 it offers 0.3.2. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.2.zip`) by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, before it shows the menu or before it opens the browser page directly (from the second run on,
   `START.cmd` does that without a menu), the quickstart first prints that it asks github.com, then sends one HTTPS request:
