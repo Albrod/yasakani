@@ -450,6 +450,7 @@ RTX 5090 1枚・Windows 11・2026 年 11 月 22 日・公開の重み・1件ず�
 ### `--scheme quality` で変換した重みとは？
 
 変換のプログラムは、重みを少ないビット数で書き直せます（`inkling2_convert.py ... --scheme quality`、[README](../README.ja.md#inkling-2-mini)）。
+この変換の結果は Hugging Face に置いているので、変換せずに取得もできます（[yasakani-dev/Inkling-2-Mini-YASAKANI-quality](https://huggingface.co/yasakani-dev/Inkling-2-Mini-YASAKANI-quality)、15.3 GB）。変換の中身は次の通りです。
 密な行列の多くを 4 ビットか 8 ビットにして、層 20〜23 の 8 ビットの専門家を 4 ビットに詰め直します。できるのは 15.05 GB の `.yskn` のファイル 1 つです
 （公開のファイルは 19.5 GB。形式は [FORMAT](FORMAT.md)）。公開のモデルと 43 個の文章（14,024 か所。モデル自身の思考と答え・英語と日本語の文章・コード）で比べると、
 KL ダイバージェンスは 0.0110 でした。次に最も出やすいトークンは 96.0% の位置で同じでした。先読み用のモデルも 4 ビットで書き直します（`mtp_d4.yskn`。635.8 MB が 209.7 MB に）。

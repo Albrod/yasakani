@@ -170,6 +170,16 @@ Inkling-2 Mini は、Thinking Machines Lab が 2026 年 11 月 20 日に公開�
 
 必要な物は次の 3 つです：Windows 11（64 ビット）・24 GB 以上の NVIDIA RTX のカード・YASAKANI 0.3.1 の起動ファイルかパッケージ。24 GB 未満のカードにはモデルが入りません。ダウンロードにはディスクの空きが約 20 GB 要ります。変換のプログラムは、同じドライブなら重みのファイルを新しいフォルダーにリンクするので、空きはほとんど減りません（別のドライブではコピーします）。下の手順は Windows の物です。Linux では、[#28](https://github.com/yasakani-dev/yasakani/pull/28) で寄稿された別のエンジンで動きます。`-DYSKN_WITH_INK2=ON` を付けてソースから組み立て、ダウンロードしたフォルダーを変換せずに読みます（[BUILDING.md](BUILDING.md#linux-inkling-2)、英語）。
 
+**一番早い方法：変換済みのコピー。** 下で説明する `--scheme quality` で変換した物を、Hugging Face に置いています（[yasakani-dev/Inkling-2-Mini-YASAKANI-quality](https://huggingface.co/yasakani-dev/Inkling-2-Mini-YASAKANI-quality)、15.3 GB、4 ビットの先読み用のモデルを含む）。取得したフォルダーを、変換せずにそのまま使えます。起動ファイルのフォルダーでは、先に `yasakani_env.cmd` を実行します。`hf`・`python`・`yasakani` が使えるようになります。
+
+```bat
+hf download yasakani-dev/Inkling-2-Mini-YASAKANI-quality --local-dir D:\models\inkling2-mini-quality
+yasakani verify --model-dir D:\models\inkling2-mini-quality
+START.cmd --model-dir D:\models\inkling2-mini-quality
+```
+
+公開のモデルを自分で変換する時は、次の手順です。
+
 1. 公開されているモデルを、Hugging Face のコマンド（`hf`）でダウンロードします。`hf` は Python のパッケージ `huggingface_hub` に入っています。版は私たちが確認した物を指定します。
 2. この版のソースにある `tools/convert/inkling2_convert.py` で変換します（公開ページのソースコードの ZIP か、このリポジトリの複製）。標準の設定では重みを変えません。パッケージが使うファイルを隣に作るだけです（各ファイルの SHA-256 を書いた `yasakani.json`・`selfcheck.json`・`NOTICE`）。ダウンロードに入っている画像の部分は使いません。先読み用のモデル（`mtp.safetensors`）は、重みと同じようにフォルダーにリンクかコピーします（下の `--scheme quality` では、代わりに 4 ビットで書き直した物を作ります）。
 3. フォルダーを確認してから、チャット・サーバー・ブラウザーの画面のどれかを起動します。

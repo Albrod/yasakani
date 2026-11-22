@@ -558,7 +558,9 @@ with the published model, not accuracy on tasks; we have not measured task accur
 
 ### What are the converted weights of `--scheme quality`?
 
-The converter can write the weights again in fewer bits (`inkling2_convert.py ... --scheme quality`, [README](../README.md#inkling-2-mini)):
+The converter can write the weights again in fewer bits (`inkling2_convert.py ... --scheme quality`, [README](../README.md#inkling-2-mini)). We publish this
+conversion on Hugging Face, so you can download it instead of converting: [yasakani-dev/Inkling-2-Mini-YASAKANI-quality](https://huggingface.co/yasakani-dev/Inkling-2-Mini-YASAKANI-quality)
+(15.3 GB). What the conversion does:
 most dense matrices in 4 or 8 bits, and the 8-bit experts of layers 20 to 23 re-packed to 4 bits, in one `.yskn` file of 15.05 GB
 instead of 19.5 GB ([FORMAT](FORMAT.md)). Against the published model on 43 text windows (14,024 positions: the model's own thinking and
 answers, English and Japanese prose, code) the KL divergence was 0.0110, and the most likely next token was the same at 96.0 % of the

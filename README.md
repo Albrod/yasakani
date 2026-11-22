@@ -170,6 +170,16 @@ Inkling-2 Mini is a language model that Thinking Machines Lab published on Novem
 
 What you need: 64-bit Windows 11, an NVIDIA RTX card with 24 GB or more (cards under 24 GB cannot hold the model), the YASAKANI 0.3.1 quickstart or package, and about 20 GB of free disk for the download. The converter links the weights file into the new folder when both are on the same drive, so the folder takes almost no more space there (on another drive the converter copies the file). The steps below are for Windows. On Linux the model runs on another engine, contributed in [#28](https://github.com/yasakani-dev/yasakani/pull/28): you build it from source with `-DYSKN_WITH_INK2=ON`, and it reads the downloaded folder without conversion ([BUILDING.md](BUILDING.md#linux-inkling-2)).
 
+**The quickest way: our converted copy.** We publish the `--scheme quality` conversion described below on Hugging Face: [yasakani-dev/Inkling-2-Mini-YASAKANI-quality](https://huggingface.co/yasakani-dev/Inkling-2-Mini-YASAKANI-quality) (15.3 GB, with the 4-bit drafter). Download it and use the folder as it is, without converting. In a quickstart folder, run `yasakani_env.cmd` first; it puts `hf`, `python` and `yasakani` on the path.
+
+```bat
+hf download yasakani-dev/Inkling-2-Mini-YASAKANI-quality --local-dir D:\models\inkling2-mini-quality
+yasakani verify --model-dir D:\models\inkling2-mini-quality
+START.cmd --model-dir D:\models\inkling2-mini-quality
+```
+
+To convert the published model yourself instead:
+
 1. Download the published model with the Hugging Face command line tool (`hf`, from the Python package `huggingface_hub`), at the revision we checked.
 2. Convert it with `tools/convert/inkling2_convert.py` from the source of this release (the source code ZIP on the release page, or a clone of this repository). By default the converter does not change the weights: it writes the files our package needs next to them (the manifest `yasakani.json` with the SHA-256 of every file, `selfcheck.json` and `NOTICE`). The image part in the download is not used. The drafter (`mtp.safetensors`) is linked or copied into the folder in the same way as the weights (with `--scheme quality`, below, the converter writes a 4-bit copy of it instead).
 3. Check the folder, then chat, start the server or open the browser page.
