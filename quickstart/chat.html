@@ -282,11 +282,12 @@ const CSV = 'name,age,city\nSato,34,Tokyo\nSuzuki,28,Osaka\nTakahashi,41,Nagoya\
 const TEXT = {
   ja: {
     title: 'YASAKANI チャット', me: 'あなた', ai: 'YASAKANI',
-    m_speed: '最速モデル', m_quality: '品質モデル', m_max: '最高品質モデル', m_custom: 'モデル', ctx: '文脈 {n} トークンまで',
+    m_speed: '最速モデル', m_quality: '品質モデル', m_max: '最高品質モデル', m_inkling2: 'Inkling-2 Mini（試験的）', m_custom: 'モデル', ctx: '文脈 {n} トークンまで',
     loading: 'モデルを読み込んでいます…', gone: 'サーバーに届きません',
     ph: 'メッセージを書く（Enter で送る、Shift+Enter で改行）', send: '送る', stop: '止める',
     think: '考えてから答える', fresh: '新しい会話', local: 'このパソコンの中だけで動いています。会話はどこにも送られません。',
     e_title: 'このパソコンの GPU で、Qwen3.8-27B が答えます', e_sub: '右上の数字が、いまの速さです。まずは下の例を押してみてください。',
+    e_title_ink: 'このパソコンの GPU で、Inkling-2 Mini（試験的）が答えます',
     tries: ['Python でクイックソートを書いて、短く説明して',
             ['CSV を JSON に直して', '次の CSV を JSON の配列に直してください。\n\n' + CSV],
             '量子コンピュータを、中学生にもわかるように説明して'],
@@ -346,18 +347,19 @@ const TEXT = {
     md_custom: 'モデルのフォルダーを指定して起動したので、切り替えはできません。',
     md_old: 'この起動ファイルは、ブラウザーからの切り替えと終了に対応していません。',
     md_busy: '回答を書いている間は切り替えられません。',
-    md_hint: 'ここに出るのはダウンロード済みのモデルです。ほかのモデルは "START.cmd --model max" のように起動するとダウンロードできます（quality・speed・max。quality と max には GPU のメモリが 24 GB 以上要ります）。',
+    md_hint: 'ここに出るのはダウンロード済みのモデルです。ほかのモデルは "START.cmd --model max" のように起動するとダウンロードできます（quality・speed・max・inkling2。speed 以外には GPU のメモリが 24 GB 以上要ります）。',
     md_sw_fail: '切り替えられませんでした（{m}）。',
     md_sw_back: '切り替えは終わりませんでした。前のモデルを使っています。黒い画面に出ている内容を確認してください。',
     md_quit: '終了', md_quit_go: 'YASAKANI を終了する', md_quit_hint: 'モデルを止めて、GPU のメモリを空けます。',
   },
   en: {
     title: 'YASAKANI chat', me: 'You', ai: 'YASAKANI',
-    m_speed: 'fastest model', m_quality: 'quality model', m_max: 'max-quality model', m_custom: 'model', ctx: 'context up to {n} tokens',
+    m_speed: 'fastest model', m_quality: 'quality model', m_max: 'max-quality model', m_inkling2: 'Inkling-2 Mini model (experimental)', m_custom: 'model', ctx: 'context up to {n} tokens',
     loading: 'Loading the model…', gone: 'The server cannot be reached',
     ph: 'Write a message (Enter sends, Shift+Enter starts a new line)', send: 'Send', stop: 'Stop',
     think: 'Think before answering', fresh: 'New conversation', local: 'Runs on this computer only. The conversation is not sent anywhere.',
     e_title: 'Qwen3.8-27B answers on the GPU of this computer', e_sub: 'The number at the top right is the current speed. Try one of these first.',
+    e_title_ink: 'Inkling-2 Mini (experimental) answers on the GPU of this computer',
     tries: ['Write quicksort in Python and explain it briefly',
             ['Turn a CSV into JSON', 'Convert this CSV to a JSON array.\n\n' + CSV],
             'Explain quantum computers to a 14-year-old'],
@@ -417,7 +419,7 @@ const TEXT = {
     md_custom: 'Started with a model folder, so switching is off.',
     md_old: 'This launcher does not support switching and quitting from the browser.',
     md_busy: 'Cannot switch while an answer is being written.',
-    md_hint: 'The models listed are the ones already downloaded. Start with "START.cmd --model max" (quality, speed or max) to download another one; quality and max need a GPU with 24 GB of memory or more.',
+    md_hint: 'The models listed are the ones already downloaded. Start with "START.cmd --model max" (quality, speed, max or inkling2) to download another one; all but speed need a GPU with 24 GB of memory or more.',
     md_sw_fail: 'Could not switch ({m}).',
     md_sw_back: 'The switch did not finish. The model before is in use. Look at the messages in the black window.',
     md_quit: 'Quit', md_quit_go: 'Quit YASAKANI', md_quit_hint: 'Stops the model and frees the GPU memory.',
@@ -435,7 +437,7 @@ let L = TEXT[(navigator.language || 'en').toLowerCase().startsWith('ja') ? 'ja' 
 const t = (k, v) => String(L[k]).replace(/\{(\w)\}/g, (m, a) => (v && a in v ? v[a] : m));
 const fmt = n => Number(n).toLocaleString('en-US');
 const cfg = { lang: null, model: 'custom', repo: 'https://github.com/yasakani-dev/yasakani', support: 'https://camp-fire.jp/projects/992233/view' };
-const KNOWN = { speed: 1, quality: 1, max: 1 };
+const KNOWN = { speed: 1, quality: 1, max: 1, inkling2: 1 };      // the models of the launcher (MODELS in quickstart.py)
 const TABS = ['chat', 'speed', 'api', 'model'];
 
 let history = [];              // {role, content} sent to the server
@@ -467,6 +469,9 @@ function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.
 function put(id, text) { const e = $(id); if (e.textContent !== text) e.textContent = text; }
 const modelName = k => t('m_' + (k in KNOWN ? k : 'custom'));
 const modelId = () => (typeof cfg.model_id === 'string' && cfg.model_id) || (health && health.model) || '';
+// The model that answers, for the empty chat: Inkling-2 Mini (the launcher's model, or a model folder whose engine says so), else Qwen3.8-27B
+const inkling = () => cfg.model === 'inkling2' || /^inkling/i.test(modelId());
+const emptyTitle = () => (inkling() ? L.e_title_ink : L.e_title);
 const ctxLimit = () => Number(cfg.max_context_tokens) || (health && Number(health.max_context_tokens)) || 0;
 const waiting = () => phase === 'loading' || phase === 'switching';
 const over = () => phase === 'failed' || phase === 'stopped' || phase === 'ended';      // final: the page asks the launcher nothing more
@@ -496,7 +501,7 @@ function setButton() {
 function showEmpty() {
   const log = $('log'); log.textContent = '';
   const box = el('div', 'empty');
-  box.appendChild(el('h1', null, L.e_title)); box.appendChild(el('p', null, L.e_sub));
+  box.appendChild(el('h1', null, emptyTitle())); box.appendChild(el('p', null, L.e_sub));
   const tries = el('div', 'tries');
   for (const s of L.tries) {
     const [label, prompt] = Array.isArray(s) ? s : [s, s];
@@ -546,7 +551,11 @@ function paintStatus() {
   const now = phase + (checking ? '+' : '');
   if (said !== now) { said = now; $('live').textContent = phase === 'loading' && !checking ? L.loading : text || st; }
 }
-function refresh() { paintStatus(); setButton(); paintSpeed(); paintApi(); paintModel(); showUpdate(); }
+function refresh() {
+  paintStatus(); setButton(); paintSpeed(); paintApi(); paintModel(); showUpdate();
+  const h = document.querySelector('#log .empty h1');         // after a model switch the empty chat names the new model
+  if (h && h.textContent !== emptyTitle()) h.textContent = emptyTitle();
+}
 
 // ---- copying.  One click on a "copy" button puts the text of its code block (or of the element named in data-from) on the
 //      clipboard.  Where the browser gives no clipboard, the text is selected instead and the button says to press Ctrl+C.
@@ -902,7 +911,7 @@ function paintModel() {
            : phase === 'switching' ? (m.name === switchTo ? coming : '') : '';
   }
   const can = controls && !custom && (phase === 'ready' || phase === 'loading') && !busy && !bench && !pending;
-  put('m_hint', custom ? L.md_custom : !controls ? L.md_old : busy || bench ? L.md_busy : rows.length < 3 && !dead ? L.md_hint : '');
+  put('m_hint', custom ? L.md_custom : !controls ? L.md_old : busy || bench ? L.md_busy : rows.length < Object.keys(KNOWN).length && !dead ? L.md_hint : '');
   const key = JSON.stringify([rows, can, L.title]);
   if (key === modelsShown) return;         // the buttons stay the same elements between two readings of the config
   modelsShown = key;

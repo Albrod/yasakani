@@ -766,10 +766,25 @@ class QuickstartTests(unittest.TestCase):
             self.assertEqual(self.qs.estimate_context(free, "max"), want, free)
         self.assertEqual(G.overhead_mib(MAXQ[0]), 2300)
         self.assertEqual(self.qs.MODELS["max"]["repo"], "yasakani-dev/Qwen3.8-27B-YASAKANI-max-quality")
-        self.assertEqual(set(self.qs.MODELS), set(self.qs.MODEL_BYTES))
-        self.assertEqual(set(self.qs.MODELS), set(self.qs.OVERHEAD_MIB))
+        self.assertEqual(set(self.qs.MODELS) - {"inkling2"}, set(self.qs.MODEL_BYTES))       # the Qwen3.8 rule's models
+        self.assertEqual(set(self.qs.MODELS) - {"inkling2"}, set(self.qs.OVERHEAD_MIB))
         for m in self.qs.MODELS:
             self.assertIn("m_" + m, self.qs.T)
+
+    def test_inkling2_rule_same_as_package(self):
+        """0.3.2: the launcher's copy of the Inkling-2 rule (the published folder, drafter on, 512 rollback positions) gives the
+        package's context for every free memory."""
+        qs = self.qs
+        self.assertEqual((qs.INK2_DEFAULT_CONTEXT, qs.INK2_CONTEXT_STEP, qs.INK2_MIN_CONTEXT, qs.INK2_OVERHEAD_MIB),
+                         (32768, G.INK2_CONTEXT_STEP, G.INK2_MIN_CONTEXT, G.INK2_OVERHEAD_MIB))
+        self.assertEqual(qs.INK2_BYTES_PER_POSITION, G.ink2_bytes_per_position(65536, True))
+        self.assertAlmostEqual(qs.INK2_ROLLBACK_MIB, G.ink2_rollback_mib(512))
+        self.assertEqual(sum(qs.INK2_FILES_BYTES), 15052423172 + 209688040)       # yasakani.json of the published folder
+        for free in range(0, 40001, 13):
+            want = G.ink2_context(free, sum(qs.INK2_FILES_BYTES), G.ink2_bytes_per_position(65536, True), 32768, 512)
+            self.assertEqual(qs.estimate_ink2_context(free), want, free)
+        self.assertEqual(qs.estimate_ink2_context(32607 - 3693), 32768)            # the RTX 5090 of the measurement
+        self.assertEqual(qs.estimate_ink2_context(15000), 0)                       # a 16 GB card
 
     def test_pick(self):
         qs = self.qs

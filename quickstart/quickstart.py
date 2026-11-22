@@ -3,7 +3,8 @@
 
 Double-click START.cmd.  This script then
   1. checks this computer (Windows, Python, GPU, NVIDIA driver, free disk space) before anything is downloaded,
-  2. lets you pick one of the three models (on a GPU with less than 24 GB only the fastest model fits),
+  2. lets you pick one of the four models: the three Qwen3.8-27B models and, since 0.3.2, Inkling-2 Mini (experimental, text only)
+     (on a GPU with less than 24 GB only the fastest model fits),
   3. downloads the engine zip from the release page and checks its SHA-256,
   4. makes a private Python environment in this folder and installs the package,
   5. downloads the model folder from Hugging Face,
@@ -71,7 +72,8 @@ UPDATE_RC = 75                      # run_web: the page asked for the update; th
 SWITCH_RC = 76                      # run_web: the page picked another downloaded model (a.web_switch); the server is stopped
 QUIT_RC = 77                        # run_web: the quit button of the page; the server is stopped and the launcher ends
 CONTROL_MAX_BODY = 4096             # the body of a control request of the page (/webchat/shutdown, /webchat/switch_model)
-DEFAULT_MODEL_ID = "qwen3.8-27b"    # the model's id in `yasakani serve`; once it is ready the page gets the engine's own answer
+DEFAULT_MODEL_ID = "qwen3.8-27b"    # the model's id in `yasakani serve` (MODELS[...]["model_id"] for another); once it is ready the
+                                    # page gets the engine's own answer
 MODEL_ID_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}")    # the engine's id goes to the page only when it is a plain name
 GPU_CACHE_SECONDS, GPU_QUERY_TIMEOUT = 2.0, 5        # the GPU line of the page: nvidia-smi at most this often, and its time limit
 GPU_SETTLE_SECONDS, GPU_SETTLE_MIB = 15.0, 1024      # a model switch waits this long for the GPU memory to come back this near
@@ -84,8 +86,14 @@ MODELS = {
     "quality": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-quality", "need_gb": 16},
     "speed": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-speed", "need_gb": 14},
     "max": {"repo": "yasakani-dev/Qwen3.8-27B-YASAKANI-max-quality", "need_gb": 20},
+    # 0.3.2: the converted Inkling-2 Mini (experimental, text only, one request at a time), at a pinned revision of its repository.
+    # Its files are 15.29 GB (shown as 15.3); need_gb is that rounded up plus 1 GB, as for the others.
+    "inkling2": {"repo": "yasakani-dev/Inkling-2-Mini-YASAKANI-quality", "revision": "8de37e9980397da63b050fe008493a35f1c483e9",
+                 "need_gb": 17, "get_gb": "15.3", "model_id": "inkling-2-mini-quality"},
 }
-MODEL_ORDER = ("quality", "speed", "max")            # the order of the model question (1, 2, 3)
+MODEL_ORDER = ("quality", "speed", "max", "inkling2")   # the order of the model question (1, 2, 3, 4)
+MODEL_KEYS = {str(i + 1): name for i, name in enumerate(MODEL_ORDER)}     # the answers of the model question
+TEST_MODEL_SRC = "YASAKANI_QS_TEST_MODEL_SRC_"      # + the model's name in capitals: tests only, a folder instead of the download
 ACTIONS = ("auto", "menu", "bench", "compare", "web", "chat", "serve", "none", "update", "rollback")
 MENU = {"1": "web", "2": "bench", "3": "compare", "4": "chat", "5": "serve", "7": "update"}   # "6" and anything else: quit
 MENU_DEFAULT = "1"                  # Enter alone opens the page in the browser
@@ -104,6 +112,13 @@ MODEL_BYTES = {   # weights, draft model, its output head (the published files)
     "max": (15723962368, 1164969472, 1411010584),
 }
 OVERHEAD_MIB = {"quality": 2300, "speed": 2100, "max": 2300}
+# Inkling-2 Mini (0.3.2): the rule of yasakani/gpu.py ink2_context() with the files of the published folder (weights, drafter), the
+# drafter loaded (the default) and 512 rollback positions, repeated here only to tell the context before anything is downloaded
+# (python/tests/test_gpu.py checks that the two agree).
+INK2_FILES_BYTES = (15052423172, 209688040)
+INK2_BYTES_PER_POSITION = 65536 + 12288 + 10240       # config.json's cache + the engine's rest + the drafter's, per position
+INK2_ROLLBACK_MIB, INK2_OVERHEAD_MIB = (512 - 64) * 1.8, 1800
+INK2_DEFAULT_CONTEXT, INK2_CONTEXT_STEP, INK2_MIN_CONTEXT = 32768, 4096, 8192
 
 # ---- the NVIDIA driver (0.1.4).  yskn.dll carries the CUDA 13.2 runtime (linked in, there is no separate runtime DLL).  Under CUDA minor
 # version compatibility a program built with any CUDA 13.x toolkit runs on a driver of the R580 branch or newer, which reports CUDA 13.0
@@ -208,12 +223,19 @@ T = {
         "en": "The driver looks older than 580 ({d}), but --skip-driver-check was given, so going on. The engine will most likely not start.",
     },
     "speed_only": {
-        "ja": "GPU のメモリが 24 GB 未満なので、使えるのは最速モデルだけです（品質モデルと最高品質モデルは入りません）。",
-        "en": "The GPU has less than 24 GB, so only the fastest model can be used (the quality and max-quality models do not fit).",
+        "ja": "GPU のメモリが 24 GB 未満なので、使えるのは最速モデルだけです（品質モデル・最高品質モデル・Inkling-2 Mini は入りません）。",
+        "en": "The GPU has less than 24 GB, so only the fastest model can be used (the quality and max-quality models and Inkling-2 Mini "
+              "do not fit).",
     },
     "quality_no": {
-        "ja": "品質モデルと最高品質モデルには GPU のメモリが 24 GB 以上要ります。--model speed で最速モデルを選んでください。",
-        "en": "The quality and max-quality models need a GPU with 24 GB or more. Choose the fastest model with --model speed.",
+        "ja": "品質モデル・最高品質モデル・Inkling-2 Mini には GPU のメモリが 24 GB 以上要ります。--model speed で最速モデルを選んでください。",
+        "en": "The quality and max-quality models and Inkling-2 Mini need a GPU with 24 GB or more. Choose the fastest model with "
+              "--model speed.",
+    },
+    "ctx_ink": {
+        "ja": "Inkling-2 Mini の文脈の長さは、起動のたびに GPU の空きメモリから決めます（いまの空きで {n} トークン。最大 32,768）。",
+        "en": "The context length of Inkling-2 Mini is chosen from the free GPU memory each time it starts ({n} tokens with what is "
+              "free now; at most 32,768).",
     },
     "ctx_auto": {
         "ja": "文脈の長さは、起動のたびに GPU の空きメモリから決めます（いまの空きで {n} トークン。最大 262,144）。",
@@ -242,18 +264,22 @@ T = {
               "  1) 品質モデル〈おすすめ〉  元のモデルに近い。ファイル 12.4 GB\n"
               "  2) 最速モデル            いちばん速い。ファイル 10.3 GB\n"
               "  3) 最高品質モデル        元のモデルにいちばん近い。ファイル 15.7 GB。生成は品質モデルの約 0.8〜0.9 倍の速さ\n"
+              "  4) Inkling-2 Mini〈試験的〉 文章だけ。依頼は 1 件ずつ。GPU 24 GB 以上。ダウンロード約 15.3 GB\n"
               "番号を入れて Enter [{d}]: ",
         "en": "Which model?\n"
               "  1) quality model (recommended)  close to the original. 12.4 GB file\n"
               "  2) fastest model                the fastest. 10.3 GB file\n"
               "  3) max-quality model            the closest to the original. 15.7 GB file; writes at about 0.8 to 0.9 times\n"
               "                                  the speed of the quality model\n"
+              "  4) Inkling-2 Mini (experimental) text only, one request at a time, a GPU with 24 GB or more;\n"
+              "                                  about 15.3 GB download\n"
               "Type the number and press Enter [{d}]: ",
     },
     "picked": {"ja": "モデル: {m}", "en": "Model: {m}"},
     "m_quality": {"ja": "品質モデル", "en": "quality model"},
     "m_speed": {"ja": "最速モデル", "en": "fastest model"},
     "m_max": {"ja": "最高品質モデル", "en": "max-quality model"},
+    "m_inkling2": {"ja": "Inkling-2 Mini（試験的）", "en": "Inkling-2 Mini model (experimental)"},
     "checks_done": {"ja": "点検は済んでいます（飛ばします）。", "en": "The checks were done before (skipped)."},
     "engine_have": {"ja": "エンジンは準備済みです。", "en": "The engine is already in place."},
     "engine_local": {"ja": "このフォルダーにある {z} を使います。", "en": "Using {z} from this folder."},
@@ -283,6 +309,10 @@ T = {
     "model_get": {
         "ja": "Hugging Face から {r} をダウンロードします（約 {g} GB。回線によっては時間がかかります）。",
         "en": "Downloading {r} from Hugging Face (about {g} GB; this can take a while).",
+    },
+    "model_test_src": {
+        "ja": "試験用: モデルのファイルを {p} から入れます（{v}。Hugging Face には問い合わせません）。",
+        "en": "Test only: the model files come from {p} ({v}; Hugging Face is not asked).",
     },
     "retry_dl": {"ja": "もう一度、別の方法で試します。", "en": "Trying once more with another transfer method."},
     "run": {"ja": "> yasakani {c}", "en": "> yasakani {c}"},
@@ -389,6 +419,10 @@ T = {
     "switch_back": {
         "ja": "{m}は点検に合格しなかったので、{o}に戻します。",
         "en": "The {m} did not pass the checks, so going back to the {o}.",
+    },
+    "cmp_qwen_only": {
+        "ja": "先読みあり・なしの比べは、Qwen3.8 のモデルだけで使えます。",
+        "en": "The look-ahead comparison works with the Qwen3.8 models only.",
     },
     "cmp_nofile": {
         "ja": "lookahead_check.py が見つかりません: {p}\nzip をもう一度展開してください。",
@@ -622,6 +656,75 @@ def direct_start(action, model, checked, model_dir=None):
     return action == "auto" and not model_dir and model in MODELS and bool((checked or {}).get(model))
 
 
+DOWNLOAD_CODE = ("import sys\nfrom huggingface_hub import snapshot_download\n"
+                 "kw = {\"revision\": sys.argv[3]} if len(sys.argv) > 3 else {}\n"
+                 "snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2], **kw)\n")
+
+
+def download_command(vpy, model, mdir):
+    """The command that downloads ``model`` from Hugging Face into ``mdir``, with the Python of the private environment.  A model
+    with a pinned revision (Inkling-2 Mini) gets it as a third argument; the Qwen models download the main branch, as before."""
+    m = MODELS[model]
+    return [vpy, "-c", DOWNLOAD_CODE, m["repo"], mdir] + ([m["revision"]] if m.get("revision") else [])
+
+
+def copy_model_files(src, dst):
+    """Tests only (TEST_MODEL_SRC): the regular files at the top of the folder ``src`` -> ``dst``, as a hard link where the drive
+    allows it, else as a copy.  -> the number of files; raises OSError."""
+    os.makedirs(dst, exist_ok=True)
+    n = 0
+    for name in sorted(os.listdir(src)):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if name.startswith(".") or not os.path.isfile(s):
+            continue
+        if os.path.lexists(d):
+            os.remove(d)
+        try:
+            os.link(s, d)
+        except OSError:
+            shutil.copy2(s, d)
+        n += 1
+    if not n:
+        raise OSError("no files in " + src)
+    return n
+
+
+def fetch_model(ui, vpy, env, model, mdir, call=subprocess.call, environ=None):
+    """Step 5: downloads ``model`` into ``mdir`` (once more without Xet when the first try fails).  -> 0, or the exit code of the
+    download.  Tests only: when the environment has TEST_MODEL_SRC + the model's name in capitals, the files of that folder are
+    linked or copied instead and Hugging Face is not asked."""
+    var = TEST_MODEL_SRC + model.upper()
+    src = (os.environ if environ is None else environ).get(var)
+    if src:
+        ui.say("model_test_src", p=src, v=var)
+        try:
+            copy_model_files(src, mdir)
+        except OSError as e:
+            print("%s: %s" % (type(e).__name__, e), flush=True)
+            return 1
+        return 0
+    m = MODELS[model]
+    ui.say("model_get", r=m["repo"], g=m.get("get_gb") or m["need_gb"] - 1)
+    os.makedirs(mdir, exist_ok=True)
+    cmd = download_command(vpy, model, mdir)
+    rc = call(cmd, env=env)
+    if rc != 0:
+        ui.say("retry_dl")
+        env2 = dict(env)
+        env2["HF_HUB_DISABLE_XET"] = "1"
+        rc = call(cmd, env=env2)
+    return rc
+
+
+def is_inkling2_dir(mdir):
+    """True when the model folder is an Inkling-2 folder of the package ("architecture": "inkling2" in its yasakani.json)."""
+    try:
+        with open(os.path.join(mdir, "yasakani.json"), encoding="utf-8") as f:
+            return json.load(f).get("architecture") == "inkling2"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def installed_models(home, downloaded, quality_fits, isfile=os.path.isfile):
     """The models the page can switch between: those the quickstart downloaded into this home (models_downloaded of the state, and
     the folder is still there) that fit this GPU, in the order of the model question."""
@@ -725,6 +828,16 @@ def estimate_context(free_mib, model):
         return with_head, False
     without = ctx(w + d)
     return (without, True) if without > with_head else (with_head, False)
+
+
+def estimate_ink2_context(free_mib):
+    """The context the package will choose for the Inkling-2 Mini folder (yasakani/gpu.py, ink2_context()); 0 = it does not fit."""
+    room = free_mib - sum(INK2_FILES_BYTES) / float(1 << 20) - INK2_OVERHEAD_MIB - INK2_ROLLBACK_MIB - MARGIN_MIB
+    n = max(0, int(room * (1 << 20) // INK2_BYTES_PER_POSITION))
+    if n >= INK2_DEFAULT_CONTEXT:
+        return INK2_DEFAULT_CONTEXT
+    n = (n // INK2_CONTEXT_STEP) * INK2_CONTEXT_STEP
+    return n if n >= INK2_MIN_CONTEXT else 0
 
 
 def driver_major(text):
@@ -1244,7 +1357,8 @@ class WebSession:
         self.on_ready, self._clock = on_ready, clock
         self.t0 = clock()                               # `yasakani serve` was started just before
         self.ready = False                              # /health said "ok" once
-        self.model_id, self.max_context = DEFAULT_MODEL_ID, None
+        self.model_id = (MODELS.get(model) or {}).get("model_id", DEFAULT_MODEL_ID)   # until the engine tells its own
+        self.max_context = None
         self.leaving = None                             # "stopping" or "switching": the launcher itself ends this run
         self.phase = None                               # "checking": the checks of a model switch run (open_check_server)
         self.told_failed = threading.Event()            # a page was told "failed"
@@ -1968,7 +2082,8 @@ def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, instal
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="YASAKANI quickstart")
-    ap.add_argument("--model", choices=sorted(MODELS), help="skip the question: quality, speed or max")
+    ap.add_argument("--model", choices=sorted(MODELS), help="skip the question: quality, speed, max or inkling2 (Inkling-2 Mini, "
+                                                           "experimental)")
     ap.add_argument("--model-dir", help="use this model folder instead of downloading one")
     ap.add_argument("--engine-zip", help="use this engine zip instead of downloading it (its SHA-256 is still checked)")
     ap.add_argument("--home", help="where to keep everything (default: the folder of this file)")
@@ -2120,7 +2235,7 @@ def main(argv=None):
     ok = st.setdefault("models_ok", {})
     model = a.model
     if not quality_fits and not a.model_dir:
-        if model in ("quality", "max"):
+        if model in MODELS and model != "speed":       # the quality, max-quality and Inkling-2 models need 24 GB
             ui.say("quality_no")
             return 2
         model = "speed"
@@ -2134,12 +2249,22 @@ def main(argv=None):
         if a.yes or a.model_dir or a.action != "menu":
             model = prev
         else:
-            d = {"speed": "2", "max": "3"}.get(prev, "1")
-            model = {"2": "speed", "3": "max"}.get(ask(ui.t("pick", d=d), d), "quality")
+            d = {name: key for key, name in MODEL_KEYS.items()}.get(prev, "1")
+            model = MODEL_KEYS.get(ask(ui.t("pick", d=d), d), "quality")
 
     def context_note(used):
-        """On cards that do not keep the full context: the context the package will choose with ``used`` MiB in use."""
-        if gpu["total"] is None or used is None or gpu["total"] >= FULL_CONTEXT_MIN_TOTAL_MIB or a.model_dir:
+        """On cards that do not keep the full context: the context the package will choose with ``used`` MiB in use.  Inkling-2
+        Mini on every card, when its context would be shorter than the folder's 32,768 tokens or it does not fit."""
+        if gpu["total"] is None or used is None or a.model_dir:
+            return
+        if model == "inkling2":
+            n_ctx = estimate_ink2_context(gpu["total"] - used)
+            if n_ctx <= 0:
+                ui.say("ctx_short", u=used)
+            elif n_ctx < INK2_DEFAULT_CONTEXT:
+                ui.say("ctx_ink", n="{:,}".format(n_ctx))
+            return
+        if gpu["total"] >= FULL_CONTEXT_MIN_TOTAL_MIB:
             return
         n_ctx, head_off = estimate_context(gpu["total"] - used, model)
         if n_ctx < MIN_CONTEXT:
@@ -2229,17 +2354,7 @@ def main(argv=None):
     if a.model_dir or (got.get(model) and have_model):
         ui.say("model_have", p=mdir)
     else:
-        repo = MODELS[model]["repo"]
-        ui.say("model_get", r=repo, g=MODELS[model]["need_gb"] - 1)
-        os.makedirs(mdir, exist_ok=True)
-        code = ("import sys\nfrom huggingface_hub import snapshot_download\n"
-                "snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2])\n")
-        rc = subprocess.call([vpy, "-c", code, repo, mdir], env=env)
-        if rc != 0:
-            ui.say("retry_dl")
-            env2 = dict(env)
-            env2["HF_HUB_DISABLE_XET"] = "1"
-            rc = subprocess.call([vpy, "-c", code, repo, mdir], env=env2)
+        rc = fetch_model(ui, vpy, env, model, mdir)
         if rc != 0:
             ui.say("dl_fail", e="exit code %d" % rc)
             return 5
@@ -2380,7 +2495,10 @@ def main(argv=None):
                 flush_keys()                            # an Enter typed twice must not open the page again from the menu
         elif cmd == "compare":
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lookahead_check.py")
-            if not os.path.isfile(script):
+            if is_inkling2_dir(mdir):                   # the script measures the look-ahead of the Qwen3.8 engine
+                ui.say("cmp_qwen_only")
+                rc = 0
+            elif not os.path.isfile(script):
                 ui.say("cmp_nofile", p=script)
                 rc = 7
             else:

@@ -38,7 +38,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-MODEL_ID, CONTEXT = "qwen3.8-27b", 262144
+MODEL_ID, CONTEXT = os.environ.get("YSKN_FAKE_MODEL_ID") or "qwen3.8-27b", 262144
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -323,6 +323,20 @@ class PageTests(Base):
             self.assertIsNone(outside.match(m.group(1)), m.group(0))
         for m in re.finditer(rb"url\(\s*[\"']?\s*([^)\"'\s]*)", page, re.I):
             self.assertIsNone(outside.match(m.group(1)), m.group(0))
+
+    def test_page_knows_every_model_of_the_launcher(self):
+        """0.3.2: the page names every model of MODELS in both languages (Inkling-2 Mini marked experimental) and can switch to it."""
+        text = self.page.decode("utf-8")
+        known = re.search(r"const KNOWN = \{([^}]*)\}", text).group(1)
+        self.assertEqual(sorted(re.findall(r"(\w+): 1", known)), sorted(QS.MODELS))
+        ja, en = text.index("  ja: {"), text.index("  en: {")
+        for part in (text[ja:en], text[en:]):
+            for name in QS.MODELS:
+                self.assertIn("m_%s: '" % name, part)
+            self.assertIn("e_title_ink: '", part)
+        self.assertIn("m_inkling2: 'Inkling-2 Mini（試験的）'", text[ja:en])
+        self.assertIn("m_inkling2: 'Inkling-2 Mini model (experimental)'", text[en:])
+        self.assertIn("rows.length < Object.keys(KNOWN).length", text)               # the hint while not all are downloaded
 
     def test_page_builds_no_html_from_strings(self):
         for word in (rb"innerHTML", rb"outerHTML", rb"insertAdjacentHTML", rb"document\.write", rb"\beval\s*\(",
@@ -672,8 +686,19 @@ class ControlTests(Base):
         self.assertEqual(self.post("/webchat/shutdown", h)[0], 403)
 
     def test_every_model_name_of_the_launcher_and_no_other(self):
-        self.assertEqual(sorted(QS.MODELS), ["max", "quality", "speed"])
-        self.assertEqual(sorted(QS.MODEL_ORDER), sorted(QS.MODELS))
+        self.assertEqual(sorted(QS.MODELS), ["inkling2", "max", "quality", "speed"])
+        self.assertEqual(QS.MODEL_ORDER, ("quality", "speed", "max", "inkling2"))              # 0.3.2: Inkling-2 Mini is the 4th
+
+    def test_switch_to_and_from_inkling2_is_accepted(self):
+        for current, other in (("quality", "inkling2"), ("inkling2", "quality")):
+            control = QS.ControlRequest()
+            port = self.serve(1, None, control, QS.WebSession(current, None, 1, installed=("quality", "inkling2")))
+            h = self.own(port, **{self.H: control.token})
+            self.assertEqual(request(port, "POST", "/webchat/switch_model", h, json.dumps({"model": current}).encode())[0], 409)
+            self.assertEqual(request(port, "POST", "/webchat/switch_model", h, b'{"model": "max"}')[0], 409)   # not downloaded
+            code, body, _ = request(port, "POST", "/webchat/switch_model", h, json.dumps({"model": other}).encode())
+            self.assertEqual((code, json.loads(body)), (202, {"status": "switching", "model": other}))
+            self.assertEqual((control.action, control.model), ("switch", other))
 
     def test_no_switching_with_a_model_folder_of_ones_own(self):
         control = QS.ControlRequest()
@@ -798,6 +823,111 @@ class OptionTests(unittest.TestCase):
         self.assertEqual(f(str(tmp), None, True), [])
         (tmp / "models" / "quality" / "yasakani.json").write_text("{}")
         self.assertEqual(f(str(tmp), {"quality": True, "speed": True, "max": True}, True), ["quality", "speed", "max"])
+        (tmp / "models" / "inkling2").mkdir(parents=True)                              # 0.3.2: Inkling-2 Mini, 24 GB or more
+        (tmp / "models" / "inkling2" / "yasakani.json").write_text("{}")
+        all4 = {"quality": True, "speed": True, "max": True, "inkling2": True}
+        self.assertEqual(f(str(tmp), all4, True), ["quality", "speed", "max", "inkling2"])
+        self.assertEqual(f(str(tmp), all4, False), ["speed"])
+        self.assertEqual(f(str(tmp), {"speed": True}, True), ["speed"])
+
+    def test_model_question_has_inkling2_as_4(self):
+        self.assertEqual(QS.MODEL_KEYS, {"1": "quality", "2": "speed", "3": "max", "4": "inkling2"})
+        for lang, line in (("ja", "  4) Inkling-2 Mini〈試験的〉 文章だけ。依頼は 1 件ずつ。GPU 24 GB 以上。ダウンロード約 15.3 GB\n"),
+                           ("en", "  4) Inkling-2 Mini (experimental) text only, one request at a time, a GPU with 24 GB or more;\n"
+                                  "                                  about 15.3 GB download\n")):
+            text = QS.Ui(lang).t("pick", d="4")
+            self.assertIn(line, text)
+            self.assertTrue(text.endswith("[4]: "))
+        self.assertEqual(QS.Ui("en").t("m_inkling2"), "Inkling-2 Mini model (experimental)")
+        self.assertEqual(QS.Ui("ja").t("m_inkling2"), "Inkling-2 Mini（試験的）")
+        self.assertEqual(QS.parse_args(["--model", "inkling2"]).model, "inkling2")
+
+    def test_download_command_pins_the_revision_of_inkling2_only(self):
+        e = QS.MODELS["inkling2"]
+        self.assertEqual((e["repo"], e["revision"], e["need_gb"], e["get_gb"]),
+                         ("yasakani-dev/Inkling-2-Mini-YASAKANI-quality", "8de37e9980397da63b050fe008493a35f1c483e9", 17, "15.3"))
+        self.assertGreaterEqual(e["need_gb"], 15.29 + 1)                               # the files and the margin of the others
+        for name in ("quality", "speed", "max"):
+            self.assertEqual(QS.download_command("py", name, "D:/m"), ["py", "-c", QS.DOWNLOAD_CODE, QS.MODELS[name]["repo"], "D:/m"])
+            self.assertNotIn("revision", QS.MODELS[name])
+        self.assertEqual(QS.download_command("py", "inkling2", "D:/m"),
+                         ["py", "-c", QS.DOWNLOAD_CODE, e["repo"], "D:/m", e["revision"]])
+
+    def test_download_code_passes_the_revision_to_snapshot_download(self):
+        """The code that runs in the private environment, with a stand-in huggingface_hub."""
+        tmp = Path(tempfile.mkdtemp(prefix="yskn_qsweb_dl_"))
+        self.addCleanup(shutil.rmtree, str(tmp), True)
+        (tmp / "huggingface_hub.py").write_text(
+            "import json, sys\n"
+            "def snapshot_download(**kw):\n"
+            "    open(sys.argv[2] + '.json', 'w').write(json.dumps(kw))\n", encoding="utf-8")
+        for model, want in (("quality", {"repo_id": QS.MODELS["quality"]["repo"], "local_dir": str(tmp / "q")}),
+                            ("inkling2", {"repo_id": QS.MODELS["inkling2"]["repo"], "local_dir": str(tmp / "i"),
+                                          "revision": QS.MODELS["inkling2"]["revision"]})):
+            cmd = QS.download_command(sys.executable, model, want["local_dir"])
+            r = subprocess.run(cmd, cwd=str(tmp), capture_output=True, text=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(Path(want["local_dir"] + ".json").read_text()), want)
+
+    def test_fetch_model_tries_again_without_xet(self):
+        calls = []
+
+        def call(cmd, env=None):
+            calls.append((cmd, dict(env)))
+            return 1 if len(calls) == 1 else 0
+
+        out = io.StringIO()
+        tmp = Path(tempfile.mkdtemp(prefix="yskn_qsweb_f_"))
+        self.addCleanup(shutil.rmtree, str(tmp), True)
+        with contextlib.redirect_stdout(out):
+            rc = QS.fetch_model(QS.Ui("en"), "py", {"A": "1"}, "inkling2", str(tmp / "m"), call=call, environ={})
+        self.assertEqual(rc, 0)
+        self.assertEqual([c[0] for c in calls], [QS.download_command("py", "inkling2", str(tmp / "m"))] * 2)
+        self.assertEqual((calls[0][1], calls[1][1]), ({"A": "1"}, {"A": "1", "HF_HUB_DISABLE_XET": "1"}))
+        self.assertIn("Downloading yasakani-dev/Inkling-2-Mini-YASAKANI-quality from Hugging Face (about 15.3 GB", out.getvalue())
+        self.assertIn("Trying once more", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as o2:
+            QS.fetch_model(QS.Ui("en"), "py", {}, "quality", str(tmp / "q"), call=lambda cmd, env=None: 0, environ={})
+        self.assertIn("(about 15 GB", o2.getvalue())                                    # the Qwen models as before
+
+    def test_test_override_links_the_files_and_asks_no_one(self):
+        tmp = Path(tempfile.mkdtemp(prefix="yskn_qsweb_o_"))
+        self.addCleanup(shutil.rmtree, str(tmp), True)
+        src = tmp / "src"
+        (src / ".cache").mkdir(parents=True)
+        (src / "yasakani.json").write_text('{"architecture": "inkling2"}', encoding="utf-8")
+        (src / "w.yskn").write_bytes(b"\0" * 100)
+        (src / ".cache" / "x").write_text("x")
+        dst = tmp / "home" / "models" / "inkling2"
+        dst.mkdir(parents=True)
+        (dst / "w.yskn").write_bytes(b"old")                                           # a file of a download before is replaced
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = QS.fetch_model(QS.Ui("en"), "py", {}, "inkling2", str(dst), call=lambda *a, **k: self.fail("downloaded"),
+                                environ={"YASAKANI_QS_TEST_MODEL_SRC_INKLING2": str(src)})
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(p.name for p in dst.iterdir()), ["w.yskn", "yasakani.json"])
+        self.assertEqual((dst / "w.yskn").read_bytes(), b"\0" * 100)
+        self.assertTrue(QS.is_inkling2_dir(str(dst)))
+        self.assertIn("Test only: the model files come from %s (YASAKANI_QS_TEST_MODEL_SRC_INKLING2" % src, out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):                                # another model's variable: a normal download
+            self.assertEqual(QS.fetch_model(QS.Ui("en"), "py", {}, "quality", str(tmp / "q"), call=lambda *a, **k: 7,
+                                            environ={"YASAKANI_QS_TEST_MODEL_SRC_INKLING2": str(src)}), 7)
+            self.assertEqual(QS.fetch_model(QS.Ui("en"), "py", {}, "inkling2", str(tmp / "e"), call=lambda *a, **k: 0,
+                                            environ={"YASAKANI_QS_TEST_MODEL_SRC_INKLING2": str(tmp / "nothing")}), 1)
+
+    def test_is_inkling2_dir(self):
+        tmp = Path(tempfile.mkdtemp(prefix="yskn_qsweb_i_"))
+        self.addCleanup(shutil.rmtree, str(tmp), True)
+        self.assertFalse(QS.is_inkling2_dir(str(tmp)))
+        for text, want in (('{"architecture": "inkling2"}', True), ("{}", False), ("[1]", False), ("not json", False)):
+            (tmp / "yasakani.json").write_text(text, encoding="utf-8")
+            self.assertEqual(QS.is_inkling2_dir(str(tmp)), want, text)
+
+    def test_page_names_of_inkling2(self):
+        self.assertEqual(QS.WebSession("inkling2").model_id, "inkling-2-mini-quality")      # until the engine tells its own
+        self.assertEqual(QS.WebSession("quality").model_id, "qwen3.8-27b")
+        self.assertEqual(QS.WebSession("custom").model_id, "qwen3.8-27b")
 
     def test_menu_has_the_browser_first_and_enter_picks_it(self):
         for lang, word, mark in (("ja", "ブラウザーで開く", "〈おすすめ〉"), ("en", "open in the browser", "(recommended)")):
@@ -1166,6 +1296,40 @@ class RunWebTests(RunWebBase):
         tok = get_json(port, "/webchat/config")["control_token"]
         self.assertEqual(request(port, "POST", "/webchat/shutdown", self.own(port, **{QS.ControlRequest.HEADER: tok}))[0], 202)
         self.finish(t, box, QS.QUIT_RC)
+
+    def test_web_test_with_inkling2(self):
+        a = self.args(web_test=True)
+        t, box = self.start(a, model="inkling2", installed=("quality", "inkling2"),
+                            env=dict(self.env, YSKN_FAKE_MODEL_ID="inkling-2-mini-quality"))
+        self.finish(t, box, 0)
+        out = self.out.getvalue()
+        self.assertIn("browser chat self-test: PASS", out)
+        self.assertNotIn("FAIL", out)
+        self.assertEqual([(x["cmd"], os.path.basename(x["model_dir"])) for x in self.served()], [("serve", "inkling2")])
+
+    def test_inkling2_page_then_switch_to_quality(self):
+        a = self.args(no_browser=True)
+        t, box = self.start(a, model="inkling2", installed=("quality", "inkling2"),
+                            env=dict(self.env, YSKN_FAKE_MODEL_ID="inkling-2-mini-quality"))
+        port = self.page_port(a, box)
+        c = get_json(port, "/webchat/config")
+        self.assertEqual(c["model"], "inkling2")
+        self.assertEqual(c["models_installed"], [{"name": "quality", "current": False}, {"name": "inkling2", "current": True}])
+        self.assertTrue(wait_until(lambda: get_json(port, "/webchat/status")["state"] == "ready", 30))
+        c = get_json(port, "/webchat/config")
+        self.assertEqual(c["model_id"], "inkling-2-mini-quality")
+        code, body, _ = request(port, "POST", "/v1/chat/completions", self.own(port),                # the speed tab's request
+                                json.dumps({"messages": [{"role": "user", "content": "x"}], "stream": True,
+                                            "stream_options": {"include_usage": True},
+                                            "chat_template_kwargs": {"enable_thinking": False}}).encode())
+        self.assertEqual(code, 200)
+        self.assertIn(b"[DONE]", body)
+        H = QS.ControlRequest.HEADER
+        self.assertEqual(request(port, "POST", "/webchat/switch_model", self.own(port, **{H: c["control_token"]}),
+                                 b'{"model": "quality"}')[0], 202)
+        self.finish(t, box, QS.SWITCH_RC)
+        self.assertEqual(a.web_switch, "quality")
+        self.assertIn("The page picked the quality model.", self.out.getvalue())
 
     def test_web_test_waits_for_the_model_and_passes(self):
         a = self.args(web_test=True)
@@ -1709,6 +1873,142 @@ class LauncherTests(RunWebBase):
         self.finish(t, box, 0)
         self.assertTrue(wait_until(lambda: closed(port), 10))
         self.assertEqual(self.state(h)["model"], "quality")
+
+    # ---- 0.3.2: Inkling-2 Mini as the 4th model
+    def ink_folder(self):
+        src = self.tmp / "hf_inkling2"
+        src.mkdir()
+        (src / "yasakani.json").write_text('{"architecture": "inkling2"}', encoding="utf-8")
+        (src / "inkling_2_mini_quality.yskn").write_bytes(b"\0" * 64)
+        return src
+
+    def test_answer_4_downloads_inkling2_checks_it_and_opens_the_page(self):
+        """The first run of the model: 4 at the model question, the files of the test folder instead of Hugging Face, the three
+        checks, the menu, the page with Inkling-2 Mini, the quit button.  The next run opens the page with it; with --menu the
+        question offers 4."""
+        h = self.home(checked=("quality",), downloaded=("quality",))
+        src = self.ink_folder()
+        port = free_port()
+        box = {}
+
+        def answer(prompt, default="", eof=None):
+            self.asked.append(prompt)
+            return "4" if "Which model?" in prompt else default
+
+        def run():
+            try:
+                box["rc"] = QS.main(["--home", str(h), "--lang", "en", "--web-port", str(port), "--menu"])
+            except BaseException as e:  # noqa: BLE001 - shown by the test
+                box["error"] = e
+
+        with mock.patch.object(QS, "ask", answer), \
+                mock.patch.dict(os.environ, {"YASAKANI_QS_TEST_MODEL_SRC_INKLING2": str(src),
+                                             "YSKN_FAKE_MODEL_ID": "inkling-2-mini-quality"}):
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            self.assertTrue(wait_until(lambda: get_json(port, "/webchat/status") or box, 40), self.out.getvalue())
+            self.assertEqual(box, {}, self.out.getvalue())
+            c = get_json(port, "/webchat/config")
+            self.assertEqual(c["model"], "inkling2")
+            self.assertEqual(c["models_installed"], [{"name": "quality", "current": False}, {"name": "inkling2", "current": True}])
+            self.assertEqual(request(port, "POST", "/webchat/shutdown",
+                                     self.own(port, **{QS.ControlRequest.HEADER: c["control_token"]}))[0], 202)
+            self.finish(t, box, 0)
+        self.assertTrue(self.asked[0].rstrip().endswith("[1]:"))                       # the quality model was the one before
+        log = [(x["cmd"], os.path.basename(x["model_dir"])) for x in self.served()]
+        self.assertEqual(log, [("info", "inkling2"), ("verify", "inkling2"), ("selfcheck", "inkling2"), ("serve", "inkling2")])
+        self.assertTrue((h / "models" / "inkling2" / "inkling_2_mini_quality.yskn").is_file())
+        st = self.state(h)
+        self.assertEqual((st["model"], st["models_downloaded"].get("inkling2"), st["models_ok"].get("inkling2")),
+                         ("inkling2", True, True))
+        out = self.out.getvalue()
+        self.assertIn("Model: Inkling-2 Mini model (experimental)", out)
+        self.assertIn("(needed: about 17 GB)", out)
+        self.assertIn("Test only: the model files come from", out)
+        self.assertEqual(self.network, [])
+        self.assertIn(os.path.join("models", "inkling2"), (h / "yasakani_env.cmd").read_text(encoding="ascii"))
+        # the next run: the page at once with Inkling-2 Mini
+        self.asked.clear()
+        t, box, port = self.launch(h)
+        self.assertEqual(self.asked, [])
+        c = get_json(port, "/webchat/config")
+        self.assertEqual(c["model"], "inkling2")
+        self.assertEqual(request(port, "POST", "/webchat/shutdown",
+                                 self.own(port, **{QS.ControlRequest.HEADER: c["control_token"]}))[0], 202)
+        self.finish(t, box, 0)
+        self.assertIn("Opening the page in your browser with the Inkling-2 Mini model (experimental)", self.out.getvalue())
+        # with --menu the question offers 4, the model of the state
+        t, box, port = self.launch(h, "--menu")
+        self.assertTrue(self.asked[0].rstrip().endswith("[4]:"), self.asked[0])
+        tok = get_json(port, "/webchat/config")["control_token"]
+        self.assertEqual(request(port, "POST", "/webchat/shutdown", self.own(port, **{QS.ControlRequest.HEADER: tok}))[0], 202)
+        self.finish(t, box, 0)
+
+    def test_switch_from_quality_to_inkling2_and_back(self):
+        h = self.home(checked=("quality", "inkling2"), downloaded=("quality", "inkling2"))
+        t, box, port = self.launch(h)
+        H = QS.ControlRequest.HEADER
+        for to in ("inkling2", "quality"):
+            self.assertTrue(wait_until(lambda: (get_json(port, "/webchat/status") or {}).get("state") == "ready", 30))
+            tok = get_json(port, "/webchat/config")["control_token"]
+            self.assertEqual(request(port, "POST", "/webchat/switch_model", self.own(port, **{H: tok}),
+                                     json.dumps({"model": to}).encode())[0], 202)
+
+            def there(to=to):
+                s = get_json(port, "/webchat/status") or {}
+                return s.get("model") == to and s.get("state") in ("loading", "ready")
+
+            self.assertTrue(wait_until(there, 40), self.out.getvalue())
+            self.assertEqual(self.state(h)["model"], to)
+        self.assertTrue(wait_until(lambda: len(self.served()) >= 3, 20))
+        self.assertEqual([os.path.basename(x["model_dir"]) for x in self.served()], ["quality", "inkling2", "quality"])
+        self.assertTrue(wait_until(lambda: (get_json(port, "/webchat/status") or {}).get("state") == "ready", 30))
+        tok = get_json(port, "/webchat/config")["control_token"]
+        self.assertEqual(request(port, "POST", "/webchat/shutdown", self.own(port, **{H: tok}))[0], 202)
+        self.finish(t, box, 0)
+        self.assertIn("The page picked the Inkling-2 Mini model (experimental).", self.out.getvalue())
+
+    def run_main(self, home, *more):
+        return QS.main(["--home", str(home), "--lang", "en"] + list(more))
+
+    def test_cards_under_24_gb_do_not_offer_inkling2(self):
+        small = dict(index=0, uuid="GPU-s", name="NVIDIA GeForce RTX 4080", cc=(8, 9), total=16376, used=600, driver="616.92")
+        h = self.home(checked=("speed",), downloaded=("speed", "inkling2"), model="speed")
+        with mock.patch.object(QS, "query_gpus", lambda run=None: [dict(small)]):
+            self.assertEqual(self.run_main(h, "--model", "inkling2", "--action", "none"), 2)
+            self.assertIn("The quality and max-quality models and Inkling-2 Mini need a GPU with 24 GB or more", self.out.getvalue())
+            self.assertEqual(self.run_main(h, "--action", "none"), 0)                   # no question: the fastest model
+        self.assertEqual(self.asked, [])
+        self.assertIn("only the fastest model can be used (the quality and max-quality models and Inkling-2 Mini do not fit)",
+                      self.out.getvalue())
+        self.assertEqual(QS.installed_models(str(h), self.state(h)["models_downloaded"], False), ["speed"])
+
+    def test_context_line_for_inkling2_on_a_fuller_24_gb_card(self):
+        h = self.home(checked=("inkling2",), downloaded=("inkling2",), model="inkling2")
+        for used, want in ((800, None), (5000, QS.estimate_ink2_context(24564 - 5000)), (9000, 0)):
+            card = dict(index=0, uuid="GPU-b", name="NVIDIA GeForce RTX 4090", cc=(8, 9), total=24564, used=used, driver="616.92")
+            self.out.truncate(0)
+            self.out.seek(0)
+            with mock.patch.object(QS, "query_gpus", lambda run=None: [dict(card)]):
+                self.assertEqual(self.run_main(h, "--action", "none"), 0)
+            out = self.out.getvalue()
+            if want is None:
+                self.assertNotIn("context length", out)
+            elif want:
+                self.assertTrue(8192 <= want < 32768, want)
+                self.assertIn("The context length of Inkling-2 Mini is chosen from the free GPU memory each time it starts "
+                              "(%s tokens with what is free now; at most 32,768)" % "{:,}".format(want), out)
+            else:
+                self.assertIn("There is not enough free GPU memory now (9000 MiB in use)", out)
+
+    def test_compare_item_is_for_qwen_folders_only(self):
+        h = self.home(checked=("inkling2",), downloaded=("inkling2",), model="inkling2")
+        (h / "models" / "inkling2" / "yasakani.json").write_text('{"architecture": "inkling2"}', encoding="utf-8")
+        calls = []
+        with mock.patch.object(QS.subprocess, "call", lambda *a, **k: calls.append(a) or 0):
+            self.assertEqual(self.run_main(h, "--action", "compare"), 0)
+        self.assertEqual(calls, [])
+        self.assertIn("The look-ahead comparison works with the Qwen3.8 models only.", self.out.getvalue())
 
 
 # ------------------------------------------------------------------------------------------------------------- START.cmd

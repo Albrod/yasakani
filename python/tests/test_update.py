@@ -325,6 +325,27 @@ class DownloadTests(Base):
                 self.assertEqual((self.st.get("model"), calls), (None, []))
                 self.assertIn("choose a model", out.getvalue())
 
+    def test_rollback_to_0_3_1_forgets_inkling2(self):
+        """0.3.2 brought Inkling-2 Mini into the model question; the launcher of 0.3.1 does not know the name."""
+        d = self.folder("qs_031")
+        old_qs = b'T = {"m_quality": 1, "m_speed": 2, "m_max": 3}\n'
+        (d / "quickstart.py").write_bytes(old_qs)
+        self.st.clear()
+        self.gh.publish("9.9.9", files={"quickstart.py": b'QS_VERSION = "9.9.9"\n', "START.cmd": b"new start\r\n"})
+        rc, calls, out = self.run_update(d, self.fetch())
+        self.assertEqual(rc, 0, out)
+        self.st["model"] = "inkling2"
+        calls = []
+        orig = QS.run_quickstart
+        QS.run_quickstart = lambda f, args: calls.append(list(args)) or 0
+        try:
+            with self.quiet() as out:
+                rc = QS.apply_rollback(self.ui, str(d), self.st, self.save, True, ["--action", "none"])
+        finally:
+            QS.run_quickstart = orig
+        self.assertEqual((rc, self.st.get("model"), calls), (0, None, []))
+        self.assertIn("cannot use the Inkling-2 Mini model (experimental)", out.getvalue())
+
     def test_answer_no_changes_nothing(self):
         d = self.folder()
         self.gh.publish("9.9.9")
