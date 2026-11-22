@@ -742,3 +742,44 @@ def check_parallel(pack, plan: Optional[ContextPlan], info, n: int) -> Tuple[int
                    "serving %d at a time" % (n, info.max_ctx, need, room, kept, m))
     return 1, ("note: by the engine's own numbers %d requests with %d tokens of context each need about %d MiB and %d MiB are free%s, and "
                "not even 2 fit; serving one request at a time" % (n, info.max_ctx, need, room, kept))
+
+
+# ---- Inkling-2 (0.3.2).  Its engine reserves the key/value cache of the whole context, the rings of the rollback positions and its
+# work areas when the model is loaded.  Measured on the RTX 5090 (Windows 11, the 0.3.1 engine library, the converted quality folder
+# of Hugging Face, 15,052,423,172 B of weights and a 209,688,040 B drafter; nvidia-smi's memory in use before the load, after the load
+# and the warm-up, and after one answer to a prompt of 3,923 tokens; contexts 8,192, 16,384 and 32,768, drafter on and off, rollback 512
+# and the engine's own 64).
+INK2_EXTRA_BYTES_PER_POSITION = 12288     # the engine took 77,824 B per position of context; config.json's cache gives 65,536 of them
+INK2_DRAFT_BYTES_PER_POSITION = 10240     # with the drafter loaded: 87,296 B per position (9,472 more), rounded up
+INK2_ENGINE_ROLLBACK = 64                 # the engine's own rollback positions, part of the overhead below
+INK2_ROLLBACK_MIB_PER_POSITION = 1.8      # 512 rollback positions took 801 MiB more than the engine's own 64 (1.79 MiB each)
+INK2_OVERHEAD_MIB = 1800                  # the rest above the files, the cache and the rollback rings: 1,511 to 1,732 MiB measured
+INK2_CONTEXT_STEP = 4096                  # a context chosen from the free memory is a multiple of this
+INK2_MIN_CONTEXT = 8192                   # below this the model is not loaded (give --max-ctx to try a smaller one)
+
+
+def ink2_rollback_mib(rollback: int) -> float:
+    """GPU memory of ``rollback`` rollback positions beyond the engine's own (0 = the engine's own 64)."""
+    return max(0, int(rollback) - INK2_ENGINE_ROLLBACK) * INK2_ROLLBACK_MIB_PER_POSITION if rollback else 0.0
+
+
+def ink2_context(free_mib: float, files_bytes: int, bytes_per_position: int, default_ctx: int, rollback: int) -> int:
+    """The context of an Inkling-2 folder for ``free_mib`` MiB of free GPU memory: ``default_ctx`` (the folder's) when it fits, else
+    the longest multiple of INK2_CONTEXT_STEP that fits, 0 when not even INK2_MIN_CONTEXT fits.  ``files_bytes`` = the weights and,
+    when it is loaded, the drafter; ``bytes_per_position`` = the engine's per position of context (ink2_bytes_per_position)."""
+    room = free_mib - files_bytes / MIB - INK2_OVERHEAD_MIB - ink2_rollback_mib(rollback) - MARGIN_MIB
+    n = max(0, int(room * MIB // bytes_per_position))
+    if n >= default_ctx:
+        return int(default_ctx)
+    n = (n // INK2_CONTEXT_STEP) * INK2_CONTEXT_STEP
+    return n if n >= INK2_MIN_CONTEXT else 0
+
+
+def ink2_bytes_per_position(cache_bytes: int, drafter: bool) -> int:
+    """What the engine takes per position of context: the cache of config.json (``cache_bytes``) and the measured rest."""
+    return int(cache_bytes) + INK2_EXTRA_BYTES_PER_POSITION + (INK2_DRAFT_BYTES_PER_POSITION if drafter else 0)
+
+
+def ink2_need_mib(ctx: int, files_bytes: int, bytes_per_position: int, rollback: int) -> int:
+    """The free GPU memory a context of ``ctx`` positions needs by the rule of ink2_context (for the message when it does not fit)."""
+    return int(files_bytes / MIB + INK2_OVERHEAD_MIB + ink2_rollback_mib(rollback) + MARGIN_MIB + ctx * bytes_per_position / MIB) + 1

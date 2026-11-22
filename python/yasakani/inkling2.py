@@ -84,6 +84,18 @@ ROLLBACK_ENV = "YASAKANI_INK2_ROLLBACK"
 # the last reply back (most OpenAI clients) or that writes a tool call in another form drops the whole last reply, which the engine
 # can do without a new reading of the conversation up to this many positions.  Costs GPU memory for the rings of the sliding layers.
 DEFAULT_ROLLBACK = 512
+
+
+def rollback_positions(environ=None) -> int:
+    """The rollback positions the engine will be loaded with ($YASAKANI_INK2_ROLLBACK, else DEFAULT_ROLLBACK; 0 = the engine's own),
+    for planning the context.  A value that is not a number counts as the default here: the load refuses it with a message."""
+    v = ((os.environ if environ is None else environ).get(ROLLBACK_ENV) or "").strip()
+    try:
+        return max(0, int(v)) if v else DEFAULT_ROLLBACK
+    except ValueError:
+        return DEFAULT_ROLLBACK
+
+
 MAX_DRAFT_DEPTH = 7
 DRAFTER_FORMATS = ("hf-safetensors", "yskn")   # the published mtp.safetensors, or a converted drafter file (.yskn version 2)
 CAP_DRAFTER_PACKED = 4                 # ink2_capabilities() bit: the engine multiplies a converted drafter file as stored

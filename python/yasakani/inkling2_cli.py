@@ -49,10 +49,51 @@ def refuse_unsupported(args) -> None:
 
 
 def context_of(args, pack: ink.Ink2Pack) -> int:
-    n = args.max_ctx if getattr(args, "max_ctx", None) else pack.default_ctx
-    if n < 256 or n > pack.max_ctx:
-        raise YasakaniError("--max-ctx must be between 256 and %d (the model's limit)" % pack.max_ctx)
-    return int(n)
+    """--max-ctx when it is given (256 to the model's limit), else (0.3.2) the folder's default when it fits the free GPU memory, or
+    the longest context that fits (auto_context).  The choice is made once per command (serve asks before and after the load)."""
+    n = getattr(args, "max_ctx", None)
+    if n:
+        if n < 256 or n > pack.max_ctx:
+            raise YasakaniError("--max-ctx must be between 256 and %d (the model's limit)" % pack.max_ctx)
+        return int(n)
+    if getattr(args, "ink2_auto_ctx", None) is None:
+        args.ink2_auto_ctx = auto_context(args, pack)
+    return args.ink2_auto_ctx
+
+
+def auto_context(args, pack: ink.Ink2Pack, det=None, say=None) -> int:
+    """The context of the folder without --max-ctx, from nvidia-smi's free memory of the GPU the engine uses (yasakani/gpu.py
+    ink2_context): the folder's default when it fits, else the longest multiple of 4,096 that fits, never more than the default.
+    One line says what was chosen.  Raises YasakaniError when not even 8,192 positions fit; without an answer of nvidia-smi the
+    folder's default is used."""
+    from . import gpu as gpus
+    say = say or _say
+    default = int(pack.default_ctx)
+    if det is None:
+        det = gpus.detect(getattr(args, "device", 0) or 0)
+    g = det.worst()
+    if g is None or g.free_mib is None or g.total_mib is None:
+        say("context: %d tokens (the folder's default; the free GPU memory could not be read); --max-ctx sets it yourself" % default)
+        return default
+    draft, _ = draft_options(args)
+    drafter = draft != "off" and pack.drafter is not None
+    files = pack.weights.stat().st_size + (pack.drafter.stat().st_size if drafter else 0)
+    per = gpus.ink2_bytes_per_position(ink.bytes_per_position(ink.read_config(pack.root)), drafter)
+    rollback = ink.rollback_positions()
+    n = gpus.ink2_context(g.free_mib, files, per, default, rollback)
+    if n <= 0:
+        raise YasakaniError(
+            "the model does not fit in the free GPU memory (%d of %d MiB free; with a context of %d tokens it needs about %d MiB).  "
+            "Close other programs that use the GPU%s, or give a smaller --max-ctx to try anyway"
+            % (g.free_mib, g.total_mib, gpus.INK2_MIN_CONTEXT, gpus.ink2_need_mib(gpus.INK2_MIN_CONTEXT, files, per, rollback),
+               ", start with --draft off (the drafter needs memory too)" if drafter else ""))
+    if n == default:
+        say("context: %d tokens (the folder's default; %d of %d MiB of GPU memory free); --max-ctx sets it yourself"
+            % (n, g.free_mib, g.total_mib))
+    else:
+        say("context: %d tokens, chosen from the free GPU memory (%d of %d MiB free; the folder's default %d does not fit); "
+            "--max-ctx sets it yourself" % (n, g.free_mib, g.total_mib, default))
+    return n
 
 
 def _select_gpu(args) -> None:
