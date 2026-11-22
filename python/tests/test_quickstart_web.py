@@ -1547,6 +1547,8 @@ class RunWebTests(RunWebBase):
         self.assertEqual(json.loads(kept.getresponse().read())["model"], "quality")
         old = get_json(port, "/webchat/config")["control_token"]
         h = self.own(port, **{QS.ControlRequest.HEADER: old})
+        # the stand-in server writes its line when it has started; on a busy PC the switch could stop it before that
+        self.assertTrue(wait_until(lambda: len(self.served()) >= 1, 30))
         self.assertEqual(request(port, "POST", "/webchat/switch_model", h, b'{"model": "speed"}')[0], 202)
         self.finish(t, box, QS.SWITCH_RC)
         first = self.children.procs[0]
