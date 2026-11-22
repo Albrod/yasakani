@@ -1797,6 +1797,7 @@ class LauncherTests(RunWebBase):
         self.assertIn("Which model?", self.asked[0])
         self.assertTrue(self.asked[0].rstrip().endswith("[2]:"))                       # the model of the state is the default
         self.assertEqual(self.asked[1], QS.menu_prompt(QS.Ui("en")))                   # Enter there opened the page
+        self.assertTrue(wait_until(lambda: len(self.served()) >= 4, 20))               # the server writes its line when started
         log = [(x["cmd"], os.path.basename(x["model_dir"])) for x in self.served()]
         self.assertEqual(log, [("info", "speed"), ("verify", "speed"), ("selfcheck", "speed"), ("serve", "speed")])
         self.assertEqual(self.state(h)["models_ok"], {"speed": True})
@@ -1811,6 +1812,7 @@ class LauncherTests(RunWebBase):
         t, box, port = self.launch(h, "--menu")
         self.assertEqual(len(self.asked), 2)
         self.assertIn("What next?", self.asked[1])
+        self.assertTrue(wait_until(lambda: len(self.served()) >= 1, 20))
         self.assertEqual([x["cmd"] for x in self.served()], ["serve"])                 # checked before: no checks again
         tok = get_json(port, "/webchat/config")["control_token"]
         self.assertEqual(request(port, "POST", "/webchat/shutdown", self.own(port, **{QS.ControlRequest.HEADER: tok}))[0], 202)
@@ -1821,6 +1823,7 @@ class LauncherTests(RunWebBase):
         h = self.home(checked=())                                                      # also when the model was never checked
         t, box, port = self.launch(h, "--action", "web", "--no-browser")
         self.assertEqual((self.asked, self.opened), ([], []))
+        self.assertTrue(wait_until(lambda: len(self.served()) >= 4, 20))
         self.assertEqual([x["cmd"] for x in self.served()], ["info", "verify", "selfcheck", "serve"])
         tok = get_json(port, "/webchat/config")["control_token"]
         self.assertEqual(request(port, "POST", "/webchat/shutdown", self.own(port, **{QS.ControlRequest.HEADER: tok}))[0], 202)
