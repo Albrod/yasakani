@@ -118,8 +118,9 @@ OVERHEAD_MIB = {"quality": 2300, "speed": 2100, "max": 2300}
 INK2_FILES_BYTES = (15052423172, 209688040)
 INK2_BYTES_PER_POSITION = 65536 + 12288 + 10240       # config.json's cache + the engine's rest + the drafter's, per position
 INK2_ROLLBACK_MIB, INK2_OVERHEAD_MIB = (512 - 64) * 1.8, 1800
-# The fast path (0.3.3; --fast auto turns it on for compute capability 12.0, the RTX 50 series): an 8-bit cache (one byte per value and
-# one scale byte per 32 values) and no score buffer per position, and INK2_FAST_OVERHEAD_MIB more (gpu.py ink2_bytes_per_position).
+# The fast path (0.3.3; since 0.3.4 --fast auto turns it on for compute capability 8.6, 8.9 and 12.0, the RTX 30, 40 and 50 series): an
+# 8-bit cache (one byte per value and one scale byte per 32 values) and no score buffer per position, and INK2_FAST_OVERHEAD_MIB more
+# (gpu.py ink2_bytes_per_position).
 INK2_FAST_BYTES_PER_POSITION = 65536 // 4 + 65536 // 4 // 32 + 10240
 INK2_FAST_OVERHEAD_MIB = 500
 INK2_FAST_ENV = "YASAKANI_INK2_FAST"
@@ -852,8 +853,8 @@ def ink2_fast_expected(cc, environ=None):
 
 def estimate_ink2_context(free_mib, fast=False):
     """The context the package will choose for the Inkling-2 Mini folder (yasakani/gpu.py, ink2_context()); 0 = it does not fit.
-    ``fast``: planned for the fast path (chat and serve on an RTX 50 card); without it the standard path, which `yasakani selfcheck`
-    plans with since 0.3.3."""
+    ``fast``: planned for the fast path (chat and serve on an RTX 30, 40 or 50 card); without it the standard path, which
+    `yasakani selfcheck` plans with since 0.3.3."""
     over = INK2_OVERHEAD_MIB + (INK2_FAST_OVERHEAD_MIB if fast else 0)
     room = free_mib - sum(INK2_FILES_BYTES) / float(1 << 20) - over - INK2_ROLLBACK_MIB - MARGIN_MIB
     n = max(0, int(room * (1 << 20) // (INK2_FAST_BYTES_PER_POSITION if fast else INK2_BYTES_PER_POSITION)))

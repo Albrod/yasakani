@@ -118,15 +118,15 @@ def open_stack(args, warm: bool = True):
     ctx = context_of(args, pack)
     draft, depth = draft_options(args)
     fast = ink.fast_mode_of(getattr(args, "fast", None))
-    _select_gpu(args)
     cap = getattr(args, "ink2_compute_cap", None)                               # known when the context was planned
-    if cap is None and fast == "auto":                                          # --max-ctx was given: ask nvidia-smi for this line
-        try:
-            from . import gpu as gpus
+    if cap is None and fast == "auto":                                          # --max-ctx was given: ask nvidia-smi for this line,
+        try:                                                                    # before --device N pins the engine's GPU (after
+            from . import gpu as gpus                                           # that, index N no longer names it)
             g = gpus.detect(getattr(args, "device", 0) or 0).worst()
             cap = g.compute_cap if g is not None else None
         except Exception:
             cap = None
+    _select_gpu(args)
     if cap is None:
         cap = ink.CAP_UNKNOWN                                                   # asked (or not needed): the engine does not ask again
     mxfp8 = ink.fast_expected(fast, cap)                                        # the same rule as the engine's (ink.fast_choice)

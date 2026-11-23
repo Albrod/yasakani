@@ -205,6 +205,37 @@ class CommandLineTests(unittest.TestCase):
                     kv = ink.bytes_per_position(CONFIG, mxfp8=fast) * (max_ctx or 32768)
                     self.assertIn("key/value cache %.2f GB" % (kv / 1e9), lines[-1], (cc, mode, max_ctx))
 
+    def test_the_cap_is_read_before_the_gpu_is_pinned(self):
+        """--device 1 with --max-ctx on a PC with two GPUs: once the engine's GPU is pinned, index 1 names no card, so the
+        capability is asked before that (else auto would stay off on an RTX 30 / 40 card that is the second GPU)."""
+        state, seen = {"pinned": False, "asked": []}, {}
+        pk = SimpleNamespace(default_ctx=32768, max_ctx=1048576, root=Path("unused"), model_id="m", weights_format="yskn",
+                             weights=SimpleNamespace(stat=lambda: SimpleNamespace(st_size=WEIGHTS)),
+                             drafter=SimpleNamespace(stat=lambda: SimpleNamespace(st_size=DRAFTER)))
+
+        def detect(device=0, *a, **k):
+            state["asked"].append((device, state["pinned"]))
+            return G.Detected() if state["pinned"] else one_gpu((8, 6))
+
+        def pin(args):
+            state["pinned"] = True
+
+        def runner(*a, **kw):
+            seen.update(kw)
+            raise KeyboardInterrupt
+
+        args = argparse.Namespace(model_dir_path=Path("unused"), max_ctx=131072, device=1, draft=None, draft_depth=None, fast=None)
+        with mock.patch.object(ink.Ink2Pack, "load", lambda p: pk), mock.patch.object(ink, "read_config", lambda root: CONFIG), \
+                mock.patch.object(G, "detect", detect), mock.patch.object(C, "_select_gpu", pin), \
+                mock.patch.object(ink, "open_runner", runner), mock.patch.object(C, "_say", lambda *a: None), \
+                mock.patch.dict(os.environ, {"YASAKANI_INK2_FAST": "", "YASAKANI_DRAFT": "", "YASAKANI_INK2_ROLLBACK": ""}):
+            with self.assertRaises(KeyboardInterrupt):
+                C.open_stack(args)
+        self.assertTrue(state["pinned"])
+        self.assertEqual(state["asked"], [(1, False)])                           # asked once, for GPU 1, before the pin
+        self.assertEqual(seen["compute_cap"], (8, 6))
+        self.assertEqual(seen["fast"], "auto")
+
     def test_bench_settings(self):
         eng = SimpleNamespace(fast_mode="auto", fast=True, fast_nvfp4=False, compute_cap=(8, 6), copying=True, copy_mode="auto",
                               copy_min=12)
