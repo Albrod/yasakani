@@ -404,3 +404,5 @@ KERNEL(dfold, DFoldArgs) {
     }
   }
 }
+
+#include "ink2_drafter_sk.inc"

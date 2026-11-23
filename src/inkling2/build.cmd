@@ -38,13 +38,25 @@ rem machine code for compute capability 8.6 (RTX 30), 8.9 (RTX 40) and 12.0 (RTX
 if "%INK2_ARCHS%"=="" set INK2_ARCHS=-gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_120,code=[sm_120,compute_120]
 set NVFLAGS=-c -O3 %INK2_ARCHS% -fmad=false -std=c++17 -Xcompiler "/MD,/EHsc,/O2,/wd4996,/wd4819,/Zc:preprocessor"
 if not exist "%OUT%\cuda" mkdir "%OUT%\cuda"
+rem The NVFP4 tensor-core prompt products (ink2_nvfp4.cu) need sm_120a: machine code for the RTX 50 series only, used
+rem there when the option nvfp4_prefill asks for it. set INK2_NVFP4_TC=0 builds the library without them.
+set TCOBJ=
+if "%INK2_NVFP4_TC%"=="0" goto notc
+%NVCC% -c -O3 -gencode arch=compute_120a,code=sm_120a -fmad=false -std=c++17 -Xcompiler "/MD,/EHsc,/O2,/Zc:preprocessor" "%SRC%ink2_nvfp4.cu" -o "%OUT%\cuda\ink2_nvfp4.obj"
+if errorlevel 1 exit /b 1
+set TCOBJ="%OUT%\cuda\ink2_nvfp4.obj"
+set NVFLAGS=%NVFLAGS% -DINK2_WITH_NVFP4_TC
+:notc
 %NVCC% %NVFLAGS% "%SRC%ink2_cuda.cu" -o "%OUT%\cuda\ink2_cuda.obj"
 if errorlevel 1 exit /b 1
 %NVCC% %NVFLAGS% "%SRC%ink2_micro.cu" -o "%OUT%\cuda\ink2_micro.obj"
 if errorlevel 1 exit /b 1
+rem the fast kernels (ink2_fast.cu, default -fmad=true: the fused forms are written out in the source)
+%NVCC% -c -O3 %INK2_ARCHS% -std=c++17 -Xcompiler "/MD,/EHsc,/O2,/wd4996,/wd4819,/Zc:preprocessor" "%SRC%ink2_fast.cu" -o "%OUT%\cuda\ink2_fast.obj"
+if errorlevel 1 exit /b 1
 cl %CLFLAGS% /c /DINK2_WITH_CUDA "%SRC%ink2_engine.cpp" "%SRC%ink2_selftest.cpp" "%SRC%ink2_emu.cpp" /Fo"%OUT%\cuda\\"
 if errorlevel 1 exit /b 1
-link /nologo /DLL /OUT:"%OUT%\yskn_inkling2.dll" /IMPLIB:"%OUT%\cuda\yskn_inkling2.lib" "%OUT%\cuda\ink2_engine.obj" "%OUT%\cuda\ink2_selftest.obj" "%OUT%\cuda\ink2_emu.obj" "%OUT%\cuda\ink2_cuda.obj" "%OUT%\cuda\ink2_micro.obj" %CUDART% /NODEFAULTLIB:LIBCMT
+link /nologo /DLL /OUT:"%OUT%\yskn_inkling2.dll" /IMPLIB:"%OUT%\cuda\yskn_inkling2.lib" "%OUT%\cuda\ink2_engine.obj" "%OUT%\cuda\ink2_selftest.obj" "%OUT%\cuda\ink2_emu.obj" "%OUT%\cuda\ink2_cuda.obj" "%OUT%\cuda\ink2_micro.obj" "%OUT%\cuda\ink2_fast.obj" %TCOBJ% %CUDART% /NODEFAULTLIB:LIBCMT
 if errorlevel 1 exit /b 1
 echo built %OUT%\yskn_inkling2.dll
 exit /b 0

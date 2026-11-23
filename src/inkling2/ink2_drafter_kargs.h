@@ -138,6 +138,8 @@ struct DFoldArgs {
   int depth;
 };
 
+#include "ink2_drafter_sk_kargs.h"
+
 #define INK2_DRAFT_KERNEL_LIST(X) \
   X(dmix, DMixArgs) \
   X(dctx, DCtxArgs) \
@@ -147,4 +149,5 @@ struct DFoldArgs {
   X(daddnorm, DAddNormArgs) \
   X(dsilu, DSiluArgs) \
   X(dzin, DZinArgs) \
-  X(dfold, DFoldArgs)
+  X(dfold, DFoldArgs) \
+  X(dattn_sk, DAttnSkArgs) X(dattn_skr, DAttnSkArgs)

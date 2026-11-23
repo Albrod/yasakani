@@ -146,6 +146,16 @@ struct GmixArgs {
 
 // Query / relative state scaling and clipping, key / value convolution,
 // clipping / normalisation and the write into the cache slot.
+// KV cache of a visit: FP32 (kc / vc of the visit) or MXFP8 (ink2_kv_mxfp8.inc).
+enum { INK2_KV_FP32 = 0, INK2_KV_MXFP8 = 8 };
+struct KvStorage {
+  int mode, sinks, hot, hot_slots;
+  u8 *key, *value;           // E4M3 codes [cap, nkv * hd] (MXFP8)
+  u8 *ks, *vs;               // E8M0 exponents, one per group of 32 codes
+  u16 *near_k, *near_v;      // BF16 copies [sinks + hot_slots, nkv, hd]
+  int* tags;                 // logical position + 1 of a recent slot; zero is invalid
+};
+
 struct PrepArgs {
   float* q;  // [nh, hd] in place
   const u16* q_scale;
@@ -167,6 +177,7 @@ struct PrepArgs {
   // rows: q [rows, nh*hd], r [rows, nh*drel], kraw/vraw [rows, nkv*hd],
   // k_dyn/v_dyn [rows, nkv*K]; bpr blocks per row; hr history ring slots
   int rows, bpr, hr;
+  KvStorage kv;
 };
 
 // Attention over the cached keys. One block per head.
@@ -187,6 +198,25 @@ struct AttnArgs {
   // no wrap). rows: block = row * nh + head; q, gate, out [rows, nh*hd],
   // r [rows, nh*drel], sink [rows, nh], scratch [rows * nh, scratch_stride]
   int window, rows;
+  KvStorage kv;
+  int splits, row_tile;
+  float* partial;  // [row, head, split, 130]: vector, max, exponential sum
+  // attn_gqa_splitk: min keys per split; rel_proj as [rel_extent, drel] (or null)
+  int sk_chunk;
+  const u16* rel_t;
+  // tiled Flash-GQA prompt attention (attn_rel + attn_flash): relative logits per
+  // (row, head, distance) [rows * nh, rel_stride]; flash_tc = warps of the tensor-core form (0 = FP32 form)
+  float* rel_logits;
+  int rel_stride, flash_tc;
+  // rel_proj transposed to [rel_extent, drel] (one 32-byte read per key); null = use rel_proj
+  const u16* rel_proj_t;
+};
+
+struct KvCaptureArgs {
+  KvStorage kv;
+  const StepState* st;
+  float *k, *v;
+  int ring, channels;
 };
 
 // Experts, multiplied straight from the packed bytes.
@@ -238,6 +268,10 @@ struct ExpMArgs {
   int nchunk;  // blocks of matrix rows per expert
   int grid;    // blocks of the launch (the items distinct * nchunk are spread over them)
   float gate_cap, up_cap;
+  // Wide prompt passes can pack the inputs once for all routed experts.
+  int input_rows, expert_slots, nvfp4_planes;
+  u8* nvfp4_scratch;
+  bool register_down;
 };
 // Sum of the k expert products of every row (in slot order, as exp2), then
 // the short convolution + residual. One thread per (row, channel).
@@ -258,6 +292,14 @@ struct ArgmaxArgs {
   const float* logits;  // [rows, n]
   int* idx;             // [rows]
   float* val;           // [rows]
+  int n;
+};
+constexpr int ink2_pick_tile = 1024;
+struct PickArgs {
+  const float* values;
+  const int* indices;  // null on the vocabulary pass
+  float* maxima;
+  int* winners;
   int n;
 };
 
@@ -287,7 +329,10 @@ struct ArgmaxArgs {
   X(exp13s, ExpMArgs) X(exp13sx, ExpMArgs) X(exp2s, ExpMArgs) X(exp2sx, ExpMArgs) \
   X(pgcm16h2, GemvArgs) X(pgcm8h2, GemvArgs) X(pgcm4h2, GemvArgs) X(pgcm2h2, GemvArgs) \
   X(pgcm16h4, GemvArgs) X(pgcm8h4, GemvArgs) X(pgcm4h4, GemvArgs) X(pgcm2h4, GemvArgs) \
-  INK2_DRAFT_KERNEL_LIST(X)  // drafter hook
+  INK2_DRAFT_KERNEL_LIST(X)  \
+  X(kv_attention, AttnArgs) X(kv_merge, AttnArgs) X(kv_capture, KvCaptureArgs) X(kv_stripes, AttnArgs) \
+  X(pick_tile, PickArgs) X(attn_gqa_splitk, AttnArgs) X(attn_splitk_reduce, AttnArgs) \
+  X(attn_rel, AttnArgs) X(attn_flash, AttnArgs)
 
 enum {
 #define X(name, A) KID_##name,
@@ -309,15 +354,30 @@ struct Backend {
   virtual void run(int kid, const void* args, int grid, int block) = 0;
   // largest block of kernel kid that can be launched (registers of the build for this device)
   virtual int max_block(int kid) { return 1024; }
+  virtual int sm_count() { return 0; }
   virtual size_t bytes_allocated() = 0;
   virtual bool device_memory(long long* free_bytes, long long* total_bytes) = 0;
   virtual const char* error() = 0;  // NULL when no error happened
   // Optional: record the kernels of a step once and replay them with one call.
   virtual bool graph_supported() { return false; }
+  virtual bool supports_nvfp4_prefill() { return false; }
+  virtual bool set_packed_prompt(bool enabled) { return !enabled; }
+  virtual bool set_draft_l2(int mib) { return mib == 0; }
   virtual void graph_begin() {}
   virtual void* graph_end() { return nullptr; }
   virtual void graph_launch(void*) {}
   virtual void graph_free(void*) {}
+  // Fast kernels (ink2_fast.h, CUDA only): compute capability of the device when the fast kernels can run there
+  // (86 / 89 / 120 ...), else 0; run_fast launches fast kernel fid with an FxArgs block.
+  virtual int fast_level() { return 0; }
+  virtual void run_fast(int fid, const void* args, int grid, int block, int smem) {}
+  virtual int fast_smem() { return 0; }  // largest dynamic shared memory of a fast kernel launch (bytes)
+  virtual bool set_pdl(bool on) { return false; }  // programmatic dependent launch of every kernel (true: now on)
+  // Fast kernels, second set (ink2_fast2.h, CUDA only): options of the wrapped launches, own kernels (fid INK2_F2_*;
+  // returns 0 or a CUDA error code, -1 without the kernels), largest block of fgemvm (0: none).
+  virtual void set_f2(const struct F2Opts* o) {}
+  virtual int run_f2(int fid, const void* args, int grid, int block) { return -1; }
+  virtual int f2_gemvm_block() { return 0; }
 };
 
 Backend* ink2_make_host_backend();

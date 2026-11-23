@@ -80,14 +80,24 @@ struct Drafter {
   std::map<int, void*> graphs;    // draft calls: key = 2 * (64 * depth + fold) + cut
   double part_t[3] = {};          // profile: block, base logits, Markov head (seconds)
   long long launches = 0;
+  // Split-K attention of the draft call (ink2_drafter_sk.inc): 0 = dattn (default), 1 = the full-attention
+  // layers, 2 = every layer; splits per KV head (grid) and the least keys per split; skpart = the partials.
+  int sk_mode = 0, sk_splits = 64, sk_chunk = 256;
+  float* skpart = nullptr;
 };
 
 }  // namespace
 
-void Engine::drf_destroy() {
+void Engine::drf_free_graphs() {
   if (!drf) return;
   for (auto& kv : drf->graphs)
     if (kv.second) be->graph_free(kv.second);
+  drf->graphs.clear();
+}
+
+void Engine::drf_destroy() {
+  if (!drf) return;
+  drf_free_graphs();
   for (void* p : drf->owned) be->release(p);
   for (auto& kv : drf->ten)
     if (kv.second.p) be->release(kv.second.p);
@@ -417,7 +427,28 @@ void drf_kernels(Engine* e, int depth, bool cut) {
     t.window = Lr.local ? c.window : 0;
     t.smax = d.smax;
     t.scale = (float)(1.0 / sqrt(128.0));
-    e->run(KID_dattn, &t, 8 * c.heads, 256, INK2_PROF_ATTENTION);
+    if (d.sk_mode && d.skpart && (d.sk_mode == 2 || !Lr.local) && c.heads / c.kv_heads <= DSK_MAXG) {
+      DAttnSkArgs k{};
+      k.q = d.qb;
+      k.kb = d.kb;
+      k.vb = d.vb;
+      k.ck = Lr.ck;
+      k.cv = Lr.cv;
+      k.part = d.skpart;
+      k.out = d.ab;
+      k.st = e->st;
+      k.nh = c.heads;
+      k.nkv = c.kv_heads;
+      k.cap = Lr.cap;
+      k.window = t.window;
+      k.splits = d.sk_splits;
+      k.chunk_min = d.sk_chunk;
+      k.scale = t.scale;
+      e->run(KID_dattn_sk, &k, c.kv_heads * d.sk_splits, 256, INK2_PROF_ATTENTION);
+      e->run(KID_dattn_skr, &k, 8 * c.heads, 128, INK2_PROF_ATTENTION);
+    } else {
+      e->run(KID_dattn, &t, 8 * c.heads, 256, INK2_PROF_ATTENTION);
+    }
     GemvArgs o{};
     o.job[0] = drf_job(Lr.wo, d.ab, d.ob, H, A);
     o.njobs = 1;
@@ -553,13 +584,19 @@ Engine* drf_engine(void* h) {
 
 // Before the kernels of a pass (its rows are in st): the pending draft call writes its
 // tokens into st[1 .. depth].
-void Engine::drf_before_pass(int R) {
+int Engine::drf_before_pass(int R, bool can_join) {
   Drafter& d = *drf;
-  if (!d.pending) return;
+  if (!d.pending) return 0;
   int depth = d.pending;
   d.pending = 0;
   if (R != depth + 1) fail("drafter: pass size does not match the pending draft");
+  if (can_join && !d.prof) return -(64 * depth + d.fold);
   drf_draft(this, depth);
+  return 0;
+}
+
+void Engine::drf_record_pending(int depth) {
+  drf_kernels(this, depth, false);
 }
 
 INK2_API int ink2_draft_abi(void) { return INK2_DRAFT_ABI; }
@@ -637,9 +674,24 @@ INK2_API int ink2_draft_set_option(void* h, const char* name, int value) {
   } else if (n == "mrows") {
     if (value != 0 && value != 2 && value != 4 && value != 8 && value != 16) fail("drafter: mrows must be 0, 2, 4, 8 or 16");
     d.mrows = value;
-    for (auto& kv : d.graphs)
-      if (kv.second) x->be->graph_free(kv.second);
-    d.graphs.clear();
+    x->drf_free_graphs();
+    if (x->joined_draft_graph) x->free_graphs();
+  } else if (n == "attn_sk" || n == "attn_sk_splits" || n == "attn_sk_chunk") {
+    if (n == "attn_sk") {
+      if (value < 0 || value > 2) fail("drafter: attn_sk must be 0 (dattn), 1 (full-attention layers) or 2 (every layer)");
+      if (value && d.c.heads / d.c.kv_heads > DSK_MAXG) fail("drafter: attn_sk needs at most 3 query heads per KV head");
+      d.sk_mode = value;
+    } else if (n == "attn_sk_splits") {
+      if (value < 1 || value > 64) fail("drafter: attn_sk_splits must be 1 .. 64");
+      d.sk_splits = value;
+    } else {
+      if (value < 32 || value > 1048576) fail("drafter: attn_sk_chunk must be 32 .. 1048576");
+      d.sk_chunk = value;
+    }
+    if (d.sk_mode && !d.skpart)
+      d.skpart = drf_alloc<float>(x, (size_t)d.c.kv_heads * 64 * 8 * (d.c.heads / d.c.kv_heads) * DSK_STRIDE);
+    x->drf_free_graphs();
+    if (x->joined_draft_graph) x->free_graphs();
   } else fail("drafter: unknown option " + n);
   return 0;
   API_END
@@ -813,6 +865,10 @@ INK2_API int ink2_spec_pass2(void* h, int anchor, int depth, int* drafts_out, in
   if (info_out) info_out[0] = k;
   for (int j = 0; j < k; ++j) drafts_out[j] = buf[j];
   if (k == 0) {
+    if (e->device_greedy) {
+      e->step(anchor, nullptr, true, argmax_out);
+      return 0;
+    }
     e->step(anchor, nullptr, true);
     const float* lg = e->logits_host.data();
     int best = 0;

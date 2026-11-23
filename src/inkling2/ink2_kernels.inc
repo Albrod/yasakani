@@ -495,6 +495,8 @@ KERNEL(gmix, GmixArgs) {
 // prep: one warp per head vector. Warps [0, nh): queries, [nh, 2nh): relative
 // states, then nkv key heads, then nkv value heads.
 // ---------------------------------------------------------------------------
+#include "ink2_kv_codec.inc"
+
 KERNEL(prep, PrepArgs) {
   int lane = KTID & 31;
   int row = 0, b = KBID;
@@ -538,7 +540,8 @@ KERNEL(prep, PrepArgs) {
   int cslot = a.ring ? pos % a.ring : pos;
   const float* raw = (isv ? a.vraw : a.kraw) + (size_t)row * C;
   float* hist = isv ? a.vhist : a.khist;
-  float* dst = (isv ? a.vc : a.kc) + (size_t)cslot * C;
+  float* dst = a.kv.mode ? nullptr : (isv ? a.vc : a.kc) + (size_t)cslot * C;
+  float values[4];  // both attention head sizes are 128
   const u16* w = isv ? a.v_w : a.k_w;
   const float* dyn = (isv ? a.v_dyn : a.k_dyn) + (a.sliding ? 0 : (size_t)row * nkv * K);
   float ss = 0.0f;
@@ -563,7 +566,7 @@ KERNEL(prep, PrepArgs) {
     }
     o = (o + x) / a.conv_div;
     hist[(size_t)(pos % hr) * C + c] = x;
-    dst[c] = o;
+    values[j >> 5] = o;
     ss += o * o;
   }
   float tot = k_warp_sum(KCTXA ss);
@@ -576,7 +579,9 @@ KERNEL(prep, PrepArgs) {
   }
   for (int j = lane; j < hd; j += 32) {
     int c = hk * hd + j;
-    dst[c] = dst[c] * f;
+    float x = values[j >> 5] * f;
+    if (dst) dst[c] = x;
+    else kv_store(KCTXA a.kv, isv, pos, cslot, C, c, x);
   }
 }
 
@@ -612,7 +617,9 @@ KERNEL(attn, AttnArgs) {
   const float* vbase = a.vc + (size_t)kh * hd + lane * 4;
   KF4 q = KLOADF4(a.q + qo + (size_t)h * hd + lane * 4);
   float rr = lane < a.drel ? a.r[(size_t)row * a.nh * a.drel + (size_t)h * a.drel + lane] : 0.0f;
-  const u16* rp = a.rel_proj + (size_t)(lane < a.drel ? lane : 0) * a.rel_extent;
+  // transposed table: stride drel per distance; original: stride 1
+  const u16* rp = a.rel_proj_t ? a.rel_proj_t + (lane < a.drel ? lane : 0) : a.rel_proj + (size_t)(lane < a.drel ? lane : 0) * a.rel_extent;
+  const int rs = a.rel_proj_t ? a.drel : 1;
   float mx = -3.0e38f;
   for (int t = warp; t < T; t += nw) {
     int slot = slot0 + t;
@@ -624,7 +631,7 @@ KERNEL(attn, AttnArgs) {
     acc = KFMA(q.w, k.w, acc);
     float v = acc * a.scale;
     int dist = T - 1 - t;
-    if (dist < a.rel_extent && lane < a.drel) v = KFMA(rr, k_bf(rp[dist]), v);
+    if (dist < a.rel_extent && lane < a.drel) v = KFMA(rr, k_bf(rp[(size_t)dist * rs]), v);
     float l = k_warp_sum(KCTXA v);
     if (lane == 0) lg[t] = l;
     mx = fmaxf(mx, l);
@@ -676,6 +683,10 @@ KERNEL(attn, AttnArgs) {
 }
 
 // ---------------------------------------------------------------------------
+#include "ink2_kv_attention.inc"
+#include "ink2_splitk_attention.inc"
+#include "ink2_flash_attn.inc"
+
 // topk: top-k of sigmoid(logit) + bias, weights from sigmoid(logit).
 // One block of at least E threads.
 // ---------------------------------------------------------------------------
@@ -1768,6 +1779,47 @@ KERNEL(exp2sx, ExpMArgs) {
   KSHARED(u64, wsh1, K_EXP2S_U * 256);
   KSHARED(float, ssh, K_EXP2S_U * 256);
   k_exp2s<0>(KCTXA a, ctab, stab, wsh, wsh1, ssh);
+}
+
+// Index ordering matches numpy.argmax, including ties and the first NaN.
+KINL bool k_pick_before(float v, int id, float best, int winner) {
+  if (v != v) return best == best || id < winner;
+  return v > best || (v == best && id < winner);
+}
+KERNEL(pick_tile, PickArgs) {
+  KSHARED(float, warp_val, 32);
+  KSHARED(int, warp_idx, 32);
+  int begin = a.indices ? 0 : KBID * ink2_pick_tile;
+  int end = !a.indices && a.n - begin > ink2_pick_tile ? begin + ink2_pick_tile : a.n;
+  float best = KBITS2F(0xff800000u);
+  int winner = 0x00ffffff;  // the engine's supported vocabulary indices are exact float32 integers
+  for (int i = begin + KTID; i < end; i += KNT) {
+    int id = a.indices ? a.indices[i] : i;
+    float v = a.values[i];
+    if (k_pick_before(v,id,best,winner)) { best = v; winner = id; }
+  }
+  for (int delta = 16; delta; delta >>= 1) {
+    float v = KSHFL_DOWN(best,delta);
+    int id = (int)KSHFL_DOWN((float)winner,delta);
+    if (k_pick_before(v,id,best,winner)) { best = v; winner = id; }
+  }
+  if (!(KTID & 31)) {
+    warp_val[KTID >> 5] = best;
+    warp_idx[KTID >> 5] = winner;
+  }
+  KSYNC();
+  if (!KTID) {
+    best = warp_val[0];
+    winner = warp_idx[0];
+    for (int w = 1; w < KNT / 32; ++w) {
+      if (k_pick_before(warp_val[w],warp_idx[w],best,winner)) {
+        best = warp_val[w];
+        winner = warp_idx[w];
+      }
+    }
+    a.maxima[KBID] = best;
+    a.winners[KBID] = winner;
+  }
 }
 
 // argmax: largest logit of a row and its index (the first on ties).

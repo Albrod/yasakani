@@ -118,16 +118,30 @@ What is in `src/inkling2/`:
   can also be given as they are stored in a converted drafter file (`mtp_d4.yskn`, [docs/FORMAT.md](docs/FORMAT.md) section 10.6;
   bit 4, drafter interface version 2). The pass checks the guesses only up to the first one the drafter is unsure of (the
   confidence cut of `--draft auto`).
+* The fast path (since 0.3.3; the package's `--fast`, see `python/yasakani/inkling2.py`): `ink2_kv_codec.inc` and
+  `ink2_kv_mxfp8.inc` (an 8-bit key/value cache for the full-attention visits: E4M3 codes with one power-of-two scale per 32
+  values, BF16 copies of the first 8 and the most recent positions; option `kv_mxfp8`), `ink2_kv_attention.inc` (attention over
+  that cache), `ink2_splitk_attention.inc` (Split-K attention for single steps and short passes; with the option `pass_exact`,
+  on by default, every row of a pass with logits gets the bits of a single step), `ink2_flash_attn.inc` and `ink2_flash_tc.cuh`
+  (tiled Flash-GQA attention of prompt passes, FP32 and BF16 tensor cores), `ink2_packed_prefill.cuh`, `ink2_decode_experts.cuh`
+  and `ink2_expert_tile.cuh` (products of prompt and verification passes), `ink2_fast.cu`, `ink2_fast.h`, `ink2_fast2.h`,
+  `ink2_fast_engine.inc`, `ink2_fast2_engine.inc` and `ink2_fast2_gen.inc` (the fast kernels for RTX 30, 40 and 50),
+  `ink2_nvfp4.cu` (expert products of prompt passes on the NVFP4 tensor cores of the RTX 50 series, built for `sm_120a`), and
+  `ink2_drafter_sk.inc` / `ink2_drafter_sk_kargs.h` (Split-K attention of the drafter). All of it is off unless the package (or a
+  caller of the load options and `ink2_set_option`) turns it on; with it off the library gives the results of 0.3.2 bit for bit.
 * `build.cmd`: the build. There is no CMake file for this library.
 
-The released `yskn_inkling2.dll` has SHA-256 `b10248cddc7b2bceb9a26d0d28b9446db57bf71c24db4772a3829f8e66b1c078` (6,157,824 bytes): the
-engine with the drafter (also from a converted drafter file, `mtp_d4.yskn`) and with the products for packed dense matrices, built
-from `src/inkling2/` of this release. It was built with the tools of
+The released `yskn_inkling2.dll` has SHA-256 `282ddcc470e570207dae1362c188be57e6170518e03283475790a28c46a28c7f` (24,137,728 bytes): the
+engine with the drafter (also from a converted drafter file, `mtp_d4.yskn`), with the products for packed dense matrices and with the
+fast path, built from `src/inkling2/` of this release. It was built with the tools of
 the table above (Visual C++ 19.44, CUDA Toolkit 13.2) by `build.cmd cuda`. Like `yskn.dll` it has machine code for compute capability 8.6
-(RTX 30 series), 8.9 (RTX 40 series) and 12.0 (RTX 50 series), plus PTX for `compute_120`, and the CUDA runtime is linked statically. It
+(RTX 30 series), 8.9 (RTX 40 series) and 12.0 (RTX 50 series), plus PTX for `compute_120`, and machine code for `sm_120a` for the NVFP4
+prompt products; the CUDA runtime is linked statically. It
 also uses the OpenMP library of Visual C++ (`vcomp140.dll`, part of the Visual C++ 2015-2022 x64 runtime). Only the RTX 5090 has been
 tested. At a context of 32,768 tokens the engine allocates about 23 GB of GPU memory for the published weights (24 GB with the drafter)
 and about 19 GB for the weights of `--scheme quality` (19.5 GB with their 4-bit drafter), so cards with less than 24 GB cannot run it.
+With the fast path (its 8-bit key/value cache) the weights of `--scheme quality` with their drafter took 17.9 GB at 32,768 tokens and
+20.5 GB at 131,072 tokens (the engine's allocations, RTX 5090).
 
 To build it, open the **x64 Native Tools Command Prompt for VS 2022** with the CUDA Toolkit 13 installed (the installer sets `CUDA_PATH`;
 without it `nvcc` must be on the path), go to the source folder and run:
@@ -137,8 +151,9 @@ src\inkling2\build.cmd cuda
 yasakani info --model-dir D:\models\inkling2-mini --dll build\inkling2\yskn_inkling2.dll
 ```
 
-The build takes a few minutes and writes `build\inkling2\yskn_inkling2.dll` (about 6 MB). `set INK2_ARCHS=-gencode
-arch=compute_120,code=sm_120` before it builds for the RTX 50 series only. `src\inkling2\build.cmd host` builds
+The build takes a few minutes and writes `build\inkling2\yskn_inkling2.dll` (about 24 MB). `set INK2_ARCHS=-gencode
+arch=compute_120,code=sm_120` before it builds for the RTX 50 series only; `set INK2_NVFP4_TC=0` builds it without the NVFP4 prompt
+products (the fast path then runs without them, and `--fast auto` turns it off). `src\inkling2\build.cmd host` builds
 `build\inkling2\ink2_host.dll`, the kernels on the CPU only: it is not released and serves the unit tests of the package
 (`YASAKANI_TEST_INK2_DLL`, with the tiny test checkpoint in `YASAKANI_TEST_INK2_SOURCE`; see `python/tests/test_inkling2.py`). The library
 is for Windows only; there is no Linux build of it (on Linux, see [the Inkling-2 engine of #28](#linux-inkling-2) below). Then check it

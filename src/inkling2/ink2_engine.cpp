@@ -6,10 +6,10 @@
 // call, float32); the comments name the functions of that file.
 // A pass may also advance R consecutive positions at once (ink2_feed_many,
 // ink2_step_many): every row then gets bit for bit the arithmetic of a single
-// step (the multi-row kernels keep the order of every sum), the rows see the
+// step by default (the multi-row kernels keep the order of every sum), the rows see the
 // earlier rows of the pass through the caches and convolution histories, and
 // every weight matrix is read once for all rows (experts: once per distinct
-// expert of the pass).
+// expert of the pass). The optional NVFP4 Tensor Core prompt mode instead rounds activations.
 #define INK2_BUILD
 #include "ink2_api.h"
 
@@ -18,13 +18,19 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "ink2_kargs.h"
+#include "ink2_fast.h"   // fast kernels (RTX 30 and later)
+#include "ink2_fast2.h"  // fast kernels, second set
+#include <stdlib.h>
 
 int ink2_run_selftest(Backend* ref, Backend* dut, std::string& report);
 int ink2_cuda_microbench(char* report, int cap);
@@ -86,6 +92,8 @@ struct Layer {
   const u16 *norm_q = nullptr, *norm_k = nullptr, *norm_v = nullptr, *mlp_norm = nullptr;
   DMat wq, wk, wv, wr, wo, w_gate, w_sink, k_wproj, v_wproj, router_w;
   const u16 *q_scale = nullptr, *rel_scale = nullptr, *rel_proj = nullptr;
+  u16* rel_t = nullptr;  // rel_proj as [rel_extent, d_rel], built when splitk_attn is set
+  const u16* rel_proj_t = nullptr;  // [rel_extent, drel], uploaded by the option rel_t
   const u16 *k_w = nullptr, *v_w = nullptr;
   const u16 *attn_sconv = nullptr, *mlp_sconv = nullptr;
   const u8 *w13 = nullptr, *w13s = nullptr, *w2 = nullptr, *w2s = nullptr;
@@ -97,6 +105,7 @@ struct Layer {
 // layer a ring of window + margin slots) and the four convolution histories
 // (rings of hr slots), and its last outputs for every row of a pass.
 struct Visit {
+  KvStorage kv{};
   int layer = 0, pass = 0, cap = 0;
   float *kc = nullptr, *vc = nullptr, *khist = nullptr, *vhist = nullptr, *ahist = nullptr, *mhist = nullptr;
   float *rlog = nullptr, *rwt = nullptr, *hid = nullptr;  // [max_rows, ...]
@@ -123,9 +132,84 @@ struct Engine {
   int max_rows = 128;  // largest R of a multi-row pass
   int rollback = 64;   // positions ink2_truncate can always drop
   int margin = 0;      // max(max_rows, rollback): extra slots of the rings
+  // KV cache: INK2_KV_FP32 (default) or INK2_KV_MXFP8 (option kv_mxfp8; full-attention visits only, see ink2_kv_mxfp8.inc)
+  int kv_mode = INK2_KV_FP32, kv_hot = 128, kv_split = 0, global_splits = 1;
+  // Tiled Flash-GQA attention of prompt passes: 0 off (default), 1 FP32 (8 rows x 3 heads per block),
+  // 2 BF16 tensor cores (16 rows x 3 heads), 3 BF16 tensor cores (32 rows x 3 heads)
+  int flash_attn = 0, flash_rel_cap = 0, flash_sms = 0;
+  int flash_min_rows = 8;  // smallest pass for flash (9 keeps the 8-row draft checks on the cache kernels)
+  float *flash_rel = nullptr, *flash_partial = nullptr;
+  enum { flash_max_splits = 16 };
+  bool flash_hook(AttnArgs& a, const Layer& L, const Visit& V, int R) {
+    if (!flash_attn || R < flash_min_rows || L.nh != 3 * L.nkv || L.rel_extent > flash_rel_cap)
+      return false;
+    if (exact_logit_pass(R) && splitk_use(L, R)) return false;  // rows with logits stay on the single-step kernel
+    a.kv = V.kv;
+    a.rel_logits = flash_rel;
+    a.rel_stride = flash_rel_cap;
+    run(KID_attn_rel, &a, R * L.nh, 256, INK2_PROF_ATTENTION);
+    const int per = flash_attn == 3 ? 32 : flash_attn == 2 ? 16 : 8;
+    const int tiles = (R + per - 1) / per, blocks = tiles * L.nkv;
+    int splits = flash_sms ? (2 * flash_sms + blocks - 1) / blocks : 1;
+    a.splits = splits < 1 ? 1 : splits > flash_max_splits ? flash_max_splits : splits;
+    a.partial = flash_partial;
+    a.flash_tc = flash_attn == 3 ? 6 : flash_attn == 2 ? 3 : 0;
+    run(KID_attn_flash, &a, blocks * a.splits, a.flash_tc ? 32 * a.flash_tc : 256, INK2_PROF_ATTENTION);
+    if (a.splits > 1) run(KID_kv_merge, &a, R * L.nh, 128, INK2_PROF_ATTENTION);
+    return true;
+  }
+  bool rel_t = false;  // attention reads the transposed rel_proj (same bits)
+  size_t kv_cache_bytes = 0, kv_work_bytes = 0;
+  float *kv_partial = nullptr, *capture_k = nullptr, *capture_v = nullptr;
+  // GQA-shared Split-K attention for short passes (option splitk_attn, default off)
+  int splitk_attn = 0, splitk_splits = 0, splitk_chunk = 64;
+  int splitk_max_rows = 7;  // largest pass for splitk (8 = the 8-row draft checks too)
+  bool splitk_rel = true;
+  float* splitk_partial = nullptr;  // [splitk_rows, nh_full, 32 splits, 132]
+  // pass_exact (default 1): every row of a pass with logits (ink2_step_many: verification and copy passes) gets bit for
+  // bit the logits of a single step at its position. Split-K then cuts every row's history into the splits a single
+  // step uses (the count of R = 1, not of R), and with splitk_attn on, passes with logits of up to splitk_rows rows
+  // take the Split-K kernel of the single step (never flash or the pass kernels). Prompt passes (no logits) keep their
+  // kernels. Acts only with splitk_attn.
+  int pass_exact = 1;
+  bool cur_logits = false;  // the current pass reads logits (set by pass(), cleared after it)
+  int splitk_rows = 8;      // rows the Split-K partials hold (max(8, logit_rows) once allocated)
+  bool exact_logit_pass(int R) const { return pass_exact && cur_logits && R > 1 && R <= splitk_rows; }
+  bool splitk_use(const Layer& L, int R) const {
+    return splitk_attn && splitk_partial && (R <= splitk_max_rows || exact_logit_pass(R)) && L.hd == 128 && L.nkv > 0 &&
+           L.nh % L.nkv == 0 && L.nh / L.nkv <= 4 && c.d_rel <= 32;
+  }
+  int splitk_count(int R, int nkv) const {
+    if (splitk_splits) return splitk_splits;
+    if (pass_exact) R = 1;  // the splits of a single step for every row (sum order independent of the pass size)
+    int sm = be->sm_count(), n = ((sm ? 2 * sm : 64) + R * nkv - 1) / (R * nkv);
+    return n < 1 ? 1 : n > 32 ? 32 : n;
+  }
+  void splitk_prepare() {
+    if (!splitk_partial) {
+      size_t start = be->bytes_allocated();
+      splitk_rows = (std::max)(8, logit_rows);  // passes with logits up to logit_rows rows
+      splitk_partial = alloc<float>((size_t)splitk_rows * c.nh_full * 32 * 132);
+      kv_work_bytes += be->bytes_allocated() - start;
+    }
+    for (Layer& L : layers) {
+      if (L.rel_t || !L.rel_proj || !L.rel_extent) continue;
+      const size_t n = (size_t)c.d_rel * L.rel_extent;
+      std::vector<u16> src(n), dst(n);
+      be->download(src.data(), L.rel_proj, n * 2);
+      for (int d = 0; d < c.d_rel; ++d)
+        for (int t = 0; t < L.rel_extent; ++t) dst[(size_t)t * c.d_rel + d] = src[(size_t)d * L.rel_extent + t];
+      L.rel_t = alloc<u16>(n);
+      be->upload(L.rel_t, dst.data(), n * 2);
+    }
+    check_backend();
+  }
   int hr = 0;          // slots of a convolution history ring (K - 1 + margin)
   int logit_rows = 0;  // largest R of ink2_step_many (rows with logits)
   int chunk = 128;     // rows per pass of ink2_feed_many
+  int nvfp4_planes = 0;
+  u8* nvfp4_scratch = nullptr;
+  int decode_tiles = 0;
 
   std::vector<Layer> layers;
   std::vector<Visit> visits;
@@ -148,6 +232,9 @@ struct Engine {
   int *gcount = nullptr, *gexp = nullptr, *goff = nullptr, *gpairs = nullptr;
   int* amax_idx = nullptr;
   float* amax_val = nullptr;
+  int* pick_indices = nullptr;
+  float* pick_values = nullptr;
+  bool device_greedy = false;
   int scratch_stride = 0;
   std::vector<float> logits_host;
 
@@ -171,8 +258,10 @@ struct Engine {
   bool use_small_experts = true, use_small_dense = false, use_small_w2 = false;  // (measured: exp2s and the h2 / h4 dense
   // products are not faster than exp2m and the single-row products on the RTX 5090; kept as options)
   int small_dense_rows = 0;
-  void* graph[2] = {nullptr, nullptr};  // without / with the output projection
-  std::map<int, void*> mgraph;          // multi-row passes: key 2 * R + with_logits
+  void* graph[4] = {nullptr, nullptr, nullptr, nullptr};  // without / with the output projection (+ 2: the split attention of the fast kernels)
+  // Row count/output flag, attention variant, and the optional fixed-depth draft shape.
+  std::map<std::tuple<int, bool, int>, void*> mgraph;
+  bool joined_draft_graph = false;
   int graphs_built = 0;
   bool prof = false;
   double prof_t[INK2_PROF_COUNT] = {};
@@ -185,8 +274,12 @@ struct Engine {
   int cap_visit = -1;
   std::vector<Capture> caps;
   Drafter* drf = nullptr;  // drafter hook: defined in ink2_drafter.inc
+#include "ink2_fast_engine.inc"   // fast kernels
+#include "ink2_fast2_engine.inc"  // fast kernels, second set
   void drf_commit(int R);
-  void drf_before_pass(int R);
+  int drf_before_pass(int R, bool can_join);
+  void drf_record_pending(int depth);
+  void drf_free_graphs();
   void drf_destroy();
 
   ~Engine() {
@@ -220,7 +313,31 @@ struct Engine {
     owned.push_back(p);
     return (T*)p;
   }
+  // the transposed relative projection of every layer (once; the same values)
+  void upload_rel_t() {
+    for (Layer& L : layers) {
+      if (L.rel_proj_t || !L.rel_proj) continue;
+      const size_t n = (size_t)c.d_rel * L.rel_extent;
+      std::vector<u16> src(n), dst(n);
+      be->download(src.data(), L.rel_proj, n * sizeof(u16));
+      for (int d = 0; d < c.d_rel; ++d)
+        for (int t = 0; t < L.rel_extent; ++t) dst[(size_t)t * c.d_rel + d] = src[(size_t)d * L.rel_extent + t];
+      u16* p = alloc<u16>(n);
+      be->upload(p, dst.data(), n * sizeof(u16));
+      L.rel_proj_t = p;
+    }
+    be->sync();
+    check_backend();
+  }
+  void reserve_kv_partials(int splits) {
+    if (splits > 1 && !kv_partial) {
+      // Split count can change while the cache is live. Allocate once, keep
+      // its address stable, and reuse it across all global visits.
+      kv_partial = alloc<float>((size_t)max_rows * c.nh_full * 32 * 130);
+    }
+  }
   void run(int kid, const void* args, int grid, int block, int cat) {
+    f2_flush();  // fast kernels, second set
     if (bench_reps > 0) {  // timing only: the same kernel many times in a row (the results are not valid)
       be->sync();
       double t0 = now_s();
@@ -338,8 +455,13 @@ struct Engine {
     if (c.max_positions < 1) fail("max_positions must be positive");
     if (I > 16 * 16 * 5 || H > 32 * 16 * 5) fail("expert inner size above 1280 or hidden size above 2560 (multi-row expert kernels)");
     if (max_rows < 1 || (long long)max_rows * c.top_k > 2048) fail("max_rows must be 1 .. 2048 / top_k");
-    if (rollback < 0) fail("rollback must not be negative");
+    if (rollback < 0 || rollback > 0x7fffffff - 256) fail("rollback out of range");
     margin = max_rows > rollback ? max_rows : rollback;
+    if (kv_split) global_splits = kv_split;
+    else if (kv_mode != INK2_KV_FP32) {
+      int sm = be->sm_count();
+      global_splits = sm >= 150 ? 24 : sm >= 100 ? 16 : sm ? 12 : 1;
+    }
     hr = (int)(K - 1) + margin;
     logit_rows = max_rows < 32 ? max_rows : 32;
     if (chunk > max_rows) chunk = max_rows;
@@ -436,8 +558,30 @@ struct Engine {
       long long ring = (long long)c.window + margin;
       V.cap = L.sliding ? (int)(ring < c.max_positions ? ring : c.max_positions) : c.max_positions;
       max_cap = V.cap > max_cap ? V.cap : max_cap;
-      V.kc = alloc<float>((size_t)V.cap * C);
-      V.vc = alloc<float>((size_t)V.cap * C);
+      size_t start = be->bytes_allocated(), count = (size_t)V.cap * C;
+      KvStorage& k = V.kv;
+      k.mode = kv_mode;
+      if (kv_mode != INK2_KV_MXFP8 || L.sliding) {  // FP32 (the sliding visits stay FP32 with MXFP8)
+        k.mode = INK2_KV_FP32;
+        V.kc = alloc<float>(count);
+        V.vc = alloc<float>(count);
+      } else {  // MXFP8: E4M3 codes, one E8M0 byte per 32, BF16 copies of the sinks and the recent window
+        k.key = alloc<u8>(count);
+        k.value = alloc<u8>(count);
+        k.ks = alloc<u8>(count / 32);
+        k.vs = alloc<u8>(count / 32);
+        k.sinks = V.cap < 8 ? V.cap : 8;
+        k.hot = kv_hot;
+        if (k.hot && V.cap > k.sinks) {
+          k.hot_slots = k.hot + margin;
+          if (k.hot_slots > V.cap - k.sinks) k.hot_slots = V.cap - k.sinks;
+          k.tags = alloc<int>(k.hot_slots);
+        }
+        size_t near_elems = (size_t)(k.sinks + k.hot_slots) * C;
+        k.near_k = alloc<u16>(near_elems);
+        k.near_v = alloc<u16>(near_elems);
+      }
+      kv_cache_bytes += be->bytes_allocated() - start;
       V.khist = alloc<float>((size_t)hr * C);
       V.vhist = alloc<float>((size_t)hr * C);
       V.ahist = alloc<float>((size_t)hr * H);
@@ -488,8 +632,24 @@ struct Engine {
     gpairs = alloc<int>(MR * c.top_k);
     amax_idx = alloc<int>(logit_rows);
     amax_val = alloc<float>(logit_rows);
-    scratch_stride = max_cap;
-    scratch = alloc<float>(MR * max_nh * scratch_stride);
+    size_t work_start = be->bytes_allocated();
+    if (kv_mode == INK2_KV_FP32 && !kv_split) {
+      scratch_stride = max_cap;
+      scratch = alloc<float>(MR * max_nh * scratch_stride);
+    } else {
+      if (kv_mode == INK2_KV_MXFP8 && !kv_split) {  // the FP32 sliding visits keep the original attention kernel
+        scratch_stride = 0;
+        for (const Visit& v : visits)
+          if (layers[v.layer].sliding && v.cap > scratch_stride) scratch_stride = v.cap;
+        if (scratch_stride) scratch = alloc<float>(MR * max_nh * scratch_stride);
+      }
+      reserve_kv_partials(global_splits);
+    }
+    if (kv_mode != INK2_KV_FP32) {
+      capture_k = alloc<float>(maxC);
+      capture_v = alloc<float>(maxC);
+    }
+    kv_work_bytes = be->bytes_allocated() - work_start;
     e4m3 = alloc<float>(256);
     exp2t = alloc<float>(256);
     float t1[256], t2[256];
@@ -500,8 +660,12 @@ struct Engine {
     for (auto& kv : ten) std::vector<unsigned char>().swap(kv.second.host);
     be->sync();
     check_backend();
+    if (rel_t) upload_rel_t();
     finalized = true;
+    if (splitk_attn) splitk_prepare();
     pos = 0;
+    fast_resolve();  // fast kernels
+    f2_resolve();    // fast kernels, second set
   }
 
   void reset() {
@@ -513,6 +677,7 @@ struct Engine {
       be->zero(V.vhist, (size_t)hr * C * 4);
       be->zero(V.ahist, (size_t)hr * H * 4);
       be->zero(V.mhist, (size_t)hr * H * 4);
+      if (V.kv.tags) be->zero(V.kv.tags, (size_t)V.kv.hot_slots * sizeof(int));
     }
     pos = 0;
     check_backend();
@@ -636,7 +801,11 @@ struct Engine {
       while (nr > 4 && nblocks(nr) < pgemvc_min_blocks) nr >>= 1;
     }
     a.blocks = nblocks(nr);
-    if (R > 1 && R <= small_rows && R <= 8 && use_small_dense) {  // few rows: as many right-hand sides per block as the pass has
+    // The vocabulary projection is much larger than cache. Read its weights
+    // together for the verifier's rows even when layer GEMVs run individually.
+    const bool packed_head = (decode_tiles & 1) && a.njobs == 1 && a.job[0].w == unembed.w;
+    if (R > 1 && !packed_head && f2_dense_multi(a, cat, R)) return;  // fast kernels, second set (decode_tiles 1 keeps its head)
+    if (R > 1 && R <= 8 && ((R <= small_rows && use_small_dense) || packed_head)) {
       int nh = R <= 2 ? 2 : R <= 4 ? 4 : 8;
       int mr = nr;
       if (!explicit_nr && small_dense_rows > 0) mr = small_dense_rows;
@@ -712,7 +881,9 @@ struct Engine {
     a.nj = j1 ? 2 : 1;
     a.rows = R;
     a.hr = hr;
-    run(KID_bar, &a, a.nj * R, quad_block(), INK2_PROF_MIX_NORM);
+    if (f2_bar_comb(a, R)) return;  // fast kernels, second set
+    if (fast_bar(a)) run_fx(INK2_FBAR, &a, a.nj * R, quad_block(), 0, INK2_PROF_MIX_NORM);  // fast kernels
+    else run(KID_bar, &a, a.nj * R, quad_block(), INK2_PROF_MIX_NORM);
   }
   // ink2_ref.Ink2Model.message_gate for n gates (g0 = index of the first gate
   // of the layer), followed by rms_norm with the given weights.
@@ -838,6 +1009,7 @@ struct Engine {
       a.vhist = V.vhist;
       a.kc = V.kc;
       a.vc = V.vc;
+      a.kv = V.kv;
       a.k_w = L.k_w;
       a.v_w = L.v_w;
       a.k_dyn = kdyn;
@@ -858,14 +1030,22 @@ struct Engine {
       a.bpr = (warps + 7) / 8;
       a.rows = R;
       a.hr = hr;
-      run(KID_prep, &a, a.bpr * R, 256, INK2_PROF_ATTENTION);
+      if (fast_prep(a)) run_fx(INK2_FPREP, &a, a.bpr * R, 256, 0, INK2_PROF_ATTENTION);  // fast kernels
+      else run(KID_prep, &a, a.bpr * R, 256, INK2_PROF_ATTENTION);
     }
     if (vi == cap_visit) {
       const int slot = ring ? pos % ring : pos;
       capture(vi, "q", qv, A);
       capture(vi, "rel", rv, L.nh * c.d_rel);
-      capture(vi, "k_new", V.kc + (size_t)slot * C, C);
-      capture(vi, "v_new", V.vc + (size_t)slot * C, C);
+      if (V.kv.mode) {  // per visit (MXFP8 keeps FP32 on the sliding visits)
+        KvCaptureArgs ca{V.kv, st, capture_k, capture_v, ring, (int)C};
+        run(KID_kv_capture, &ca, ((int)C + 511) / 512, 128, INK2_PROF_ATTENTION);
+        capture(vi, "k_new", capture_k, C);
+        capture(vi, "v_new", capture_v, C);
+      } else {
+        capture(vi, "k_new", V.kc + (size_t)slot * C, C);
+        capture(vi, "v_new", V.vc + (size_t)slot * C, C);
+      }
     }
 
     // 4. attention over the cache of this visit
@@ -878,6 +1058,7 @@ struct Engine {
       a.kc = V.kc;
       a.vc = V.vc;
       a.rel_proj = L.rel_proj;
+      a.rel_proj_t = rel_t ? L.rel_proj_t : nullptr;
       a.scratch = scratch;
       a.out = att;
       a.st = st;
@@ -891,7 +1072,30 @@ struct Engine {
       a.rows = R;
       a.scratch_stride = scratch_stride;
       a.scale = (float)pow((double)L.hd, -0.5);
-      run(KID_attn, &a, L.nh * R, 1024, INK2_PROF_ATTENTION);
+      if (flash_hook(a, L, V, R)) {
+      } else if (splitk_use(L, R)) {  // FP32 or MXFP8 (kv_read4 / kv_near)
+        a.kv = V.kv;
+        a.partial = splitk_partial;
+        a.rel_t = splitk_rel ? L.rel_t : nullptr;
+        a.splits = splitk_count(R, L.nkv);
+        a.sk_chunk = splitk_chunk;
+        run(KID_attn_gqa_splitk, &a, R * L.nkv * a.splits, 256, INK2_PROF_ATTENTION);
+        if (a.splits > 1) run(KID_attn_splitk_reduce, &a, R * L.nh, 32, INK2_PROF_ATTENTION);
+      } else if ((kv_mode == INK2_KV_FP32 || L.sliding) && !kv_split) {  // MXFP8: the sliding visits are FP32
+        if (!f2_attn_run(a, R)) run(KID_attn, &a, L.nh * R, 1024, INK2_PROF_ATTENTION);  // fast kernels: split attention
+      } else {
+        a.kv = V.kv;
+        a.row_tile = R == 1 ? 1 : R <= 4 ? 4 : 8;
+        a.splits = L.sliding ? 1 : global_splits;
+        a.partial = kv_partial;
+        int bundles = (a.row_tile * (L.nh / L.nkv) + 23) / 24;
+        int grid = ((R + a.row_tile - 1) / a.row_tile) * bundles * a.splits * L.nkv;
+        if (R <= 8 && L.nh == 3 * L.nkv)
+          run(KID_kv_stripes, &a, R * a.splits * L.nkv, 256, INK2_PROF_ATTENTION);
+        else
+          run(KID_kv_attention, &a, grid, 256, INK2_PROF_ATTENTION);
+        if (a.splits > 1) run(KID_kv_merge, &a, R * L.nh, 128, INK2_PROF_ATTENTION);
+      }
     }
     capture(vi, "attn", att, A);
     {
@@ -929,11 +1133,12 @@ struct Engine {
 
     // 6. router and experts; the last kernel also applies the short
     // convolution of the MLP output and adds the residual
+    // the NVFP4 prompt planes and decode_tiles 2 keep their own expert kernels
+    const bool use_fx = fast_experts(L) && !(R > logit_rows && nvfp4_planes) && !(R <= 8 && (decode_tiles & 2));
     {
       GemvArgs a{};
       a.job[0] = job(L.router_w, xmn, V.rlog, c.experts, H);
       a.njobs = 1;
-      k_gemvw(a, INK2_PROF_CONV_ROUTER, R);
       RouterArgs r{};
       r.logits = V.rlog;
       r.bias = L.router_bias;
@@ -943,11 +1148,17 @@ struct Engine {
       r.k = c.top_k;
       r.route_scale = c.route_scale;
       r.rows = R;
-      run(KID_topk, &r, R, (c.experts + 31) / 32 * 32, INK2_PROF_CONV_ROUTER);
+      f2_layer = &L;  // fast kernels, second set
+      if (!f2_router_topk(a, r, R, use_fx)) {  // fast kernels, second set: both in one launch
+        k_gemvw(a, INK2_PROF_CONV_ROUTER, R);
+        run(KID_topk, &r, R, (c.experts + 31) / 32 * 32, INK2_PROF_CONV_ROUTER);
+      }
     }
     capture(vi, "router_logits", V.rlog, c.experts);
     capture(vi, "router_weights", V.rwt, c.top_k);
-    if (R == 1) {
+    if (use_fx) {  // fast kernels
+      experts_fast(V, L, R);
+    } else if (R == 1) {
       ExpArgs a{};
       a.w = L.w13;
       a.sc = L.w13s;
@@ -1025,6 +1236,8 @@ struct Engine {
       s.gexp = gexp;
       s.goff = goff;
       s.gpairs = gpairs;
+      s.expert_slots = slots;
+      s.register_down = (decode_tiles & 2) != 0;
       s.k = k;
       s.gate_cap = c.gate_cap;
       s.up_cap = c.up_cap;
@@ -1081,6 +1294,14 @@ struct Engine {
     a.gate_cap = c.gate_cap;
     a.up_cap = c.up_cap;
     // w13 -> activations [R * k, I]
+    // Passes larger than the verification limit contain prompt tokens only.
+    if (R > logit_rows) {
+      a.nvfp4_planes = nvfp4_planes;
+      a.nvfp4_scratch = nvfp4_scratch;
+    }
+    a.input_rows = R;
+    a.expert_slots = (std::min)(R * k, c.experts);
+    a.register_down = R <= 8 && (decode_tiles & 2);
     a.w = L.w13;
     a.sc = L.w13s;
     a.factor = L.f13;
@@ -1093,6 +1314,7 @@ struct Engine {
     a.grid = slots * a.nchunk;  // one block per possible item (blocks past the distinct experts end at once)
     run(KID_exp13cm, &a, a.grid, 256, INK2_PROF_EXPERTS);
     // w2 -> products [R * k, H]
+    a.input_rows = R * k;
     a.w = L.w2;
     a.sc = L.w2s;
     a.factor = L.f2;
@@ -1168,7 +1390,11 @@ struct Engine {
       }
     }
     for (int i = c.loop_end; i < c.layers; ++i, ++vi) hidden = visit(vi, hidden, blocks, nullptr, R);
-    if (!with_logits && !drf) return;  // prompt tokens whose prediction nobody reads (drafter hook: it reads fh)
+    if (!with_logits && !drf) {  // prompt tokens whose prediction nobody reads (drafter hook: it reads fh)
+      f2_flush();  // fast kernels, second set (a deferred fxcomb of the last visit)
+      return;
+    }
+
     float* o1[1] = {fh};
     const u16* n1[1] = {final_norm};
     k_bar(bar_job(blocks, hidden, output_query, 1, o1, n1, nullptr), nullptr, R);
@@ -1195,7 +1421,7 @@ struct Engine {
     return StepState{token, p, 1.0f + c.alpha * logf(ratio), 0};
   }
 
-  void step(int token, float* logits_out, bool with_logits) {
+  void step(int token, float* logits_out, bool with_logits, int* top1 = nullptr) {
     if (!finalized) fail("step before finalize");
     if (token < 0 || token >= c.embed_rows) fail("token id out of range");
     if (pos >= c.max_positions) fail(fmt("context full: %d positions", c.max_positions));
@@ -1207,11 +1433,12 @@ struct Engine {
       prof_mark = now_s();
     }
     double t0 = now_s();
+    f2_attn_lv = kv_mode == INK2_KV_FP32 && !kv_split && f2_attn_use(pos, 1);  // fast kernels: split attention
     bool direct = !(use_graph && be->graph_supported()) || prof || cap_visit >= 0 || bench_reps > 0;
     if (direct) {
       forward(with_logits, 1);
     } else {
-      void*& g = graph[with_logits ? 1 : 0];
+      void*& g = graph[(f2_attn_lv ? 2 : 0) + (with_logits ? 1 : 0)];
       if (!g) {
         be->graph_begin();
         forward(with_logits, 1);
@@ -1222,7 +1449,16 @@ struct Engine {
       be->graph_launch(g);
     }
     double t1 = now_s();
-    if (with_logits) be->download(logits_out ? logits_out : logits_host.data(), logits, (size_t)c.vocab * 4);
+    if (top1) {
+      int tiles = (c.vocab + ink2_pick_tile - 1) / ink2_pick_tile;
+      PickArgs filter{logits, nullptr, pick_values, pick_indices, c.vocab};
+      run(KID_pick_tile, &filter, tiles, 256, INK2_PROF_OUTPUT);
+      PickArgs pick{pick_values, pick_indices, amax_val, amax_idx, tiles};
+      run(KID_pick_tile, &pick, 1, 256, INK2_PROF_OUTPUT);
+      be->download(top1, amax_idx, sizeof(*top1));
+    } else if (with_logits) {
+      be->download(logits_out ? logits_out : logits_host.data(), logits, (size_t)c.vocab * 4);
+    }
     double t2 = now_s();
     t_enqueue += t1 - t0;
     t_wait += t2 - t1;
@@ -1247,19 +1483,24 @@ struct Engine {
     }
     caps.clear();
     be->upload(st, st_host.data(), (size_t)R * sizeof(StepState));
-    if (drf) drf_before_pass(R);  // drafter hook
+    const bool direct = !(use_graph && be->graph_supported()) || prof || bench_reps > 0;
+    const int joint_key = drf ? drf_before_pass(R, joined_draft_graph && !direct && with_logits) : 0;
     if (prof) {
       be->sync();
       prof_mark = now_s();
     }
     double t0 = now_s();
-    bool direct = !(use_graph && be->graph_supported()) || prof || bench_reps > 0;
+    f2_attn_lv = kv_mode == INK2_KV_FP32 && !kv_split && f2_attn_use(pos, R);  // fast kernels: split attention
+    cur_logits = with_logits;  // read by exact_logit_pass while the pass is recorded / run
+    struct ClearLogits { bool& f; ~ClearLogits() { f = false; } } clear_logits{cur_logits};
     if (direct) {
       forward(with_logits, R);
     } else {
-      void*& g = mgraph[2 * R + (with_logits ? 1 : 0)];
+      const int key = 4 * R + (f2_attn_lv ? 2 : 0) + int(with_logits);  // + 2: split attention of the fast kernels
+      void*& g = mgraph[std::make_tuple(key, false, joint_key)];
       if (!g) {
         be->graph_begin();
+        if (joint_key) drf_record_pending(R - 1);
         forward(with_logits, R);
         g = be->graph_end();
         check_backend();
@@ -1343,7 +1584,26 @@ INK2_API const char* ink2_build_info(void) {
 INK2_API int ink2_abi_version(void) { return INK2_ABI_VERSION; }
 
 INK2_API int ink2_capabilities(void) {
-  return INK2_CAP_PACKED_DENSE | INK2_CAP_DRAFTER | INK2_CAP_DRAFTER_PACKED | INK2_CAP_Q3;
+  return INK2_CAP_PACKED_DENSE | INK2_CAP_DRAFTER | INK2_CAP_DRAFTER_PACKED | INK2_CAP_Q3 | INK2_CAP_KV;
+}
+
+// After ink2_finalize: 0 = the general kernels, else the compute capability (86, 89, 120, ...) the fast kernels run on
+// (ink2_fast.h; option "fast").
+INK2_API int ink2_fast_path(void* h) {
+  Engine* e = (Engine*)h;
+  return e && e->finalized ? e->fast : 0;
+}
+
+#ifdef INK2_WITH_CUDA
+int ink2_cuda_nvfp4_prompt();  // ink2_cuda.cu
+#endif
+// 1 when this library has the NVFP4 tensor-core prompt path (option nvfp4_prefill) and the current CUDA device can run it.
+INK2_API int ink2_nvfp4_prompt(void) {
+#ifdef INK2_WITH_CUDA
+  return ink2_cuda_nvfp4_prompt();
+#else
+  return 0;
+#endif
 }
 
 INK2_API int ink2_packed_dense(void* h) {
@@ -1444,6 +1704,13 @@ INK2_API int ink2_step(void* h, int token, float* logits_out) {
   return 0;
   API_END
 }
+INK2_API int ink2_step_top1(void* h, int token, int* winner) {
+  API_BEGIN(h)
+  if (!winner || !e->device_greedy) fail("step_top1 requires device_greedy and a destination");
+  e->step(token, nullptr, true, winner);
+  return 0;
+  API_END
+}
 
 INK2_API int ink2_feed(void* h, int token) {
   API_BEGIN(h)
@@ -1498,6 +1765,45 @@ INK2_API int ink2_set_option(void* h, const char* name, int value) {
   API_BEGIN(h)
   std::string n = name;
   if (n == "graph") e->use_graph = value != 0;
+  else if (n == "kv_split") {
+    if (value < 1 || value > 32) fail("kv_split must be 1 .. 32");
+    if (e->finalized) {
+      size_t start = e->be->bytes_allocated();
+      e->reserve_kv_partials(value);
+      e->kv_work_bytes += e->be->bytes_allocated() - start;
+      e->global_splits = value;
+    }
+    e->kv_split = value;
+  }
+  else if (n == "pass_exact") {
+    if (value != 0 && value != 1) fail("pass_exact must be 0 or 1");
+    e->pass_exact = value;
+    if (e->finalized) e->free_graphs();
+  }
+  else if (n == "splitk_max_rows") {
+    if (value < 1 || value > 8) fail("splitk_max_rows must be 1 .. 8");
+    e->splitk_max_rows = value;
+    if (e->finalized) e->free_graphs();
+  }
+  else if (n == "splitk_attn" || n == "splitk_splits" || n == "splitk_chunk" || n == "splitk_rel") {
+    if (n == "splitk_attn" && (value == 0 || value == 1)) e->splitk_attn = value;
+    else if (n == "splitk_splits" && value >= 0 && value <= 32) e->splitk_splits = value;
+    else if (n == "splitk_chunk" && value >= 8 && value <= 65536) e->splitk_chunk = value;
+    else if (n == "splitk_rel" && (value == 0 || value == 1)) e->splitk_rel = value != 0;
+    else fail("option " + n + " out of range");
+    if (e->splitk_attn && e->finalized) e->splitk_prepare();
+    if (e->finalized) e->free_graphs();
+  }
+  else if (n == "kv_mxfp8" || n == "kv_hot") {
+    if (e->finalized) fail("option " + n + " must be set before finalize");
+    if (n == "kv_mxfp8" && (value == 0 || value == 1)) e->kv_mode = value ? INK2_KV_MXFP8 : INK2_KV_FP32;
+    else if (n == "kv_hot" && (value == 0 || (value >= 16 && value <= 256 && !(value & (value - 1))))) e->kv_hot = value;
+    else fail("option " + n + " out of range");
+  }
+  else if (n == "rel_t" && (value == 0 || value == 1)) {
+    if (value && e->finalized) e->upload_rel_t();
+    e->rel_t = value != 0;
+  }
   else if (n == "gemvc") e->use_gemvc = value != 0;
   else if (n == "pgemvc_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->pgemvc_rows = value;
   else if (n == "pgemvw_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->pgemvw_rows = value;
@@ -1510,8 +1816,116 @@ INK2_API int ink2_set_option(void* h, const char* name, int value) {
   else if (n == "small_rows" && value >= 0 && value <= 8) e->small_rows = value;
   else if (n == "small_experts") e->use_small_experts = value != 0;
   else if (n == "small_dense") e->use_small_dense = value != 0;
+  else if (n == "joined_draft_graph" && (value == 0 || value == 1)) e->joined_draft_graph = value != 0;
+  else if (n == "decode_tiles" && value >= 0 && value <= 3) {
+    e->decode_tiles = value;
+    e->drf_free_graphs();
+  }
+  else if (n == "draft_l2_mib") {
+    if (value < 0 || value > 64 || !e->be->set_draft_l2(value))
+      fail("draft_l2_mib requires 0 .. 64 MiB and a reserved CUDA persisting L2 region when enabled");
+    e->drf_free_graphs();
+  }
+  else if (n == "packed_prefill") {
+    if ((value != 0 && value != 1) || !e->be->set_packed_prompt(value != 0))
+      fail("packed_prefill requires 0 or 1 and a CUDA backend when enabled");
+  }
+  else if (n == "flash_min_rows") {
+    if (value < 8 || value > 1 << 20) fail("flash_min_rows must be 8 or more");
+    e->flash_min_rows = value;
+    if (e->finalized) e->free_graphs();
+  }
+  else if (n == "flash_attn") {
+    if (value < 0 || value > 3) fail("flash_attn must be 0 .. 3");
+    if (!e->finalized) fail("set flash_attn after finalize");
+    if (value >= 2 && std::string(e->be->name()) != "cuda") fail("flash_attn 2 and 3 need the CUDA backend");
+    if (value && !e->flash_rel) {
+      int nh = (std::max)(e->c.nh_full, e->c.nh_sw);
+      e->flash_rel_cap = (std::max)(e->c.window, e->c.rel_extent);
+      e->flash_rel = e->alloc<float>((size_t)e->max_rows * nh * e->flash_rel_cap);
+      e->flash_partial = e->alloc<float>((size_t)e->max_rows * nh * Engine::flash_max_splits * 130);
+      e->flash_sms = e->be->sm_count();
+    }
+    e->flash_attn = value;
+  }
+  else if (n == "device_greedy" && (value == 0 || value == 1)) {
+    if (!e->finalized) fail("set device_greedy after finalize");
+    if (value) {
+      if (e->c.vocab >= 0x00ffffff) fail("device_greedy needs vocabulary indices below 2^24 - 1");
+      int tiles = (e->c.vocab + ink2_pick_tile - 1) / ink2_pick_tile;
+      if (!e->pick_indices) e->pick_indices = e->alloc<int>(tiles);
+      if (!e->pick_values) e->pick_values = e->alloc<float>(tiles);
+    }
+    e->device_greedy = value != 0;
+    return 0;  // selects only the read-back after the existing graph
+  }
+  else if (n == "nvfp4_prefill") {
+    if (value < 0 || value > 4) fail("nvfp4_prefill must be 0 .. 4");
+    if (!e->finalized || e->pos != 0) fail("set nvfp4_prefill on an empty finalized engine");
+    if (value && !e->be->supports_nvfp4_prefill()) fail("nvfp4_prefill requires the sm_120a CUDA build and device");
+    if (value && !e->nvfp4_scratch) {
+      size_t width = (std::max)((size_t)e->c.hidden, (size_t)e->c.top_k * e->c.expert_inner);
+      // Per plane: one nibble per element and one scale byte per 16.
+      e->nvfp4_scratch = e->alloc<u8>(4 * (width / 16) * 9 * e->max_rows);
+    }
+    e->nvfp4_planes = value;
+  }
   else if (n == "small_w2") e->use_small_w2 = value != 0;
   else if (n == "small_dense_rows" && (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)) e->small_dense_rows = value;
+  else if (n == "fast" && value >= -1 && value <= 1) e->fast_opt = value, e->fast_resolve();  // fast kernels
+  else if (n == "fx13_p" && (value == 4 || value == 8)) e->fx13_p = value;
+  else if (n == "fx2_e" && (value == 4 || value == 8)) e->fx2_e = value;
+  else if (n == "fx2_hb" && value >= 1 && value <= 8) e->fx2_hb = value, e->fast_resolve();
+  else if (n == "fast_small" && value >= 0 && value <= 3) e->fsmall = value;
+  else if (n == "fx_lut") e->fx_lut = value != 0;
+  else if (n == "pdl") e->pdl_opt = value != 0, e->fast_resolve();
+  else if (n == "fx2_mode" && (value == 0 || value == 1)) e->fx2_mode = value;
+  else if (n == "fx2c_p" && (value == 4 || value == 8)) e->fx2c_p = value;
+  else if (n == "f2_pf" && value >= 0 && value <= 3) e->f2_pf = value;  // fast kernels, second set
+  else if (n == "f2_extra" && value >= 0 && value <= 7) e->f2_extra = value;
+  else if (n == "f2_budget" && value >= 0 && value <= 1024) e->f2_budget = value;
+  else if (n == "f2_trig") e->f2_trig = value != 0;
+  else if (n == "f2_gemvm") e->f2_gemvm = value != 0;
+  else if (n == "f2_router") e->f2_router = value != 0;
+  else if (n == "f2_nb" && (value == 0 || value == 8 || value == 16 || value == 24 || value == 32)) e->f2_nb = value;
+  else if (n == "f2_min_blocks" && value >= 1) e->f2_min_blocks = value;
+  else if (n == "f2_wv" && (value == 4 || value == 8)) e->f2_wv = value;
+  else if (n == "f2_max_rows" && value >= 2) e->f2_max_rows = value;
+  else if (n == "f2_min_rows" && value >= 2) e->f2_min_rows = value;
+  else if (n == "f2_fuse") e->f2_fuse = value != 0;
+  else if (n == "f2_ccomb") e->f2_ccomb = value != 0;
+  else if (n == "f2_spec") e->f2_spec = value != 0;
+  else if (n == "f2_npf" && value >= 0 && value <= 1024) e->f2_npf = value;
+  else if (n == "f2_pfel") e->f2_pfel = value != 0;
+  else if (n == "f2_pipe" && value >= 0 && value <= 3) e->f2_pipe = value;
+  else if (n == "f2_pwaves" && value >= 1 && value <= 8) e->f2_pwaves = value;
+  else if (n == "f2_reg" && value >= 0 && value <= 31) e->f2_reg = value;  // bit 16: attn key / value prefetch
+  else if (n == "f2_prepb" && (value == 1 || value == 2)) e->f2_prepb = value;
+  else if (n == "f2_router_rows" && value >= 1 && value <= 16) e->f2_router_rows = value;
+  else if (n == "f2_attn") e->f2_attn = value != 0;  // split attention of single steps
+  else if (n == "f2_attn_from" && value >= 0) e->f2_attn_from = value;
+  else if (n == "f2_attn_rows" && value >= 1 && value <= 16) e->f2_attn_rows = value;
+  else if (n == "f2_attn_sa" && value >= 1 && value <= 32) e->f2_attn_sa = value;
+  else if (n == "f2_attn_sw" && (value == 1 || value == 2 || value == 4 || value == 8)) e->f2_attn_sw = value;
+  else if (n == "f2_attn_pf" && value >= 0 && value <= 7) e->f2_attn_pf = value;
+  else if (n == "f2_attn_ng" && (value == 1 || value == 2)) e->f2_attn_ng = value;
+  else if (n == "f2_gm2") e->f2_gm2 = value != 0;  // dense products of passes
+  else if (n == "f2_gm2_min" && value >= 2 && value <= 128) e->f2_gm2_min = value;
+  else if (n == "f2_gm2_max" && value >= 2 && value <= 128) e->f2_gm2_max = value;
+  else if (n == "f2_gm2_wv" && (value == 4 || value == 8)) e->f2_gm2_wv = value;
+  else if (n == "f2_gm2_mb" && value >= 1) e->f2_gm2_mb = value;
+  else if (n == "f2_bfm") e->f2_bfm = value != 0;
+  else if (n == "f2_gm2_nh" && (value == 4 || value == 8)) e->f2_gm2_nh = value;
+  else if (n == "f2_gm2_occ" && value >= 0 && value <= 7) e->f2_gm2_occ = value;
+  else if (n == "f2_gm2_nh8" && value >= 5 && value <= 129) e->f2_gm2_nh8 = value;
+  else if (n == "f2_gm2_pg" && value >= 0 && value <= 8) e->f2_gm2_pg = value;
+  else if (n == "f2_gm2_mid") e->f2_gm2_mid = value != 0;
+  else if (n == "f2_gm2_pgmin" && value >= 2 && value <= 129) e->f2_gm2_pgmin = value;
+  else if (n == "f2_gm2_pnb" && (value == 8 || value == 16 || value == 24 || value == 32)) e->f2_gm2_pnb = value;
+  else if (n == "fx_g" && (value == 1 || value == 2 || value == 4)) e->fx_g = value;
+  else if (n == "fx_gp" && (value == 1 || value == 2 || value == 4)) e->fx_gp = value;
+  else if (n == "fx_gp_rows" && value >= 2 && value <= 2048) e->fx_gp_rows = value;
+  else if (n == "fx_peel") e->fx_peel = value != 0;
   else if (n == "max_rows" || n == "rollback") {
     if (e->finalized) fail("option " + n + " must be set before finalize");
     if (value < (n == "max_rows" ? 1 : 0)) fail("option " + n + " out of range");
@@ -1521,6 +1935,7 @@ INK2_API int ink2_set_option(void* h, const char* name, int value) {
     e->chunk = value;
     return 0;
   } else fail("unknown option " + n);
+  e->f2_resolve();  // fast kernels, second set
   e->free_graphs();  // the recorded kernel sequences depend on the options
   return 0;
   API_END
@@ -1581,6 +1996,15 @@ INK2_API int ink2_get(void* h, int what, int visit, void* out, long long out_byt
 }
 
 INK2_API long long ink2_memory_used(void* h) { return (long long)((Engine*)h)->be->bytes_allocated(); }
+
+INK2_API int ink2_kv_memory(void* h, long long* cache, long long* workspace) {
+  API_BEGIN(h)
+  if (!e->finalized || !cache || !workspace) fail("kv_memory needs a finalized engine and two outputs");
+  *cache = (long long)e->kv_cache_bytes;
+  *workspace = (long long)e->kv_work_bytes;
+  return 0;
+  API_END
+}
 
 INK2_API int ink2_device_memory(void* h, long long* free_bytes, long long* total_bytes) {
   return ((Engine*)h)->be->device_memory(free_bytes, total_bytes) ? 0 : -1;

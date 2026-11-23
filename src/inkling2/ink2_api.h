@@ -23,7 +23,8 @@ enum {
   INK2_CAP_PACKED_DENSE = 1,  // dense matrices are accepted packed (nvfp4 / mxfp8), multiplied as stored
   INK2_CAP_DRAFTER = 2,       // the model's drafter (ink2_drafter_api.h: ink2_draft_abi, ink2_spec_pass, ...)
   INK2_CAP_DRAFTER_PACKED = 4,  // drafter matrices and folded head accepted packed (nvfp4 / mxfp8), ink2_draft_abi() >= 2
-  INK2_CAP_Q3 = 8               // the 3-bit format q3 (INK2_DFMT_Q3) for the drafter matrices
+  INK2_CAP_Q3 = 8,              // the 3-bit format q3 (INK2_DFMT_Q3) for the drafter matrices
+  INK2_CAP_KV = 16              // options kv_mxfp8, kv_hot, kv_split and ink2_kv_memory
 };
 
 #ifdef INK2_BUILD
@@ -79,6 +80,7 @@ INK2_API int ink2_set_tensor(void* h, const char* name, const void* data, long l
 INK2_API int ink2_finalize(void* h);
 INK2_API int ink2_reset(void* h);
 INK2_API int ink2_step(void* h, int token, float* logits_out);  // logits_out may be NULL
+INK2_API int ink2_step_top1(void* h, int token, int* winner);  // with device_greedy, read only the first argmax
 // A token whose prediction is not needed (all prompt tokens but the last): no output projection,
 // no copy, no wait. INK2_GET_FINAL_HIDDEN and INK2_GET_LOGITS are not valid after it.
 INK2_API int ink2_feed(void* h, int token);
@@ -88,6 +90,10 @@ INK2_API int ink2_feed(void* h, int token);
 // before ink2_finalize only: "max_rows" = largest R of a pass (default 128, R * top_k <= 2048),
 // "rollback" = positions ink2_truncate can always drop (default 64; the rings keep
 // max(max_rows, rollback) extra positions); "chunk" = rows per pass of ink2_feed_many (default 128).
+// With INK2_CAP_KV, before finalize: "kv_mxfp8" = 1 stores the keys and values of the full-attention
+// visits as MXFP8 (E4M3 codes, one power-of-two scale per 32 values; default 0 = FP32), "kv_hot" = the
+// recent positions that also keep a BF16 copy (default 128; 0 or a power of two from 16 through 256).
+// "kv_split" selects 1..32 partitions of global attention; it may be changed between passes after finalize.
 INK2_API int ink2_set_option(void* h, const char* name, int value);
 
 // Packed dense matrices (version 3, INK2_CAP_PACKED_DENSE). A dense matrix "<name>" of [rows, cols]
@@ -125,6 +131,8 @@ INK2_API int ink2_get_row(void* h, int what, int visit, int row, void* out, long
 // ---- version 3 ----
 INK2_API int ink2_capabilities(void);  // INK2_CAP_* bits of this DLL
 INK2_API int ink2_packed_dense(void* h);  // after ink2_finalize: dense matrices loaded packed (0 = all bfloat16)
+INK2_API int ink2_fast_path(void* h);  // after finalize: 0 = general kernels, else the compute capability the fast kernels run on
+INK2_API int ink2_nvfp4_prompt(void);  // 1: the NVFP4 tensor-core prompt path (option "nvfp4_prefill") runs on this device
 // out4: seconds spent queueing kernels, seconds waiting for the logits, steps, kernel launches (cleared).
 // Returns the number of graphs recorded so far.
 INK2_API int ink2_timing(void* h, double* out4);
@@ -148,3 +156,5 @@ INK2_API int ink2_microbench(char* report, int report_cap);
 // Every kernel on random inputs, host emulation against the CUDA build.
 // Returns the number of kernels over the tolerance (0 = pass), < 0 on error.
 INK2_API int ink2_selftest(const char* backend, char* report, int report_cap);
+// Allocated KV payload (including precision metadata and history tail) and attention workspace, in bytes.
+INK2_API int ink2_kv_memory(void* h, long long* cache, long long* workspace);
