@@ -161,13 +161,19 @@ prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 the
 * **What we checked.** We ran the code for RTX 30 / 40 (compute capability 8.6 and 8.9) only on the RTX 5090: compiled for the RTX 5090
   when it loads, it gave the same predictions in wide passes as in passes of 16. That does not show that the machine code of an RTX 30
   or 40 card is right, or that the wide passes are faster there.
-* **What users reported.** Users reported the 0.1.7 test build in [#24](https://github.com/yasakani-dev/yasakani/issues/24). These are
-  the reporters' numbers:
+* **What users reported.** Users reported the 0.1.7 test build and later versions in
+  [#24](https://github.com/yasakani-dev/yasakani/issues/24). These are the reporters' numbers:
   * RTX 4090 (Windows 10): the check opened widths 32, 48 and 64. Wide passes were equal to 16-token passes bit for bit at 335 positions.
     The three edit tasks ran at 770.0 → 1,420.9, 822.5 → 1,634.9 and 793.2 → 1,545.6 tok/s (wide passes off → on), with the same output.
   * RTX 5060 Ti: only the 64-token width opened. The three edit tasks ran at 215.1 → 279.4, 226.9 → 300.4 and 218.8 → 280.6 tok/s, with
     the same output.
-  * No RTX 30 card has been reported yet.
+  * RTX 3090 (Linux, 0.1.7 built from source): the check opened widths 32, 48 and 64; bit for bit at 335 positions. The three edit
+    tasks ran at 423.0 → 641.7, 449.0 → 712.1 and 431.1 → 670.8 tok/s, with the same output.
+  * RTX 3090 Ti (Windows 11, 0.3.2, quality model): the check opened widths 32, 48 and 64; bit for bit at 463 positions. The three
+    edit tasks ran at 443.8 → 683.7, 461.8 → 741.4 and 448.8 → 704.0 tok/s, with the same output.
+  * Another RTX 5060 Ti (0.3.2 built from source, fastest model; [#31](https://github.com/yasakani-dev/yasakani/issues/31)): the check
+    closed all three widths (time ratios 1.79, 2.54 and 3.21 against the limits 1.60, 2.40 and 3.20). With every width in use
+    (`--wide force`) the three edit tasks ran at 356.6 → 440.6, 367.5 → 450.7 and 354.2 → 434.9 tok/s, with the same output.
 * **How to report.** `yasakani report` checks the card again, runs the three edit tasks of `bench --edit` with the wide passes off, with
   the widths the check chose and with every width, then the self-check, and prints a Markdown report: GPU, driver, versions, the check,
   the speeds, and whether the outputs are the same. It took 85 to 89 seconds on the RTX 5090 (0.1.7 test build); it takes longer on other
@@ -534,7 +540,13 @@ RTX 5090 under WSL2 only.
 
 ### How fast is it, and under which conditions?
 
-One RTX 5090, Windows 11, November 22, 2026, the published weights, one request at a time:
+Since 0.3.3 the fast path is on by default on RTX 50 cards. On one RTX 5090 (Windows 11, November 23, 2026, the `--scheme quality`
+folder, one request at a time, greedy, a text of 53 public source files without repetition) it read prompts of 4,096, 32,768 and 131,072
+tokens at 1,826, 1,755 and 1,377 tokens/s (0.3.2: 900, 633 and 314), and generated 268, 351, 183 and 132 tokens/s with `--draft auto`
+after 256, 4,096, 32,768 and 131,072 tokens (0.3.2: 230, 257, 88 and 58). The conditions, the numbers without the drafter and the
+comparison with llama.cpp: [README](../README.md#inkling-2-mini-033).
+
+The numbers below are those of the standard path (as in 0.3.2). One RTX 5090, Windows 11, November 22, 2026, the published weights, one request at a time:
 
 * Generation with greedy decoding, thinking off, 256 tokens: `yasakani bench --draft off` 161.2 tokens/s (the mean of its 4 prompts,
   median of 3 runs), and 212.5 tokens/s with the default `--draft auto`. With the converted weights of `--scheme quality` and their
@@ -558,6 +570,22 @@ Two ways, both on the RTX 5090 with the published weights. Our engine gives the 
 in the transformers library expects for its prompt; `yasakani selfcheck` runs that same check on your PC. And we compared the engine with
 our own CPU implementation of the model: the hidden states agreed within 1e-4 and the same experts were chosen. This measures agreement
 with the published model, not accuracy on tasks; we have not measured task accuracy.
+
+<a name="inkling-2-mini-fast-path"></a>
+
+### What does the fast path of 0.3.3 change?
+
+The way the engine computes, not the model files. It keeps the key/value cache of the 8 layer visits that attend to the whole context in
+8 bits (MXFP8), splits long attention into parts, reads prompts with a new attention and, on RTX 50 cards, computes the experts of a
+prompt on the 4-bit (NVFP4) tensor cores. It is on by default on RTX 50 cards and off on other cards; `--fast on|off|auto` changes
+that. With it off the engine computes as 0.3.2 did. On an RTX 30 or 40 card it runs without the 4-bit part; we have not run it on such a
+card.
+
+The output is close to that of the standard path, but not the same. At 128 positions after 4,096 and 32,768 tokens of one text, the most
+likely next token was the same at 126 and 123 positions (mean KL 0.0035 and 0.0059); on another text at 128 of 128 after 32,768 tokens.
+Greedy output parts from that of the standard path after some tokens. The drafter and copy decoding do not change the output of the fast
+path. It needs less GPU memory at long contexts: 20.9 instead of 28.5 GiB in use at 131,072 tokens with the drafter (RTX 5090).
+[Details](../README.md#inkling-2-mini-033)
 
 ### What are the converted weights of `--scheme quality`?
 
@@ -631,7 +659,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 to 0.3.1 it offers 0.3.2. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.2.zip`) by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 to 0.3.2 it offers 0.3.3. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.3.zip`) by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, before it shows the menu or before it opens the browser page directly (from the second run on,
   `START.cmd` does that without a menu), the quickstart first prints that it asks github.com, then sends one HTTPS request:
