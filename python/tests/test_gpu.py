@@ -495,10 +495,15 @@ class PrefillModeTests(unittest.TestCase):
                     continue
                 planned += 1
                 plan = G.use_prefill(make(), mode, det)
-                self.assertEqual(plan.env, dict(before.env, **env), (mode, card))
+                if before.given and before.room_mib is not None and (mode, card) == ("auto", "24 GB"):   # 0.3.4: room beside
+                    env_w, reading_w = G.SMALL_CARD_ENV, "new"                                           # a given context
+                    self.assertGreaterEqual(before.room_mib, G.NEW_PREFILL_RESERVE_MIB)
+                else:
+                    env_w, reading_w = env, reading
+                self.assertEqual(plan.env, dict(before.env, **env_w), (mode, card))
                 self.assertEqual((plan.max_ctx, plan.free_mib, plan.notes), (before.max_ctx, before.free_mib, before.notes))
-                self.assertEqual(plan.prefill, reading, (mode, card))
-                self.assertEqual(plan.env.get("YSKN_Q35_PF_V2"), "0" if reading == "old" else None, (mode, card))
+                self.assertEqual(plan.prefill, reading_w, (mode, card))
+                self.assertEqual(plan.env.get("YSKN_Q35_PF_V2"), "0" if reading_w == "old" else None, (mode, card))
                 if card != "32 GB":                      # off the tested card every reading keeps the sizes of 0.1.7
                     self.assertEqual({k: plan.env[k] for k in G.SMALL_CARD_ENV}, G.SMALL_CARD_ENV, (mode, card))
         self.assertGreaterEqual(planned, 36)
@@ -517,8 +522,8 @@ class PrefillModeTests(unittest.TestCase):
         self.assertEqual(G.prefill_choice("auto", two)[0], "old")
         self.assertEqual(G.prefill_choice("auto", det_of(*rows, environ={"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}))[0], "new")
         # the line says that the smallest of the GPUs decided, not that the engine runs on a 24 GB card
-        self.assertEqual(G.prefill_choice("auto", two)[2], "prompt reading: as in 0.1.7 (setting auto: smallest of 2 GPUs: 24564 MiB, "
-                                                           "new only from 30000 MiB; --prefill new or YASAKANI_PREFILL=new to try it)")
+        self.assertEqual(G.prefill_choice("auto", two)[2], "prompt reading: as in 0.1.7 (setting auto: smallest of 2 GPUs: 24564 MiB "
+                                                           "and no --max-ctx; --prefill new or YASAKANI_PREFILL=new to try it)")
         self.assertEqual(G.prefill_choice("new", two)[2],
                          "prompt reading: new (setting new; smallest of 2 GPUs: 24564 MiB, so prompt sizes of 0.1.7)")
         self.assertEqual(G.prefill_choice("auto", det_of(*rows, environ={"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}))[2],
@@ -550,7 +555,7 @@ class PrefillModeTests(unittest.TestCase):
         lines = {k: G.prefill_choice(k[0], det_of(self.CARDS[k[1]]))[2] for k in self.WANT}
         self.assertEqual(lines[("auto", "32 GB")], "prompt reading: new (setting auto: 32607 MiB card)")
         self.assertEqual(lines[("auto", "24 GB")],
-                         "prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; "
+                         "prompt reading: as in 0.1.7 (setting auto: 24564 MiB card and no --max-ctx; "
                          "--prefill new or YASAKANI_PREFILL=new to try it)")
         self.assertEqual(lines[("auto", "unknown")], "prompt reading: as in 0.1.7 (setting auto: card memory not known; "
                          "--prefill new or YASAKANI_PREFILL=new to try it)")
@@ -1127,7 +1132,7 @@ class CliGpuTests(unittest.TestCase):
                          "--no-selfcheck", "--json", timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr)
         rep = json.loads(r.stdout)
-        line = ("prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; "
+        line = ("prompt reading: as in 0.1.7 (setting auto: 24564 MiB card and no --max-ctx; "
                 "--prefill new or YASAKANI_PREFILL=new to try it)")
         self.assertEqual(rep["machine"]["prefill"], dict(reading="old", line=line))
         self.assertEqual(rep["machine"]["edit_copy"], G.EDIT_COPY_DEFAULT)

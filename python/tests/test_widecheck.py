@@ -79,9 +79,9 @@ class RuleTests(unittest.TestCase):
             self.assertTrue(all(w.used and not w.unsure for w in ws))
 
     def test_native_drops_a_width_only_when_every_round_is_over(self):
-        mask, _ = wc.decide(timing(r48=2.6), True)
+        mask, _ = wc.decide(timing(r48=2.8), True)                # RTX 50: limit 0.9 x 48 / 16 = 2.70 (since 0.3.4)
         self.assertEqual(mask, 5)
-        t = timing(r48=2.6)
+        t = timing(r48=2.8)
         t.rounds[1][48] = (11.0, 11.0 * 2.3)                     # one round under the limit: kept
         self.assertEqual(wc.decide(t, True)[0], 7)
         self.assertEqual(wc.decide(t, False)[0], 5)               # RTX 30 / 40: every round must be under it

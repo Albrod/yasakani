@@ -128,7 +128,8 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--device", type=int, default=0, help="the GPU to use, numbered as in `yasakani info` and nvidia-smi (default 0)")
     sp.add_argument("--seed0", type=int, default=1, help="seed of the first request; every request without its own seed uses the next one")
     sp.add_argument("--prefill", choices=gpus.PREFILL_MODES, default=None,
-                    help="prompt reading: auto (default; the new, faster reading on a card with 30,000 MiB or more, else as in 0.1.7), "
+                    help="prompt reading: auto (default; the new, faster reading on a card with 30,000 MiB or more, and on one with "
+                         "22,000 MiB or more when --max-ctx leaves 1,800 MiB free beside the context; else as in 0.1.7), "
                          "new (the new reading on any card; under 30,000 MiB with the prompt sizes of 0.1.7) or old (prompt reading and "
                          "passes of 64 tokens as in 0.1.7).  Default: $YASAKANI_PREFILL or auto")
     sp.add_argument("--edit-copy", choices=gpus.EDIT_COPY_MODES, default=None,
@@ -137,10 +138,11 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     g = sp.add_argument_group("Inkling-2 Mini (model folders of Inkling-2 Mini; other models do not use these)")
     g.add_argument("--fast", choices=("auto", "on", "off"), default=None,
                    help="the fast path of the engine: an 8-bit key/value cache, faster prompt reading and faster kernels; the output "
-                        "can differ from off after some tokens.  auto (default): on for the RTX 50 series (it uses their NVFP4 "
-                        "tensor cores to read prompts), off for other GPUs; on: on any GPU (without the NVFP4 part where there is "
-                        "none); off: the engine as in 0.3.2.  Default: $YASAKANI_INK2_FAST or auto (selfcheck: off unless --fast is given, "
-                        "because its reference is of the standard path)")
+                        "can differ from off after some tokens.  auto (default): on for RTX 30, 40 and 50 cards (compute "
+                        "capability 8.6, 8.9, 12.0; the RTX 50 series also reads prompts on its NVFP4 tensor cores), off for other "
+                        "GPUs; on: on any GPU (without the NVFP4 part where there is none); off: the engine as in 0.3.2.  "
+                        "Default: $YASAKANI_INK2_FAST or auto (selfcheck: off unless --fast is given, because its reference is of "
+                        "the standard path)")
     g.add_argument("--draft", choices=("auto", "on", "off"), default=None,
                    help="the model's drafter proposes a few tokens that the model checks in one pass; the output does not change.  "
                         "auto (default): used only while it makes generation faster; on: always; off: not loaded.  "

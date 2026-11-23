@@ -24,8 +24,10 @@ The check (once per GPU, driver, engine library, package and model; kept in ``wi
   2. Time: at 4,096 tokens of context it runs copy cycles as the generation does (the pass, the commit of all its rows, the drafter
      reading them), 16 rows and W rows in turn, about 0.6 s each, 3 rounds, greedy, and one round with sampling.  A width W is used
      when one cycle of W rows takes at most 0.8 x W / 16 times one of 16 rows (32: 1.60, 48: 2.40, 64: 3.20): with every row
-     accepted it then gives at least 1.25 times the tokens per second of 16 rows.  RTX 50 keeps a width unless every round is over
-     the limit; RTX 30 / 40 opens a width only when every round is under it.  The measured times also become the copy loop's
+     accepted it then gives at least 1.25 times the tokens per second of 16 rows.  RTX 30 / 40 opens a width only when every round is
+     under that limit.  RTX 50 keeps a width unless every round is over 0.9 x W / 16 (since 0.3.4; 32: 1.80, 48: 2.70, 64: 3.60:
+     with every row accepted at least 1 / 0.9 = 1.11 times the tokens per second of 16 rows; before: 0.8, which closed every width on an
+     RTX 5060 Ti that ran the edit tasks 1.23 times as fast with them, issue #31).  The measured times also become the copy loop's
      starting values (they were the RTX 5090's for every GPU before).
   3. The GPU must be idle: nvidia-smi shows its load before and after, and (where it can tell: not under Windows) whether another
      program holds GPU memory.  When it is busy nothing is measured or kept.
@@ -67,6 +69,8 @@ CACHE_DAYS = 30                   # a kept result older than this is measured ag
 WIDTHS = (32, 48, 64)
 BIT = {32: 1, 48: 2, 64: 4}
 MARGIN = 0.8                      # W rows may take at most MARGIN x W / 16 times 16 rows
+NATIVE_MARGIN = 0.9               # the same on RTX 50 (``native``, since 0.3.4; 0.8 before): a width is dropped only when every round
+                                  # is over 0.9 x W / 16, so a kept width still pays (>= 1.11x) when all its rows are accepted
 CONTEXT = 4096                    # tokens of context for the time check
 GATE_START = 2048                 # tokens read before the correctness check
 GATE_ROWS = (17, 31, 32, 33, 47, 48, 63, 64)
@@ -447,10 +451,12 @@ class WidthResult:
         return statistics.median(self.ratios) if self.ratios else None
 
 
-def decide(timing: Timing, native: bool, widths: Sequence[int] = WIDTHS, margin: float = MARGIN) -> Tuple[int, List[WidthResult]]:
+def decide(timing: Timing, native: bool, widths: Sequence[int] = WIDTHS, margin: Optional[float] = None) -> Tuple[int, List[WidthResult]]:
     """(mask, one WidthResult per width).  RTX 50 (``native``): a width is left out only when every greedy round and the sampled
-    round are over the limit and the rounds agree.  RTX 30 / 40: a width is used only when every round is under the limit and the
-    rounds agree (within SPREAD_MAX)."""
+    round are over the limit (NATIVE_MARGIN x W / 16) and the rounds agree.  RTX 30 / 40: a width is used only when every round is
+    under the limit (MARGIN x W / 16) and the rounds agree (within SPREAD_MAX).  ``margin`` replaces the margin of either."""
+    if margin is None:
+        margin = NATIVE_MARGIN if native else MARGIN
     out, mask = [], 0
     for w in widths:
         rs = timing.ratios(w)
@@ -503,7 +509,7 @@ def key_fields(engine, st: WideState, smi: Mapping[str, Optional[str]], version:
     wname = pack.weights.name
     wsha = (pack.sha256 or {}).get(wname) or ("size:%d" % pack.weights.stat().st_size)
     env = {k: v for k, v in sorted(engine.profile.env.items()) if k not in ("YSKN_BDR_SHEAD", "YSKN_TB_PROFILE")}
-    return dict(check=CHECK_VERSION, margin=MARGIN, context=CONTEXT, package=version, library=file_sha256(engine.lib.path),
+    return dict(check=CHECK_VERSION, margin=MARGIN, native_margin=NATIVE_MARGIN, context=CONTEXT, package=version, library=file_sha256(engine.lib.path),
                 build_info=engine.lib.build_info(), model=pack.model_id, weights=wname, weights_sha256=str(wsha)[:16],
                 gpu=smi.get("name"), cc=st.cc, code=st.code_arch, sms=st.sms, total_mib=st.total_mib,
                 uuid_sha=_sha(st.uuid.lower().encode())[:16], driver=smi.get("driver_version"), driver_model=smi.get("driver_model.current"),

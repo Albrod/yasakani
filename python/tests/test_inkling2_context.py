@@ -93,7 +93,8 @@ class ContextOfTests(unittest.TestCase):
         self.addCleanup(e.stop)
         for k in ("YASAKANI_DRAFT", "YASAKANI_DRAFT_DEPTH", "YASAKANI_INK2_ROLLBACK"):
             os.environ.pop(k, None)
-        self.lines = []
+        os.environ["YASAKANI_INK2_FAST"] = "off"     # the standard path's rule (0.3.4: auto = fast on the RTX 4090 of card(); see
+        self.lines = []                              # test_inkling2_fast_auto.py for the fast path)
 
     def auto(self, det, **kw):
         args = argparse.Namespace(max_ctx=None, device=0, draft=kw.pop("draft", None), draft_depth=None)

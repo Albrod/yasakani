@@ -196,6 +196,13 @@ def run_report(args) -> int:
 
 
 # ---- Markdown -----------------------------------------------------------------------------------------------------------------
+def _margin_text(widths) -> str:
+    """The margin the check used on this card, from its limits (widecheck.limit = margin x rows / 16): 0.9 on RTX 50 (NATIVE_MARGIN),
+    0.8 on RTX 30 / 40 (MARGIN)."""
+    ms = sorted({round(float(x["limit"]) * 16.0 / x["rows"], 3) for x in widths if x.get("rows") and x.get("limit") is not None})
+    return " / ".join("%g" % m for m in ms) or "?"
+
+
 def _v(x, unit: str = "") -> str:
     return "?" if x in (None, "") else "%s%s" % (x, unit)
 
@@ -238,8 +245,9 @@ def render(rep: Dict[str, object]) -> str:
         t = c.get("timing")
         if c.get("widths"):
             L += ["**Copy cycles** at 4,096 tokens of context (pass + commit + drafter; median of batches, %d rounds%s; "
-                  "limit = 0.8 × rows / 16; greedy, and one round sampled)" % (len((t or {}).get("rounds") or []),
-                                                                               ", measured twice: rounds disagreed" if t and t.get("redone") else ""),
+                  "limit = %s × rows / 16; greedy, and one round sampled)" % (len((t or {}).get("rounds") or []),
+                                                                              ", measured twice: rounds disagreed" if t and t.get("redone") else "",
+                                                                              _margin_text(c["widths"])),
                   "", "| rows | ms | ratio to 16 (rounds) | sampled | limit | used |", "|---:|---:|---|---:|---:|---|"]
             t16 = None
             if t and t.get("rounds"):

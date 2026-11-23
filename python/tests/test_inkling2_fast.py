@@ -28,9 +28,10 @@ class ModeTests(unittest.TestCase):
         with self.assertRaises(YasakaniError):
             ink.fast_mode_of(None, {"YASAKANI_INK2_FAST": "max"})
 
-    def test_auto_is_on_for_the_rtx_50_series_only(self):
-        self.assertTrue(ink.fast_expected("auto", (12, 0)))
-        for cc in ((8, 6), (8, 9), (12, 1), None):
+    def test_auto_is_on_for_rtx_30_40_and_50(self):
+        for cc in ((12, 0), (8, 6), (8, 9)):                                       # 0.3.4: RTX 30 and 40 too (0.3.3: 12.0 only)
+            self.assertTrue(ink.fast_expected("auto", cc), cc)
+        for cc in ((7, 5), (8, 0), (9, 0), (12, 1), None):
             self.assertFalse(ink.fast_expected("auto", cc), cc)
         self.assertTrue(ink.fast_expected("on", (8, 6)))
         self.assertFalse(ink.fast_expected("off", (12, 0)))

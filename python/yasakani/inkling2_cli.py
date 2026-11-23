@@ -127,14 +127,16 @@ def open_stack(args, warm: bool = True):
             cap = g.compute_cap if g is not None else None
         except Exception:
             cap = None
-    mxfp8 = ink.fast_expected(fast, cap)
+    if cap is None:
+        cap = ink.CAP_UNKNOWN                                                   # asked (or not needed): the engine does not ask again
+    mxfp8 = ink.fast_expected(fast, cap)                                        # the same rule as the engine's (ink.fast_choice)
     kv = ink.bytes_per_position(ink.read_config(pack.root), mxfp8=mxfp8) * ctx
     _say("loading %s (%s of weights, context %d tokens, key/value cache %s) ..." % (pack.model_id, _gb(pack.weights.stat().st_size), ctx, _gb(kv)))
     t0 = time.time()
     try:
         fmt, eng, runner = ink.open_runner(pack, ctx, dll=getattr(args, "dll", None), seed0=getattr(args, "seed0", 1), warm=warm,
                                            draft=draft, draft_depth=depth, copy=getattr(args, "copy", None),
-                                           copy_min=getattr(args, "copy_min", None), fast=fast)
+                                           copy_min=getattr(args, "copy_min", None), fast=fast, compute_cap=cap)
     except YasakaniError as ex:
         raise YasakaniError("%s  (a smaller --max-ctx needs less GPU memory)" % ex) if "memory" in str(ex).lower() else ex
     dm = eng.device_memory()
@@ -438,6 +440,20 @@ def cmd_serve(args) -> int:
 
 
 # ---- bench ------------------------------------------------------------------------------------------------------------------------
+def bench_settings(eng) -> dict:
+    """The fast and copy settings the engine runs with (bench --json; 0.3.4): the mode asked, whether the fast path and its NVFP4
+    part run, the copy mode and its shortest match."""
+    copying = bool(getattr(eng, "copying", False))
+    return dict(fast=dict(mode=getattr(eng, "fast_mode", None), on=bool(getattr(eng, "fast", False)),
+                          nvfp4_prompt=bool(getattr(eng, "fast_nvfp4", False)), compute_cap=_cc_text(getattr(eng, "compute_cap", None))),
+                copy=dict(mode=getattr(eng, "copy_mode", "off"), on=copying,
+                          min_match=getattr(eng, "copy_min", None) if copying else None))
+
+
+def _cc_text(cc):
+    return "%d.%d" % tuple(cc) if cc and tuple(cc) != ink.CAP_UNKNOWN else None
+
+
 def cmd_bench(args) -> int:
     from .chat import ChatParams
     from .cli import _gpu_lines, _load_prompts
@@ -470,7 +486,7 @@ def cmd_bench(args) -> int:
     mean = sum(r["tokens_per_s"] for r in rows) / len(rows)
     if args.json:
         print(json.dumps(dict(version=__version__, model=pack.model_id, gpu=_gpu_lines(), tokens_per_test=n_tokens, runs=rows,
-                              mean_tokens_per_s=round(mean, 1), drafter=eng.draft_note), indent=1))
+                              mean_tokens_per_s=round(mean, 1), drafter=eng.draft_note, **bench_settings(eng)), indent=1))
     else:
         print("mean over %d run(s): %.1f tokens/s   (greedy, thinking %s, %d tokens each; %s)" % (
             len(rows), mean, "on" if args.think else "off", n_tokens, eng.draft_note))

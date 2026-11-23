@@ -41,7 +41,9 @@ BIG_CARD_LOAD_EXTRA_MIB = 700         # extra load memory of runtime.py's 2048/8
 # larger defaults of runtime.py (2,048 rows per pass, 8,192 rows of layer work area) take about 0.6 to 0.7 GB more at load.
 SMALL_CARD_ENV = {"YSKN_Q35_PMAX": "1024", "YSKN_Q35_LAYER_ROWS": "4096"}
 # --prefill (or YASAKANI_PREFILL): auto (the default) = the new, faster prompt reading on a card whose memory is known and at least
-# FULL_CONTEXT_MIN_TOTAL_MIB (the card it is tested on), else the reading of 0.1.7; new = the new reading on any card (under
+# FULL_CONTEXT_MIN_TOTAL_MIB (the card it is tested on); since 0.3.4 also on a card of AUTO_NEW_MIN_TOTAL_MIB or more when a context
+# is given (--max-ctx) and the free memory left beside it is at least NEW_PREFILL_RESERVE_MIB (with the sizes of SMALL_CARD_ENV, as
+# new); else the reading of 0.1.7 (auto never gives up context for it); new = the new reading on any card (under
 # FULL_CONTEXT_MIN_TOTAL_MIB or of unknown memory with the sizes of SMALL_CARD_ENV); old = prompt reading and passes of 64 rows as in
 # 0.1.7.  The engine reads YSKN_Q35_PF_V2=0 and then also keeps the sizes of 0.1.7; they are given here as well.
 PREFILL_MODES = ("auto", "new", "old")
@@ -54,6 +56,9 @@ NEW_PREFILL_SPARE_MIB = 1024          # the engine makes that area only with thi
 NEW_PREFILL_CUDA_GAP_MIB = 566        # CUDA reported this much less free memory than nvidia-smi on the PC of the measurements (the
                                       # RTX 5090, Windows 11); the engine asks CUDA, the planners ask nvidia-smi
 NEW_PREFILL_RESERVE_MIB = 1800        # what the planners leave free for it: area + spare + gap - MARGIN_MIB, and about 100 MiB of room
+AUTO_NEW_MIN_TOTAL_MIB = 22000        # 0.3.4: "24 GB" cards, where auto takes the new reading beside a given context that leaves
+                                      # NEW_PREFILL_RESERVE_MIB free (a user's RTX 3090 Ti, 24,563 MiB, --max-ctx 40,960 to 131,072:
+                                      # 1.39-1.40x as fast, the same self-check numbers; at 262,144 the engine found no room, #24)
 # --edit-copy (or YASAKANI_EDIT_COPY): on | off, passed to the engine as YSKN_EDIT_COPY=1 / 0.  EDIT_COPY_DEFAULT is the default when
 # neither is given; changing it is all it takes to change the default.
 EDIT_COPY_MODES = ("on", "off")
@@ -341,6 +346,9 @@ class ContextPlan:
     prefill_line: str = ""                # the one line on that choice, printed at start
     edit_copy: str = ""                   # use_edit_copy: "on" or "off" ("" = not chosen yet)
     reserve_mib: int = 0                  # GPU memory left free besides the context (prefill_reserve_mib; 0 = none)
+    given: bool = False                   # the context was given (--max-ctx; plan_given_context)
+    room_mib: Optional[int] = None        # plan_given_context: free GPU memory left beside the given context, the files, the overhead
+                                          # and MARGIN_MIB (None = not known, or a card of FULL_CONTEXT_MIN_TOTAL_MIB or more)
 
 
 def _small_card_env(plan: "ContextPlan", g) -> None:
@@ -371,9 +379,12 @@ def _card_total(g) -> Tuple[Optional[int], int]:
     return (g.total_mib if g is not None else None), 1
 
 
-def prefill_choice(mode: str, g) -> Tuple[str, Dict[str, str], str]:
+def prefill_choice(mode: str, g, room_mib: Optional[int] = None, given_ctx: Optional[int] = None) -> Tuple[str, Dict[str, str], str]:
     """What ``mode`` (auto | new | old) means on the card ``g`` (a GpuInfo, a Detected or None): (reading, engine settings, line).
-    reading is "new" or "old"; the line says which reading and why, printed once at start (as the line of the wide copy passes)."""
+    reading is "new" or "old"; the line says which reading and why, printed once at start (as the line of the wide copy passes).
+    ``given_ctx`` is a context given with --max-ctx and ``room_mib`` the free memory left beside it (ContextPlan.room_mib): with both,
+    auto on a card of AUTO_NEW_MIN_TOTAL_MIB to FULL_CONTEXT_MIN_TOTAL_MIB takes the new reading when room_mib is at least
+    NEW_PREFILL_RESERVE_MIB (what --prefill new plans with)."""
     total, n = _card_total(g)
     big = total is not None and total >= FULL_CONTEXT_MIN_TOTAL_MIB
     if total is None:
@@ -390,9 +401,20 @@ def prefill_choice(mode: str, g) -> Tuple[str, Dict[str, str], str]:
         return "new", dict(SMALL_CARD_ENV), "prompt reading: new (setting new; %s, so prompt sizes of 0.1.7)" % card
     if big:
         return "new", {}, "prompt reading: new (setting auto: %s)" % card
+    try_new = "--prefill new or %s=new to try it" % PREFILL_MODE_ENV
+    if total is not None and total >= AUTO_NEW_MIN_TOTAL_MIB:
+        if given_ctx and room_mib is not None:
+            if room_mib >= NEW_PREFILL_RESERVE_MIB:
+                return "new", dict(SMALL_CARD_ENV), ("prompt reading: new (setting auto: %s, %d MiB free beside --max-ctx %d; --prefill "
+                                                     "old for the 0.1.7 one)" % (card, room_mib, given_ctx))
+            return "old", dict(OLD_PREFILL_ENV), ("prompt reading: as in 0.1.7 (setting auto: %s, %d MiB free beside --max-ctx %d, new "
+                                                  "needs %d; --prefill new to try it)" % (card, max(0, room_mib), given_ctx,
+                                                                                         NEW_PREFILL_RESERVE_MIB))
+        if given_ctx:                                   # --max-ctx was given, but the room beside it is not known here
+            return "old", dict(OLD_PREFILL_ENV), "prompt reading: as in 0.1.7 (setting auto: %s; %s)" % (card, try_new)
+        return "old", dict(OLD_PREFILL_ENV), ("prompt reading: as in 0.1.7 (setting auto: %s and no --max-ctx; %s)" % (card, try_new))
     why = "%s, new only from %d MiB" % (card, FULL_CONTEXT_MIN_TOTAL_MIB) if total is not None else card
-    return "old", dict(OLD_PREFILL_ENV), ("prompt reading: as in 0.1.7 (setting auto: %s; --prefill new or %s=new to try it)"
-                                          % (why, PREFILL_MODE_ENV))
+    return "old", dict(OLD_PREFILL_ENV), "prompt reading: as in 0.1.7 (setting auto: %s; %s)" % (why, try_new)
 
 
 def prefill_reserve_mib(mode: str, g) -> int:
@@ -425,10 +447,14 @@ def _reserve_note(plan: "ContextPlan", reserve_mib: int, chosen: bool) -> None:
 def use_prefill(plan: "ContextPlan", mode: str, g=None) -> "ContextPlan":
     """Add the engine settings of :func:`prefill_choice` for ``mode`` on the card ``g`` to ``plan.env`` and keep the choice in
     ``plan.prefill`` and ``plan.prefill_line``.  old, and auto on a card under FULL_CONTEXT_MIN_TOTAL_MIB or of unknown memory, add
-    OLD_PREFILL_ENV; auto on a larger card changes nothing; new adds SMALL_CARD_ENV unless the card is known to be that large."""
-    reading, env, line = prefill_choice(mode, g)
+    OLD_PREFILL_ENV; auto on a larger card changes nothing; new adds SMALL_CARD_ENV unless the card is known to be that large.  auto
+    with a given context on a card of AUTO_NEW_MIN_TOTAL_MIB or more that leaves NEW_PREFILL_RESERVE_MIB free (plan.room_mib) adds
+    SMALL_CARD_ENV, as new does."""
+    reading, env, line = prefill_choice(mode, g, plan.room_mib, plan.max_ctx if plan.given else None)
     plan.env.update(env)
     plan.prefill, plan.prefill_line = reading, line
+    if mode == "auto" and reading == "new" and env:      # 0.3.4: auto beside a given context on a 24 GB card keeps the reserve too
+        plan.reserve_mib = NEW_PREFILL_RESERVE_MIB
     return plan
 
 
@@ -573,7 +599,7 @@ def plan_given_context(pack, det: Detected, max_ctx: int, reserve_mib: int = 0) 
     model's output head is left out when it does not fit beside that context.  Without this the head is always loaded: the package names
     it in YSKN_BDR_SHEAD, and the engine loads a named head without the free-memory check it makes for one it finds by itself.
     Unchanged on larger cards for native contexts and when nvidia-smi gave no answer."""
-    plan = ContextPlan(max_ctx=int(max_ctx))
+    plan = ContextPlan(max_ctx=int(max_ctx), given=True)
     if getattr(pack, "is_hf_inkling2", False):
         return plan
     extended = plan.max_ctx > pack.max_ctx
@@ -585,7 +611,10 @@ def plan_given_context(pack, det: Detected, max_ctx: int, reserve_mib: int = 0) 
     sizes = [p.stat().st_size for p in (pack.weights, pack.draft, pack.draft_head)]
     extra = BIG_CARD_LOAD_EXTRA_MIB if (extended and g.total_mib >= FULL_CONTEXT_MIN_TOTAL_MIB) else 0
     _reserve_note(plan, reserve_mib, False)
-    if fit_tokens(g.free_mib - reserve_mib - extra, sum(sizes), overhead_mib(sizes[0])) < plan.max_ctx:
+    head = fit_tokens(g.free_mib - reserve_mib - extra, sum(sizes), overhead_mib(sizes[0])) >= plan.max_ctx
+    files = sum(sizes) if head else sizes[0] + sizes[1]
+    plan.room_mib = int((g.free_mib - extra - files / MIB - overhead_mib(sizes[0]) - MARGIN_MIB) - plan.max_ctx * KV_BYTES_PER_TOKEN / MIB)
+    if not head:
         plan.env["YSKN_BDR_SHEAD"] = "0"
         plan.notes.append("note: the output head of the draft model (%s, %.1f GiB) is not loaded: it does not fit beside %d tokens of "
                           "context in the free GPU memory (%d of %d MiB free); each pass takes %s longer (measured on the RTX 5090)"

@@ -35,8 +35,10 @@ full-attention layer visits in an 8-bit cache (MXFP8 with BF16 copies of the fir
 of 256 rows with tiled Flash-GQA attention on the tensor cores, the fast expert kernels, the Split-K attention for single steps
 and short passes (every row of a pass with logits gets the bits of a single step), the arg-max on the GPU for greedy steps, the
 Split-K attention of the drafter and its position-aware on / off rule, and on the RTX 50 series the expert products of prompt
-passes on the NVFP4 tensor cores.  auto (default) = on when the library runs the NVFP4 prompt products on this GPU (RTX 50),
-else off; on = the fast path with what the GPU supports; off = the engine as in 0.3.2 (the same results bit for bit).  The fast
+passes on the NVFP4 tensor cores.  auto (default; 0.3.4) = on for the compute capabilities of ``FAST_AUTO_CAPS`` (8.6 RTX 30,
+8.9 RTX 40, 12.0 RTX 50; nvidia-smi through yasakani/gpu.py, the GPU the engine uses) and where the library runs the NVFP4 prompt
+products, else off (an unknown compute capability too); on = the fast path with what the GPU supports (the NVFP4 part where the
+library reports it, RTX 50); off = the engine as in 0.3.2 (the same results bit for bit).  The fast
 path gives other numbers than the 0.3.2 path (the 8-bit cache rounds the keys and values; other sum orders): greedy output can
 differ after some tokens.  ``--copy auto`` / ``$YASAKANI_INK2_COPY=auto`` (default off) adds copy decoding for edits
 (``_ink2_copyedit``): ids that repeat the context are proposed and checked in one pass; the output does not change.
@@ -124,10 +126,60 @@ def fast_mode_of(value: Optional[str] = None, environ=None) -> str:
     return v
 
 
+# auto turns the fast path on for these compute capabilities (0.3.4: RTX 30 8.6, RTX 40 8.9, RTX 50 12.0; 0.3.3: 12.0 only).  The
+# context planned before the load (fast_expected) and the engine (Ink2Engine through fast_choice) use this one rule;
+# quickstart/quickstart.py keeps a copy of it (INK2_FAST_AUTO_CAPS).
+FAST_AUTO_CAPS = ((8, 6), (8, 9), (12, 0))
+CAP_UNKNOWN = (0, 0)                   # a caller asked nvidia-smi and got no answer: auto = off, and the engine does not ask again
+
+
+def _cap(compute_cap):
+    try:
+        return tuple(int(x) for x in compute_cap) if compute_cap else None
+    except (TypeError, ValueError):
+        return None
+
+
 def fast_expected(mode: str, compute_cap) -> bool:
     """For planning the context before the load: does ``mode`` turn the fast path on for a GPU of ``compute_cap`` (nvidia-smi,
-    (major, minor) or None)?  auto: on the RTX 50 series (12, 0), the GPUs the NVFP4 prompt products run on."""
-    return mode == "on" or (mode == "auto" and compute_cap == (12, 0))
+    (major, minor) or None = unknown)?  auto: on for FAST_AUTO_CAPS (RTX 30, 40 and 50), off for others and when unknown."""
+    return mode == "on" or (mode == "auto" and _cap(compute_cap) in FAST_AUTO_CAPS)
+
+
+def engine_compute_cap(environ=None):
+    """The compute capability of the GPU the engine opens (CUDA device 0 of what it sees; nvidia-smi through gpu.detect, which
+    follows CUDA_VISIBLE_DEVICES), or None.  Never raises: an unknown GPU leaves auto off."""
+    try:
+        from . import gpu as gpus
+        g = gpus.detect(0, environ).worst()
+        return _cap(g.compute_cap) if g is not None else None
+    except Exception:
+        return None
+
+
+def fast_choice(mode: str, compute_cap, nvfp4: bool, has_fast: bool, backend: str):
+    """(fast, fast_nvfp4, start-up line) of the engine.  ``compute_cap``: (major, minor) or None (unknown); ``nvfp4``: the library
+    runs the NVFP4 prompt products on this GPU; ``has_fast``: the library has the fast path (0.3.3 or later).  auto = on for
+    FAST_AUTO_CAPS and where the library reports NVFP4.  Raises YasakaniError for --fast on with a library without the fast path."""
+    cap = _cap(compute_cap)
+    cuda = backend == "cuda"
+    want = mode == "on" or (mode == "auto" and (fast_expected(mode, cap) or (cuda and bool(nvfp4))))
+    if want and not has_fast:
+        if mode == "on":
+            raise YasakaniError("--fast on needs the engine library of 0.3.3 or later")
+        return False, False, "fast path: off (this engine library has no fast path; the library of 0.3.3 or later has it)"
+    if want and not cuda:
+        return False, False, "fast path: off (it runs on the GPU only; the %s backend runs the standard path)" % backend
+    if want:
+        nv = cuda and bool(nvfp4)
+        return True, nv, "fast path: on (8-bit key/value cache%s; --fast off for the standard path)" % (
+            ", NVFP4 prompt products" if nv else "; this GPU has no NVFP4 prompt products")
+    if mode == "off":
+        return False, False, "fast path: off (--fast off or %s=off; auto turns it on for RTX 30, 40 and 50 cards)" % FAST_ENV
+    if cap is None or cap == CAP_UNKNOWN:
+        return False, False, ("fast path: off (the GPU's compute capability is unknown; auto turns it on for RTX 30, 40 and 50 "
+                              "cards; --fast on turns it on)")
+    return False, False, "fast path: off (auto turns it on for RTX 30, 40 and 50 cards; --fast on turns it on here)"
 
 
 MAX_DRAFT_DEPTH = 7
@@ -770,8 +822,10 @@ class Ink2Engine:
     extends them (the next turn of a chat) reads only the new ids."""
 
     def __init__(self, pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, graph: bool = True, log=None,
-                 fast: Optional[str] = None):
-        """``fast``: auto | on | off (None: $YASAKANI_INK2_FAST, else auto); ``self.fast`` says what the engine runs."""
+                 fast: Optional[str] = None, compute_cap=None):
+        """``fast``: auto | on | off (None: $YASAKANI_INK2_FAST, else auto); ``self.fast`` says what the engine runs.
+        ``compute_cap``: the GPU's (major, minor) the caller planned the context with (CAP_UNKNOWN: asked, no answer); None: not
+        given, then auto asks nvidia-smi here (engine_compute_cap) unless the library reports NVFP4.  The rule: fast_choice."""
         fast_mode = fast_mode_of(fast)
         read_config(pack.root)                               # values the library does not take stop here, with a message
         self.dll = find_dll(dll)
@@ -782,14 +836,14 @@ class Ink2Engine:
         self.backend = backend_of(self.build_info)
         self.max_ctx = int(max_ctx)
         nvfp4 = self.backend == "cuda" and bool(getattr(self.mod, "nvfp4_prompt", lambda _: 0)(lib))
-        self.fast = fast_mode == "on" or (fast_mode == "auto" and nvfp4)
-        self.fast_mode, self.fast_nvfp4 = fast_mode, self.fast and nvfp4
-        if self.fast and not (lib.caps & 16 and hasattr(lib, "ink2_fast_path")):
-            if fast_mode == "on":
-                raise YasakaniError("--fast on needs the engine library of 0.3.3 or later (%s)" % self.dll)
-            self.fast = self.fast_nvfp4 = False
-        if self.fast and self.backend != "cuda":           # the fast path runs on the GPU only (the CPU build of the tests: off)
-            self.fast = self.fast_nvfp4 = False
+        if compute_cap is None and fast_mode == "auto" and self.backend == "cuda" and not nvfp4:
+            compute_cap = engine_compute_cap()
+        self.fast_mode, self.compute_cap = fast_mode, _cap(compute_cap)
+        has_fast = bool(lib.caps & 16 and hasattr(lib, "ink2_fast_path"))
+        try:                                               # the CPU build of the tests: off whatever is asked
+            self.fast, self.fast_nvfp4, self.fast_note = fast_choice(fast_mode, compute_cap, nvfp4, has_fast, self.backend)
+        except YasakaniError as ex:
+            raise YasakaniError("%s (%s)" % (ex, self.dll)) from ex
         self._cancel = threading.Event()
         t0 = time.perf_counter()
         self.weights_note = pack.weights_format
@@ -822,12 +876,7 @@ class Ink2Engine:
         self.draft_note = "drafter: not set up"
         self.copying = False                                 # copy decoding on (set_copy)
         self.copy_note = "copy: off"
-        if self.fast:
-            self.fast_note = "fast path: on (8-bit key/value cache%s)" % (
-                ", NVFP4 prompt products" if self.fast_nvfp4 else "; this GPU has no NVFP4 prompt products")
-        else:
-            self.fast_note = "fast path: off%s" % (" (--fast off)" if fast_mode == "off" else " (the NVFP4 prompt products of the RTX 50 "
-                                                   "series are not available here; --fast on turns it on)")
+        self.copy_mode, self.copy_min = "off", None
 
     def _fast_options(self, lib) -> None:
         """The engine options of the fast path after the load (FAST_ENGINE_OPTIONS), the arg-max on the GPU for greedy steps
@@ -941,6 +990,7 @@ class Ink2Engine:
         except ValueError as ex:
             raise YasakaniError(str(ex)) from ex
         self.copying = False
+        self.copy_mode, self.copy_min = mode, n
         if mode == "off":
             ce.enable(self.native, "off")
             self.copy_note = "copy: off"
@@ -1479,11 +1529,12 @@ class Ink2Runner:
 
 def open_runner(pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, seed0: int = 1, say=None, warm: bool = True,
                 draft: str = "auto", draft_depth: Optional[int] = None, copy: Optional[str] = None, copy_min=None,
-                fast: Optional[str] = None):
-    """Model folder -> (formatter, engine, runner).  The tokenizer and template are read first, so a broken folder fails before
+                fast: Optional[str] = None, compute_cap=None):
+    """Model folder -> (formatter, engine, runner).  ``fast`` / ``compute_cap``: see Ink2Engine (without ``compute_cap``, auto asks
+    nvidia-smi for the GPU the engine opens, as the command line does).  The tokenizer and template are read first, so a broken folder fails before
     the load.  ``draft``: auto | on | off (see the module text); ``eng.draft_note`` says what became of the drafter."""
     fmt = Ink2Formatter(pack.root)
-    eng = Ink2Engine(pack, max_ctx, dll=dll, fast=fast)
+    eng = Ink2Engine(pack, max_ctx, dll=dll, fast=fast, compute_cap=compute_cap)
     try:
         eng.set_drafter(pack, draft, draft_depth)
         eng.set_copy(copy, copy_min)                         # off unless --copy / $YASAKANI_INK2_COPY says auto
