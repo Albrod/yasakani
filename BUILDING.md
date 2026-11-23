@@ -2,7 +2,7 @@
 
 The release page has a prebuilt `yskn.dll`. You can also build it yourself. You do not need a GPU to build it, only to run it.
 On Linux the same source builds `libyskn.so`, from source only: see [Linux](#linux-building-from-source).
-日本語：Visual Studio 2022 Build Tools（C++）、CUDA Toolkit、CMake、Ninja を入れ、「x64 Native Tools Command Prompt for VS 2022」で下の 2 つのコマンドを実行します。
+日本語：Visual Studio 2022 Build Tools（C++）・CUDA Toolkit・CMake・Ninja を入れ、「x64 Native Tools Command Prompt for VS 2022」で下の 2 つのコマンドを実行します。Visual Studio 2026（MSVC 19.51）と CUDA Toolkit 13.2 でもビルドできたという利用者の方の報告があります（[#31](https://github.com/yasakani-dev/yasakani/issues/31)）。
 Linux では CUDA Toolkit 13、GCC、CMake を入れ、下の「Linux (building from source)」の節の手順でソースからビルドします。寄稿者が確かめた方法で、公式の対応ではありません。ビルド済みの Linux 版はクラウドファンディングの目標の 1 つです。
 
 ## What the release was built with (2026-11-15)
@@ -22,6 +22,7 @@ The `yskn.dll` on the release page is the build of 0.3.1 (SHA-256 `41a6bbd9bc1f8
 `src/q35.hpp` and `src/q35_kernels.cu`. These files were compiled again in a copy of the build folder of 0.2.0 with the tool versions of
 the table, and linked. The objects of `src/q35_atxpk.cu` and `src/q35_atxpk_ms.cu`, whose source did not change, are those of the 0.2.0
 build: nvcc 13.2 gives some kernels of these files different machine code from one compilation to the next, so we kept the tested ones.
+0.3.2 to 0.3.4 ship this same file.
 The `yskn.dll` of 0.2.0 (SHA-256 `c995bb24c297ae823dfc92eaaf3357401083a9922abe2fdfeb56509c323fd052`, 64,498,688 bytes) was made in two
 steps. The first step (SHA-256 `3e06622b…39e1`, 63,142,400 bytes) is the source of 0.1.7 plus the
 new prompt reading and the edit copy ([docs/TECHNOLOGY.md](docs/TECHNOLOGY.md),
@@ -62,8 +63,10 @@ passes of 16 rows; the 0.1.5 build wrote the same tokens in the same number of p
 with each model). The 0.1.6 build wrote the same tokens in the same number of passes as the 0.1.5 build (60 of 60 greedy generations
 with each model). In `yasakani bench` (its 4 prompts with each model, the median of 6 runs each) the speed of the 0.1.6 build
 differed from that of the 0.1.5 build by -0.44 % to +0.26 %. The 0.1.4 speed rows in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) were
-measured with the 0.1.4 build. Other compiler or CUDA
-versions have not been tried. Compute capability 12.0 needs a recent CUDA Toolkit.
+measured with the 0.1.4 build. We have not tried other compiler or CUDA
+versions. A user built the 0.3.2 source with Visual Studio 2026 Community (MSVC 19.51.36263) and CUDA Toolkit 13.2 (nvcc 13.2.51), with
+`-DCMAKE_CUDA_ARCHITECTURES=120`, in about three minutes and without errors
+([#31](https://github.com/yasakani-dev/yasakani/issues/31)); we have not built with Visual Studio 2026 ourselves. Compute capability 12.0 needs a recent CUDA Toolkit.
 
 ## Steps
 
@@ -131,7 +134,7 @@ What is in `src/inkling2/`:
   caller of the load options and `ink2_set_option`) turns it on; with it off the library gives the results of 0.3.2 bit for bit.
 * `build.cmd`: the build. There is no CMake file for this library.
 
-The released `yskn_inkling2.dll` has SHA-256 `282ddcc470e570207dae1362c188be57e6170518e03283475790a28c46a28c7f` (24,137,728 bytes): the
+The released `yskn_inkling2.dll` is the file of 0.3.3, which 0.3.4 ships unchanged (`src/inkling2/` did not change). It has SHA-256 `282ddcc470e570207dae1362c188be57e6170518e03283475790a28c46a28c7f` (24,137,728 bytes): the
 engine with the drafter (also from a converted drafter file, `mtp_d4.yskn`), with the products for packed dense matrices and with the
 fast path, built from `src/inkling2/` of this release. It was built with the tools of
 the table above (Visual C++ 19.44, CUDA Toolkit 13.2) by `build.cmd cuda`. Like `yskn.dll` it has machine code for compute capability 8.6
@@ -153,7 +156,7 @@ yasakani info --model-dir D:\models\inkling2-mini --dll build\inkling2\yskn_inkl
 
 The build takes a few minutes and writes `build\inkling2\yskn_inkling2.dll` (about 24 MB). `set INK2_ARCHS=-gencode
 arch=compute_120,code=sm_120` before it builds for the RTX 50 series only; `set INK2_NVFP4_TC=0` builds it without the NVFP4 prompt
-products (the fast path then runs without them, and `--fast auto` turns it off). `src\inkling2\build.cmd host` builds
+products (the fast path then runs without them; since 0.3.4 `--fast auto` still turns it on for RTX 30, 40 and 50 cards). `src\inkling2\build.cmd host` builds
 `build\inkling2\ink2_host.dll`, the kernels on the CPU only: it is not released and serves the unit tests of the package
 (`YASAKANI_TEST_INK2_DLL`, with the tiny test checkpoint in `YASAKANI_TEST_INK2_SOURCE`; see `python/tests/test_inkling2.py`). The library
 is for Windows only; there is no Linux build of it (on Linux, see [the Inkling-2 engine of #28](#linux-inkling-2) below). Then check it

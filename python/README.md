@@ -6,7 +6,7 @@ This package is the part you talk to: a local **OpenAI-compatible server**, a **
 whether your files and your installation are the reference ones. The engine itself is the DLL; the package loads it, applies the
 default settings the published numbers were measured with, handles the chat template and the tokenizer, and streams the answer.
 
-Status: version `0.3.3`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)). 0.3.1 adds Inkling-2 Mini as an experimental, text-only model on a second engine library (see [Inkling-2 Mini](#inkling-2-mini-experimental)); 0.3.2 makes it the fourth model of the quickstart and chooses its context from the free GPU memory.
+Status: version `0.3.4`. Text, and optionally still images (new in 0.1.2; on Linux only with llama.cpp built from source, see [Image input](#image-input-optional)). One request is generated at a time, unless the server is started with `--parallel N` (experimental, see [Several requests at once](#several-requests-at-once-experimental)). Tool calling is new in 0.1.1. Since 0.1.3 the engine also runs on other RTX 30, 40 and 50 series cards, without tuning or tests (see [GPUs other than the RTX 5090](#gpus-other-than-the-rtx-5090)). 0.2.0 reads prompts faster on cards with 30,000 MiB or more and adds the edit copy, which is on by default (see [Prompt reading and edit copy](#prompt-reading-and-edit-copy)). 0.3.1 adds Inkling-2 Mini as an experimental, text-only model on a second engine library (see [Inkling-2 Mini](#inkling-2-mini-experimental)); 0.3.2 makes it the fourth model of the quickstart and chooses its context from the free GPU memory.
 
 ## What you need
 
@@ -144,7 +144,11 @@ driver mode of the GPU and whether a display is attached to it (nvidia-smi `disp
    drafter reading them; `yskn_time_cycle`): 16 rows and W rows in turn, about 0.6 s each, 3 rounds greedy and one round sampled. The
    time of a width is the median of the means of pairs of cycles. W is used when it takes at most 0.8 × W / 16 times 16 rows (32: 1.60,
    48: 2.40, 64: 3.20). RTX 50 keeps a width unless every round is over the limit and the rounds agree within 10 %; RTX 30 / 40 opens a
-   width only when every round is under it and they agree. The measured times are also where the engine's time-based back-off starts.
+   width only when every round is under it and they agree. Since 0.3.4 RTX 50 uses the limit 0.9 × W / 16 (32: 1.80, 48: 2.70,
+   64: 3.60; on our RTX 5090 all three widths stayed open, at 1.37, 1.81 and 2.05, and the three edit tasks gave the same ids with
+   wide passes off and on) ([#31](https://github.com/yasakani-dev/yasakani/issues/31): on an RTX 5060 Ti the old limit closed all three widths,
+   and with every width open the three edit tasks ran 1.23 to 1.24 times as fast with the same output; the reporter's numbers). The
+   measured times are also where the engine's time-based back-off starts.
 3. *Idle GPU.* Before and after, nvidia-smi is asked (by the GPU's UUID, which the engine gives) for the load and for other programs that
    hold 256 MiB or more of its memory (Windows lists every program that draws with the GPU and gives no memory per program, so there the
    load alone decides). If the GPU is busy or nvidia-smi does not answer for it, nothing is measured or kept: RTX 50 then uses every width
@@ -179,8 +183,8 @@ chooses there; `yasakani report` names both in its table (it follows the two var
 
 | `--prefill` / `YASAKANI_PREFILL` | prompt reading |
 |---|---|
-| `auto` (default) | the new reading on a card with 30,000 MiB or more (nvidia-smi's total); on a smaller card, or when nvidia-smi cannot tell the memory, the reading of 0.1.7 |
-| `new` | the new reading on any card; under 30,000 MiB (or of unknown memory) with the pass sizes of 0.1.7. Experimental there: never run on a real card under 30,000 MiB |
+| `auto` (default) | the new reading on a card with 30,000 MiB or more (nvidia-smi's total); since 0.3.4 also on a card of 22,000 to 30,000 MiB when `--max-ctx` is given and at least 1,800 MiB of memory stays free beside it for the work area (the line at start names the free memory, below); on a smaller card, or when nvidia-smi cannot tell the memory, the reading of 0.1.7 |
+| `new` | the new reading on any card; under 30,000 MiB (or of unknown memory) with the pass sizes of 0.1.7. Experimental there: measured on one real 24 GB card by a user ([#24](https://github.com/yasakani-dev/yasakani/issues/24)) |
 | `old` | the reading of 0.1.7 on any card, also the passes of 64 tokens as in 0.1.7 |
 
 **The new prompt reading** computes the first read of a prompt layer by layer in larger pieces, computes the output layer only where it
@@ -204,18 +208,25 @@ area. The other changes of 0.2.0 stay on, and the output is the same.
 
 ```
 prompt reading: new (setting auto: 32607 MiB card)
-prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; --prefill new or YASAKANI_PREFILL=new to try it)
+prompt reading: new (setting auto: 24564 MiB card, 4202 MiB free beside --max-ctx 131072; --prefill old for the 0.1.7 one)
+prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, 1402 MiB free beside --max-ctx 262144, new needs 1800; --prefill new to try it)
+prompt reading: as in 0.1.7 (setting auto: 24564 MiB card and no --max-ctx; --prefill new or YASAKANI_PREFILL=new to try it)
+prompt reading: as in 0.1.7 (setting auto: 24564 MiB card; --prefill new or YASAKANI_PREFILL=new to try it)
+prompt reading: as in 0.1.7 (setting auto: 16384 MiB card, new only from 30000 MiB; --prefill new or YASAKANI_PREFILL=new to try it)
 prompt reading: as in 0.1.7 (setting auto: card memory not known; --prefill new or YASAKANI_PREFILL=new to try it)
 prompt reading: as in 0.1.7 (setting old)
 prompt reading: new (setting new)
 prompt reading: new (setting new; 24564 MiB card, so prompt sizes of 0.1.7)
 ```
 
+The fifth line comes when `--max-ctx` is given but the free memory beside it is not known (nvidia-smi gives no free memory).
 When CUDA's numbering cannot be matched with nvidia-smi's, the card is given as `smallest of N GPUs: ... MiB`.
 
 **Cards under 30,000 MiB.** On such a card the package keeps the pass sizes of 0.1.7 with every setting (`YSKN_Q35_PMAX` 1024,
 `YSKN_Q35_LAYER_ROWS` 4096), because the memory rule of the context ([below](#gpus-other-than-the-rtx-5090)) was measured with them. With
-`auto` the reading is that of 0.1.7: on the RTX 5090 shown to the package as a 24,564 MiB and a 16,384 MiB card, a prompt of 32,768 tokens
+`auto` the reading is that of 0.1.7 (since 0.3.4 except on a card of 22,000 MiB or more with `--max-ctx` given and room for the work
+area, see the table above; we checked it on the RTX 5090 shown to the package as a 24,564 MiB card with `--max-ctx 131072`: the
+same `selfcheck` lines as `--prefill old`, a prompt of 32,000 tokens read in 7.2 s against 8.5 s with the same 16 output ids): on the RTX 5090 shown to the package as a 24,564 MiB and a 16,384 MiB card, a prompt of 32,768 tokens
 gave the same output as 0.1.7, with the peak GPU memory within 9 MiB of it (an earlier run also found the same ids, state and saved
 states). With `--prefill new` the work area takes about
 579 MiB, and the package leaves room for it when it chooses the context itself:
@@ -247,8 +258,10 @@ time: as a 24 GB card (24,564 MiB, quality model) the package chose a context of
 area and read the prompt in 7.56 s (0.1.7: 9.00 s); with 700 MiB less free it found no room, printed the fallback line and read without
 the work area. As a 16 GB card (16,384 MiB, fastest model) keeping the room would have cost more than half of the context, so the context stayed
 98,304, and the engine found no room and read without the work area. So at the automatic context a 16 GB card does not use the new reading; a
-smaller `--max-ctx` leaves room for it (not measured). No real card under 30,000 MiB has been measured, and how much free memory the
-driver reports differs between PCs.
+smaller `--max-ctx` leaves room for it (not measured). We have not measured a real card under 30,000 MiB; a user's RTX 3090 Ti
+measurement is in [#24](https://github.com/yasakani-dev/yasakani/issues/24) (the reporter's numbers: 1.39 to 1.40 times as fast with
+`--max-ctx` given, the work area made up to a context of 131,072, not at 262,144). How much free memory the driver reports differs
+between PCs.
 
 **Edit copy** (`--edit-copy on|off`, `YASAKANI_EDIT_COPY`, default `on`). When an answer copies the input with the same short replacement
 again and again (a key or a column renamed in every line), the drafts of the copy passes put in that replacement once the model has
@@ -441,6 +454,9 @@ Send the image as an OpenAI `image_url` part with a `data:image/...;base64,` URI
 * at most 16 images per request. The whole request body is at most 32 MiB and base64 makes the data a third larger, so the images of one
   request can be about 24 MiB together;
 * each image at most 40 million pixels, and its longer side at most 200 times its shorter side;
+* still images in PNG, JPEG, WebP, GIF, BMP or TIFF only. Since 0.3.4 nothing else is opened: before, the image of a request was
+  tried with every format the Pillow library reads, and two of them pass the data on to another program (EPS to Ghostscript when it
+  is installed, WMF and EMF to the renderer of Windows). An image with several frames is refused, as before;
 * each image is downsized to at most **1,024 image tokens** (about one million pixels), keeping its shape: a 1920 × 1080 screenshot
   becomes 1,008 image tokens and a 4032 × 3024 phone photo 972 (at full size they would take 2,040 and 4,015). Downsizing loses detail,
   so small text in a full-screen screenshot can become hard to read; crop the part you need, or raise the limit.
@@ -575,7 +591,7 @@ output and predictions within the tolerances), 1 failed, 2 no reference file, 3 
 within the tolerances. On the RTX 5090 the comparison with the reference stays exact, as before. For scale, measured on the RTX 5090 by the same comparison
 (`docs/MEASUREMENTS.md`): the 8-bit key-value cache instead of KV5 differs by 0.0056 on average and 0.081 at most (99.6 % the same token)
 and passes; the fastest model's weights against the quality model's reference differ by 0.028 and 0.53 (97.2 %) and fail. The tolerances
-were chosen on the RTX 5090; the check has not been run on another GPU yet, so a card that computes correctly could still fail it, or a
+were chosen on the RTX 5090; the check has since passed on an RTX 3090 Ti in a user report ([#24](https://github.com/yasakani-dev/yasakani/issues/24)); the tolerances have not been tuned on other cards, so a card that computes correctly could still fail it, or a
 small fault could pass it: on the RTX 5090 it did not find one matrix scaled by 1.25, all 400 layer matrices scaled by 1.02, or one bit changed in
 every 4,096th byte of 64 matrices.
 
@@ -664,7 +680,7 @@ itself or a folder that holds it, and `YASAKANI_INK2_DLL` names it directly. Its
 
 **The drafter.** `chat`, `serve`, `bench` and `selfcheck` take `--draft auto|on|off` (default `auto`, or `YASAKANI_DRAFT`) and `--draft-depth N` (1 to 7, or `YASAKANI_DRAFT_DEPTH`; default: the engine's). `auto` lets the engine use the drafter only while it makes generation faster; `on` always drafts; `off` does not load it. The output does not change: greedy gives the same tokens as without the drafter, and sampling picks each token with the same probabilities (one random number per emitted token, so a seed gives the same tokens as long as the engine's logits are the same). The start-up lines say whether the drafter was loaded and the mode; `info` shows the `drafter` entry (for a converted drafter file also its scheme), whether the binding has the drafter calls and the capabilities of the engine library (packed dense matrices, drafter, converted drafter files). With `--draft auto` the drafter guesses up to 7 tokens per pass, and the model checks them up to the first one the drafter is unsure of. A converted drafter file needs a library that multiplies it as stored (the one of 0.3.1); with an older library the package generates without drafting and says so (with `--draft on` it stops with a message). The package needs a library of interface version 3 (the one of 0.3.1); an older `yskn_inkling2.dll` stops with a message. `chat` and `bench` print the tokens per pass, and `serve` adds `draft_mode`, `draft_passes`, `tokens_per_pass`, `draft_n` and `draft_n_accepted` to `timings`. `selfcheck` gives the same tokens with `--draft on` and `--draft off`.
 
-**The fast path** (new in 0.3.3). `chat`, `serve` and `bench` take `--fast auto|on|off` (default `auto`, or `YASAKANI_INK2_FAST`). The fast path uses an 8-bit key/value cache (MXFP8) for the 8 layer visits that attend to the whole context, attention kernels for long contexts and faster prompt reading; on RTX 50 cards the prompt passes also use the NVFP4 tensor cores. `auto` is on for the RTX 50 series and off for other GPUs (we have not run it on an RTX 30 or 40 card); `on` uses it on any GPU, without the NVFP4 part where there is none; `off` computes as 0.3.2 did. With it on, the output can differ from `off` after some tokens ([numbers and conditions](../README.md#inkling-2-mini)). The start-up lines say `fast path: on (...)` or `fast path: off (...)`. `selfcheck` compares the standard path unless `--fast` is given on its command line, because its reference tokens are those of the standard path and the fast path can pick another token at a near tie.
+**The fast path** (new in 0.3.3). `chat`, `serve` and `bench` take `--fast auto|on|off` (default `auto`, or `YASAKANI_INK2_FAST`). The fast path uses an 8-bit key/value cache (MXFP8) for the 8 layer visits that attend to the whole context, attention kernels for long contexts and faster prompt reading; on RTX 50 cards the prompt passes also use the NVFP4 tensor cores. Since 0.3.4 `auto` is on for the RTX 30, 40 and 50 series (compute capability 8.6, 8.9 and 12.0; 0.3.3: RTX 50 only) and off for other GPUs, after a user's run of 0.3.3 on an RTX 3090 Ti ([#29](https://github.com/yasakani-dev/yasakani/issues/29): `selfcheck` passed with it on and off, and generation and prompt reading were faster with it on; the reporter's numbers are in the [README](../README.md#inkling-2-mini-033)). We have run it on the RTX 5090 only, and no RTX 40 card has been reported. `on` uses it on any GPU, without the NVFP4 part where there is none (RTX 30 and 40 cards included); `off` (or `YASAKANI_INK2_FAST=off`) computes as 0.3.2 did. Because the output of the fast path is close to, but not the same as, that of `off`, the default output on RTX 30 and 40 cards changes with 0.3.4. With it on, the output can differ from `off` after some tokens ([numbers and conditions](../README.md#inkling-2-mini)). The start-up lines say `fast path: on (...)` or `fast path: off (...)`, and since 0.3.4 `bench --json` records the settings in use: `fast` (`mode`, `on`, `nvfp4_prompt`, `compute_cap`) and `copy` (`mode`, `on`, `min_match`). `selfcheck` compares the standard path unless `--fast` is given on its command line, because its reference tokens are those of the standard path and the fast path can pick another token at a near tie.
 
 **Copy decoding for edits** (new in 0.3.3, off by default). `--copy auto` (or `YASAKANI_INK2_COPY=auto`) proposes ids that repeat the context and the model checks them in one pass; the output does not change. `--copy-min N` (4 to 64, default 8, or `YASAKANI_INK2_COPY_MIN`) is the shortest match it uses.
 

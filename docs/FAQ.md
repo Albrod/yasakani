@@ -99,13 +99,14 @@ proposes tokens; the model still checks every one of them, so the output does no
 ## Which GPUs, which systems?
 
 We test on **Windows 11 and the RTX 5090** (32 GB). Since 0.1.3 the engine is also built to run on other NVIDIA RTX 30, 40 and 50 series cards with
-compute capability 8.6 or higher and 16 GB or more: the RTX 3090, RTX 3090 Ti and RTX 4090 (24 GB; the quality and fastest models, and the max-quality model with a shorter context by calculation) and the
+compute capability 8.6 or higher and 16 GB or more: the RTX 3090, RTX 3090 Ti and RTX 4090 (24 GB; the quality and fastest models, and the max-quality model with a shorter context; one user report, [#24](https://github.com/yasakani-dev/yasakani/issues/24)) and the
 RTX 4060 Ti 16GB, RTX 4070 Ti SUPER, RTX 4080, RTX 4080 SUPER, RTX 5060 Ti 16GB, RTX 5070 Ti, RTX 5080 (16 GB; the fastest model only, with a shorter context). The engine is
 not optimized for them and we have not tested it on them, so neither its speed nor its operation is guaranteed; they are slower than the
 RTX 5090. The quickstart says so and goes on. Since 0.1.4, however, its self-check compares the card's predictions with those of the
 RTX 5090, and the quickstart stops when they differ by more than small differences in the computation, or when the card's passes of
-different widths do not agree. The faster prompt reading of 0.2.0 is used by default only on cards with 30,000 MiB or more (the RTX
-5090); the other cards read prompts exactly as 0.1.7 did ([below](#prompt-reading-smaller-cards)).
+different widths do not agree. The faster prompt reading of 0.2.0 is used by default on cards with 30,000 MiB or more (the RTX
+5090) and, since 0.3.4, on cards of 22,000 MiB or more when `--max-ctx` leaves room for it; the other cards read prompts exactly as 0.1.7
+did ([below](#prompt-reading-smaller-cards)).
 Results from these cards are welcome (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 AMD GPUs, Macs, cards with less than 16 GB and cards older than the RTX 30 series are not supported. On Linux the engine can be built from source (a community contribution, [#3](https://github.com/yasakani-dev/yasakani/pull/3), checked on
 WSL2 / Ubuntu 24.04 with an RTX 5090); a prebuilt Linux release with a launcher is one of the campaign's goals. Testing and tuning on the 24 GB and 16 GB RTX cards first, then AMD and Mac - that is what the
@@ -141,13 +142,19 @@ prose is not faster: the gain is on answers that copy the input. Up to 0.1.6 the
   `yasakani selfcheck` fails: please report it in GitHub Issues. On RTX 30 / 40 cards a width (32, 48 or 64 tokens) is then used only if
   its copy steps take at most 0.8 × width / 16 times a 16-token step on this card (32: 1.60, 48: 2.40, 64: 3.20), measured while the GPU
   is idle. RTX 50 cards start with every width, as in 0.1.6, and the check leaves out a width only when every round is over that limit.
-  On the RTX 5090 the check kept every width and took 21.8 to 22.9 seconds (0.1.7 test build, November 17, 2026); it takes longer on
+  Since 0.3.4 the limit on RTX 50 cards is 0.9 × width / 16 (32: 1.80, 48: 2.70, 64: 3.60): on an
+  RTX 5060 Ti the old limit closed all three widths, although with every width open the three edit tasks ran 1.23 to 1.24 times as fast
+  with the same output ([#31](https://github.com/yasakani-dev/yasakani/issues/31); the reporter's numbers). With the times of that
+  report all three widths stay open under the new limit. Under it our RTX 5090 still opened all three widths (its copy steps took 1.37, 1.81
+  and 2.05 times a 16-token step), and the three edit tasks gave the same token ids with wide passes off and on. On the RTX 5090 the check kept every width and took 21.8 to 22.9 seconds (0.1.7 test build, November 17, 2026); it takes longer on
   other cards.
 * **When it cannot check.** When another program uses the GPU, when nvidia-smi does not answer, or when the context is shorter than 4,224
   tokens, nothing is measured. `serve --no-warmup` uses a kept result only. Without a measured or kept result, RTX 50 cards use every
   width and RTX 30 / 40 cards none.
 * **Memory.** On RTX 30 / 40 cards, when less than 128 MiB of GPU memory is free after the graphs of the check are built, no width is
-  used. A shorter `--max-ctx` frees memory.
+  used. A shorter `--max-ctx` frees memory. The rule is checked once, at start; when it closes the widths, the start line says so. In
+  one report (RTX 3090 Ti, max-quality model, desktop about 1.1 GB) 153 MiB were free after the graphs
+  ([#24](https://github.com/yasakani-dev/yasakani/issues/24); the reporter's number).
 * **How often it checks.** The result is kept per GPU, driver, engine library, package and model (`wide_check.json` in
   `%LOCALAPPDATA%\yasakani`). After an update the check runs once more, because the engine library and the package change. It also runs
   again after 30 days, with `--wide-recheck`, or when during generation the engine went back from wide passes in at least 10 of every 100
@@ -235,7 +242,7 @@ fastest model and about 21.2 GiB for the quality model (about 14.3 GiB and 16.4 
 
 On a GPU with less than 32 GB, the context is chosen from the free GPU memory each time the model starts (at most 262,144 tokens;
 `--max-ctx` sets it yourself). On 16 GB cards only the fastest model fits. The max-quality model used 25,977 MiB after loading on the RTX 5090
-(quality model: 22,795 MiB); on a 24 GB card the package would choose a context of 163,840 tokens when the desktop uses 500 MiB (196,608 with nothing else on the GPU; a calculation, not checked on such a card). The rule is in
+(quality model: 22,795 MiB); on a 24 GB card the package would choose a context of 163,840 tokens when the desktop uses 500 MiB (196,608 with nothing else on the GPU; a calculation, not checked by us on such a card). A user ran it on an RTX 3090 Ti (Windows 11, 0.3.2) with the desktop using about 1.1 GB: the package chose 147,456 tokens, the wide-pass check was bit for bit at 463 positions, the self-check passed, and it generated at 0.95 times the speed of the quality model ([#24](https://github.com/yasakani-dev/yasakani/issues/24); the reporter's numbers). If the start-up line of the wide copy passes shows little free memory (that report: 153 MiB with the max-quality model on a 24 GB card), a `--max-ctx` one step shorter (16,384 tokens) leaves about 350 MiB more. The rule is in
 [python/README.md](../python/README.md#gpus-other-than-the-rtx-5090).
 
 ## It is much slower than the tables
@@ -244,12 +251,20 @@ The tables were measured on an RTX 5090; other GPUs are slower, and we have not 
 becomes several times slower. In that case a warning that the GPU memory is almost full is printed at start. Close the other programs, or
 lower `--max-ctx`. The speed also depends on what you ask (see "Will I see the same speed?" above).
 
-A monitor on the same GPU can also cost a lot. In one report ([#18](https://github.com/yasakani-dev/yasakani/issues/18)), an RTX 5070 Ti
-that also drove two monitors (one of them at 240 Hz) generated 1.5 to 2.1 times as fast once the monitors were moved to the CPU's
-integrated graphics: about half the speed of the RTX 5090, as its memory bandwidth suggests. The tokens per pass were the same; with
-the monitors on the card each pass took longer. If your PC has integrated graphics, connecting the monitors to the motherboard leaves
-the GPU to YASAKANI (`nvidia-smi --query-gpu=display_active --format=csv` then says `Disabled`). The cause is not known yet, and we
-have not measured it on other cards.
+Other programs that draw on the same GPU (games, videos, animated pages) also take time from the engine; the monitors themselves cost
+little. The reporter of [#18](https://github.com/yasakani-dev/yasakani/issues/18) measured this on an RTX 5070 Ti (0.1.5, Windows 11,
+both monitors on the card at 1440p 180 Hz and 1080p 240 Hz, hardware-accelerated GPU scheduling off, other programs closed, median of
+5 runs; [the table](https://github.com/yasakani-dev/yasakani/issues/18#issuecomment-6934692757)):
+
+| On the screen | One pass, look-ahead off | Prose / thinking / code / CSV to JSON (tok/s) |
+|---|---|---|
+| Idle desktop | 14.16 ms | 146 / 157 / 221 / 632 |
+| A video in Chrome, full screen | 14.63 ms | 141 / 152 / 217 / 623 |
+| A WebGL page redrawn every frame, maximized | 18.68 ms | 110 / 118 / 165 / 473 |
+
+With the monitors on the CPU's integrated graphics a pass took 14.23 ms. These are the reporter's numbers; we have not measured this
+on other cards. By the reporter's later measurement, the 1.5 to 2.1 times of the first report probably came from such programs, not
+from the monitors. If a program keeps the card busy, close it, or, on a PC with integrated graphics, let it draw there.
 
 ## It only thinks and never answers
 
@@ -317,12 +332,16 @@ At start one line says which prompt reading is used and why, for example:
 
 ```
 prompt reading: new (setting auto: 32607 MiB card)
-prompt reading: as in 0.1.7 (setting auto: 24564 MiB card, new only from 30000 MiB; --prefill new or YASAKANI_PREFILL=new to try it)
+prompt reading: new (setting auto: 24564 MiB card, 4202 MiB free beside --max-ctx 131072; --prefill old for the 0.1.7 one)
+prompt reading: as in 0.1.7 (setting auto: 24564 MiB card and no --max-ctx; --prefill new or YASAKANI_PREFILL=new to try it)
 ```
 
 `--prefill` (on `chat`, `serve`, `bench` and `selfcheck`) or the environment variable `YASAKANI_PREFILL` chooses it:
 
-* `auto` (the default): the new reading on a card with 30,000 MiB or more, else the reading of 0.1.7. A card whose memory nvidia-smi
+* `auto` (the default): the new reading on a card with 30,000 MiB or more, else the reading of 0.1.7. Since 0.3.4 also on a card of
+  22,000 to 30,000 MiB when the context is given with `--max-ctx` and at least 1,800 MiB of GPU memory stays free beside it for the work area
+  (from a user's measurement in
+  [#24](https://github.com/yasakani-dev/yasakani/issues/24); we have not run it on a real 24 GB card). A card whose memory nvidia-smi
   cannot tell also reads as 0.1.7 did.
 * `new`: the new reading on any card. Under 30,000 MiB this is experimental ([below](#prompt-reading-smaller-cards)).
 * `old`: the reading of 0.1.7 on any card, including its passes of 64 tokens. On the RTX 5090, `--prefill old` gave the tokens, the
@@ -335,11 +354,15 @@ and `yasakani report` includes the line.
 
 ### I have an RTX 30 / 40 card or a 16 GB card. What changes for me?
 
-By default nothing changes in prompt reading: cards with less than 30,000 MiB read prompts exactly as 0.1.7 did. We checked this on the
+By default nothing changes in prompt reading: cards with less than 30,000 MiB read prompts exactly as 0.1.7 did (since 0.3.4 except a
+card of 22,000 MiB or more with `--max-ctx` given, [above](#prompt-reading-020)). We checked this on the
 RTX 5090 shown to the package as a 24,564 MiB card (quality model, context 262,144) and as a 16,384 MiB card (fastest model, context
 98,304) with a 32,768-token prompt (one run each): the peak GPU memory was within 9 MiB of 0.1.7, the output was the same, and the prompt
 took 9.04 s (24,564 MiB) and 9.05 s (16,384 MiB) against 9.00 s and 9.02 s with 0.1.7. An earlier run also found the same tokens, state
-and number of saved states. The
+and number of saved states. For the rule of 0.3.4 we set the RTX 5090 up as a 24,564 MiB card again (quality model): with
+`--max-ctx 131072` `auto` took the new reading, `selfcheck` gave the same lines as with `--prefill old`, and a prompt of 32,000 tokens
+was read in 7.2 s against 8.5 s with the same 16 output ids (one run each); with `--max-ctx 262144` `auto` stayed with the reading of
+0.1.7. The
 [edit copy](#edit-copy-020) is used on every card; we measured it on the RTX 5090 only.
 
 `--prefill new` (or `YASAKANI_PREFILL=new`) on such a card is experimental:
@@ -357,7 +380,11 @@ and number of saved states. The
   * As a 16 GB card (16,384 MiB, fastest model) keeping the room would have cost more than half of the context, so the context stayed
     98,304. The engine found no room and read the prompt without the work area. So at the automatic context a 16 GB card does not use the new
     reading; a smaller `--max-ctx` leaves room for it (not measured).
-* It has never run on a real RTX 30 or 40 card, or on a real 16 GB or 24 GB card. How much free memory the driver reports differs between
+* We have not run it on a real RTX 30 or 40 card, or on a real 16 GB or 24 GB card. A user ran it on an RTX 3090 Ti (24 GB, Windows 11,
+  0.3.2, quality model, `--max-ctx` given): 1.39 to 1.40 times as fast at 8,224 and 32,797 tokens, the same self-check numbers; the work
+  area was made at contexts up to 131,072, and at 262,144 the engine printed the fallback line
+  ([#24](https://github.com/yasakani-dev/yasakani/issues/24); the reporter's numbers). The context the package chooses itself with
+  `--prefill new` has not been tried on a real card. How much free memory the driver reports differs between
   PCs, so we cannot say that it works on a given card. Results go in [GitHub issues](https://github.com/yasakani-dev/yasakani/issues).
 
 <a name="prompt-reading-memory"></a>
@@ -532,7 +559,10 @@ and start it by hand: [README](../README.md#inkling-2-mini).
 We ran it on one RTX 5090 (32 GB) under Windows 11 only. With the default context of 32,768 tokens the engine allocated 22.7 GB of GPU
 memory (2.15 GB of it the key/value cache), and 23.8 GB with the drafter loaded (the default). The GPU as a whole had 25.0 GB in use
 without and 27.2 GB with the drafter (as the package reports it at the start); with the converted weights of `--scheme quality` and their
-4-bit drafter the engine allocated 18.9 / 19.5 GB, and the GPU had 21.2 / 21.9 GB in use. `--draft off` does not load the drafter. Cards under 24 GB cannot hold it. We have not run it on a 24 GB card (RTX 3090, 3090 Ti or 4090); with the desktop also on that card
+4-bit drafter the engine allocated 18.9 / 19.5 GB, and the GPU had 21.2 / 21.9 GB in use. `--draft off` does not load the drafter. Cards under 24 GB cannot hold it. We have not run it on a 24 GB card (RTX 3090, 3090 Ti or 4090). Users ran 0.3.1 on an RTX 3090
+and 0.3.3 on an RTX 3090 Ti, both under Windows 11: `selfcheck` passed, and on the RTX 3090 Ti a 131,072-token prompt fit with the fast
+path ([#29](https://github.com/yasakani-dev/yasakani/issues/29); the reporters' numbers are in the
+[README](../README.md#inkling-2-mini-033)). With the desktop also on that card
 there is less room, and a smaller `--max-ctx` needs less memory. Since 0.3.2, without `--max-ctx` the package takes a shorter context when
 32,768 tokens do not fit the free GPU memory, and stops before loading when not even 8,192 fit; a line at start says which. On Linux it runs on the engine contributed in
 [#28](https://github.com/yasakani-dev/yasakani/pull/28), built from source ([BUILDING.md](../BUILDING.md#linux-inkling-2)); we ran that one on one
@@ -540,7 +570,7 @@ RTX 5090 under WSL2 only.
 
 ### How fast is it, and under which conditions?
 
-Since 0.3.3 the fast path is on by default on RTX 50 cards. On one RTX 5090 (Windows 11, November 23, 2026, the `--scheme quality`
+The fast path is on by default on RTX 50 cards since 0.3.3 and on RTX 30 and 40 cards since 0.3.4. On one RTX 5090 (Windows 11, November 23, 2026, the `--scheme quality`
 folder, one request at a time, greedy, a text of 53 public source files without repetition) it read prompts of 4,096, 32,768 and 131,072
 tokens at 1,826, 1,755 and 1,377 tokens/s (0.3.2: 900, 633 and 314), and generated 268, 351, 183 and 132 tokens/s with `--draft auto`
 after 256, 4,096, 32,768 and 131,072 tokens (0.3.2: 230, 257, 88 and 58). The conditions, the numbers without the drafter and the
@@ -577,9 +607,13 @@ with the published model, not accuracy on tasks; we have not measured task accur
 
 The way the engine computes, not the model files. It keeps the key/value cache of the 8 layer visits that attend to the whole context in
 8 bits (MXFP8), splits long attention into parts, reads prompts with a new attention and, on RTX 50 cards, computes the experts of a
-prompt on the 4-bit (NVFP4) tensor cores. It is on by default on RTX 50 cards and off on other cards; `--fast on|off|auto` changes
-that. With it off the engine computes as 0.3.2 did. On an RTX 30 or 40 card it runs without the 4-bit part; we have not run it on such a
-card.
+prompt on the 4-bit (NVFP4) tensor cores. Since 0.3.4 the default `--fast auto` turns it on for RTX 30, 40 and 50 cards (compute
+capability 8.6, 8.9 and 12.0; 0.3.3: RTX 50 only) and off on other GPUs; on an RTX 30 or 40 card it runs without the 4-bit part. We made
+this change after a user ran 0.3.3 on an RTX 3090 Ti ([#29](https://github.com/yasakani-dev/yasakani/issues/29)): `selfcheck` passed
+with the fast path on and off, and generation and prompt reading were faster with it on (the reporter's numbers are in the
+[README](../README.md#inkling-2-mini-033)). We have run it on the RTX 5090 only, and no RTX 40 card has been reported. On RTX 30 and 40
+cards the default output therefore changes with 0.3.4 (below); `--fast off` (or `YASAKANI_INK2_FAST=off`) computes as before, that is
+as 0.3.2 did. `selfcheck` compares the standard path unless `--fast` is given.
 
 The output is close to that of the standard path, but not the same. At 128 positions after 4,096 and 32,768 tokens of one text, the most
 likely next token was the same at 126 and 123 positions (mean KL 0.0035 and 0.0059); on another text at 128 of 128 after 32,768 tokens.
@@ -659,7 +693,7 @@ when you type it, and the quickstart's check for a new version, each send one re
 
 ## How does the update work?
 
-Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 to 0.3.2 it offers 0.3.3. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.3.zip`) by hand once and run `START.cmd`; the models are kept.
+Since 0.1.7, the quickstart (`START.cmd`) can update itself; from 0.1.7 to 0.3.3 it offers 0.3.4. From v0.1.6 or older, download the quickstart ZIP of the current release (`yasakani-quickstart-0.3.4.zip`) by hand once and run `START.cmd`; the models are kept.
 
 * **The check.** At most once a day, before it shows the menu or before it opens the browser page directly (from the second run on,
   `START.cmd` does that without a menu), the quickstart first prints that it asks github.com, then sends one HTTPS request:

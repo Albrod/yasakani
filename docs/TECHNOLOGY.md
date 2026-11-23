@@ -250,7 +250,11 @@ to 0.1.3 one pass confirmed at most 16 tokens. 0.1.4 lets a copy go further:
   and model) reads about 2,400 tokens in passes of 17, 31, 32, 33, 47, 48, 63 and 64 rows and again in passes of 16, and requires the
   same most likely ids and NLL bit for bit; then it times copy cycles (the pass, the commit of all rows, the drafter reading them) of 16
   and of W rows in turn at a 4K context, and opens a width W when a cycle takes at most 0.8 × W / 16 times a 16-row one. On 12.x every
-  width stays open unless every round of the check is over that limit. The measured cycle times are also where the time-based back-off
+  width stays open unless every round of the check is over that limit. Since 0.3.4 the limit on 12.x is 0.9 × W / 16 (a width at that limit,
+  with every row accepted, still gives 1.11 times the tokens per second of 16 rows; the limits are 1.80, 2.70 and 3.60 for 32, 48 and 64 rows, `NATIVE_MARGIN` in
+  `widecheck.py`; RTX 30 / 40 keep 0.8; on our RTX 5090 the three widths stayed open at 1.37, 1.81 and 2.05, and the three edit tasks gave
+  the same ids with wide passes off and on): the
+  limit of 0.8 closed all three widths on an RTX 5060 Ti, where they paid ([#31](https://github.com/yasakani-dev/yasakani/issues/31)). The measured cycle times are also where the time-based back-off
   starts (they were the RTX 5090's on every GPU before). When the correctness check finds a difference, no width is used, passes of 17
   to 64 rows (such as the ends of prompt reads) go back to the 16-row sums also on 12.x, and `yasakani selfcheck` fails. The check reads
   its text in pieces of at most 1,023 tokens, so that the engine does not set up the work area of long prompt reads (about 580 MiB with
@@ -472,14 +476,18 @@ and `src/specx.cpp`.
   the other changes of 0.2.0 stay on, and the output is the same.
   The context is not made shorter for it.
 * **Which cards.** By default (`--prefill auto`) the package uses the new reading only on cards with 30,000 MiB or more, the size of the
-  RTX 5090 we measured. On smaller cards, and when nvidia-smi does not tell the memory, it passes the settings of 0.1.7 (engine setting
+  RTX 5090 we measured. Since 0.3.4 it also uses it on a card of 22,000 to 30,000 MiB when the context is given with `--max-ctx` and
+  at least 1,800 MiB of memory stays free beside it for the work area (`prefill_choice` in `python/yasakani/gpu.py`; the start-up line names the card, the free memory and the context); this
+  follows a user's measurement on an RTX 3090 Ti ([#24](https://github.com/yasakani-dev/yasakani/issues/24)) and has not been run by us
+  on a real 24 GB card. On other smaller cards, and when nvidia-smi does not tell the memory, it passes the settings of 0.1.7 (engine setting
   `YSKN_Q35_PF_V2=0`, passes of up to 1,024 rows, 4,096 rows of work area), and prompts are read exactly as in 0.1.7. The context on
   those cards is chosen from the free memory with an overhead measured with the reading of 0.1.7 (`python/yasakani/gpu.py`), and the
   new reading needs more memory, which has not been tried on them. `--prefill old` gives the reading of 0.1.7, with the passes of 64
   rows of 0.1.7, on any card. `--prefill new` gives the new reading on any card; under 30,000 MiB with the sizes of 0.1.7 (a work area
   of about 579 MiB) and with 1,800 MiB more left free when the package chooses the context (unless that would cost more than half of
-  the context). That is experimental and has not been run on
-  a real card under 30,000 MiB. On the RTX 5090 set up as a 24 GB card (shown to the package as 24,564 MiB, with another process
+  the context). That is experimental; we have not run it on a real card under 30,000 MiB. A user measured it on an RTX 3090 Ti (24 GB,
+  `--max-ctx` given): 1.39 to 1.40 times as fast, the work area made up to a context of 131,072, not at 262,144
+  ([#24](https://github.com/yasakani-dev/yasakani/issues/24); the reporter's numbers). On the RTX 5090 set up as a 24 GB card (shown to the package as 24,564 MiB, with another process
   holding the rest of the GPU memory) the engine found room and used the new reading; set up as a 16 GB card it found no room at the
   context the package chose and read prompts without the work area. One line at start says which reading is used and why.
 
@@ -504,15 +512,18 @@ and `src/specx.cpp`.
 * The converter ([`tools/convert/`](../tools/convert/)) knows the layers of Qwen3.8-27B only; another model needs changes to it and to
   the engine.
 * Wide copy passes (5.4) are used on RTX 30, 40 and 50 cards since 0.1.7, after a check on the card, and were measured by us on the RTX 5090
-  only. We have not run their machine code for 8.6 / 8.9 on an RTX 30 / 40 card. Users of the 0.1.7 test build reported an RTX 4090 and an
-  RTX 5060 Ti ([#24](https://github.com/yasakani-dev/yasakani/issues/24)); no RTX 30 card has been reported yet.
+  only. We have not run their machine code for 8.6 / 8.9 on an RTX 30 / 40 card. Users reported an RTX 4090, an RTX 5060 Ti, an RTX 3090
+  and an RTX 3090 Ti ([#24](https://github.com/yasakani-dev/yasakani/issues/24)) and another RTX 5060 Ti
+  ([#31](https://github.com/yasakani-dev/yasakani/issues/31)).
   On cards other than the RTX 5090, `yasakani selfcheck` compares passes of 64 rows with passes of 16 where wide passes are open, and fails when the check at start found that they compute differently ([python/README.md](../python/README.md#the-self-check)). Their answers were checked
   against single passes up to a context of 40,000 tokens, and in generations after a prompt of about 177,000 tokens. Their speed after a long
   prompt (more than about 40,000 tokens) has not been measured. A stop string is acted on after a pass, so up to 64 tokens (16 up to 0.1.3)
   can be generated past it; the text is cut at the stop string, but those tokens count in `usage.completion_tokens`.
 * The saved prompt states take up to about 1.5 GiB of pinned host memory.
-* The new prompt reading of 0.2.0 (chapter 8) is the default only on cards with 30,000 MiB or more. On smaller cards the default is the
-  reading of 0.1.7. `--prefill new` on a smaller card is experimental and has not been run on a real card under 30,000 MiB. The new
+* The new prompt reading of 0.2.0 (chapter 8) is the default on cards with 30,000 MiB or more (since 0.3.4 also on cards of 22,000 MiB
+  or more with `--max-ctx` given, chapter 8). On smaller cards the default is the reading of 0.1.7. `--prefill new`
+  on a smaller card is experimental; we have not run it on a real card under 30,000 MiB, and a user's RTX 3090 Ti measurement is in
+  [#24](https://github.com/yasakani-dev/yasakani/issues/24) (the reporter's numbers). The new
   reading keeps a work area in GPU memory from the first long prompt on. When `serve --parallel N` chooses its contexts itself, they
   take the free GPU memory, and the engine may find no room and read prompts without the work area; this has not been measured.
 * The edit copy (5.5) and the new prompt reading were measured on the RTX 5090 only.
