@@ -42,6 +42,16 @@ GPU_IMAGE_TOKENS = 2048
 MEMORY_CACHE_BYTES = 512 * 1024 * 1024
 LOCAL_FILES_HINT = "--vision-allow-local-files"
 PROJECTOR_DIM = 5120                # values per image token that Qwen3.8-27B takes (its hidden size)
+# The Pillow readers an image may be opened with.  Without this list Pillow tries every reader it has, and some of them hand the
+# bytes of a request to another program: EPS to Ghostscript, WMF and EMF to the operating system's renderer.
+STILL_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF")
+
+
+def still_formats(Image) -> tuple:
+    """STILL_FORMATS that this Pillow can read (a build without WebP has no such reader, and Image.open raises KeyError for a
+    name it does not know)."""
+    Image.init()
+    return tuple(f for f in STILL_FORMATS if f in Image.OPEN)
 
 
 def physical_cores() -> int:
@@ -223,7 +233,7 @@ def read_image(source, *, allow_local_files=False):
     try:
         with warnings.catch_warnings():                      # Pillow warns above 89 million pixels: refused below anyway
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-            image = Image.open(io.BytesIO(raw))
+            image = Image.open(io.BytesIO(raw), formats=still_formats(Image))    # raster formats only: never EPS or WMF
         with image:
             if image.width * image.height > MAX_PIXELS:
                 raise ValueError("image exceeds 40 million pixels")
@@ -238,7 +248,7 @@ def read_image(source, *, allow_local_files=False):
     except Image.DecompressionBombError:                     # Pillow's own size limit, checked inside Image.open
         raise ValueError("image exceeds 40 million pixels") from None
     except Image.UnidentifiedImageError:
-        raise ValueError("the data is not an image format Pillow can read") from None
+        raise ValueError("the data is not in an image format this server reads (%s)" % ", ".join(STILL_FORMATS)) from None
     except Exception as ex:                                  # noqa: BLE001 - truncated or damaged image data
         raise ValueError("the image cannot be decoded (%s)" % (str(ex)[:120] or type(ex).__name__)) from None
 

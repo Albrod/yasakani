@@ -329,6 +329,43 @@ class ImageFileTests(unittest.TestCase):
                 read_image("data:image/png;base64," + base64.b64encode(raw).decode())
             self.assertNotIn("BytesIO", str(cm.exception))
 
+    def test_only_raster_formats_are_opened(self):
+        """EPS would hand the request's bytes to Ghostscript and WMF to the operating system's renderer: both are refused unread,
+        whatever the data URI calls them; the raster formats still open."""
+        from PIL import EpsImagePlugin, Image
+        eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n%%EndComments\nshowpage\n%%EOF\n"
+        hdr = struct.pack("<LHhhhhHL", 0x9AC6CDD7, 0, 0, 0, 200, 200, 1440, 0)           # a placeable metafile header
+        cs = 0
+        for i in range(0, 20, 2):
+            cs ^= struct.unpack("<H", hdr[i:i + 2])[0]
+        wmf = hdr + struct.pack("<H", cs) + struct.pack("<HHHLHLH", 1, 9, 0x300, 12, 0, 3, 0) + struct.pack("<LH", 3, 0)
+        self.assertEqual(Image.open(io.BytesIO(eps)).format, "EPS")       # Pillow itself would take it
+        called = []
+        with mock.patch.object(EpsImagePlugin, "Ghostscript", lambda *a, **k: called.append(a)):
+            for name, raw in (("eps", eps), ("wmf", wmf)):
+                for kind in ("png", "jpeg", "x-eps"):
+                    with self.subTest(name=name, kind=kind), self.assertRaises(ValueError) as cm:
+                        read_image("data:image/%s;base64,%s" % (kind, base64.b64encode(raw).decode()))
+                    self.assertIn("image format", str(cm.exception))
+        self.assertEqual(called, [])                                      # nothing reached Ghostscript
+        for fmt in ("PNG", "JPEG", "GIF", "BMP", "TIFF"):
+            buf = io.BytesIO()
+            Image.new("RGB", (6, 4), (10, 200, 30)).save(buf, format=fmt)
+            self.assertEqual(read_image("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()).size, (6, 4), fmt)
+
+    def test_a_pillow_without_a_reader(self):
+        """A Pillow build without WebP has no "WEBP" reader, and Image.open raises KeyError for an unknown name: the list given
+        to it holds only the readers this Pillow has."""
+        from PIL import Image
+        Image.init()
+        without = {k: v for k, v in Image.OPEN.items() if k != "WEBP"}
+        buf = io.BytesIO()
+        Image.new("RGB", (5, 3), (1, 2, 3)).save(buf, format="GIF")       # GIF comes after WEBP in the list
+        with mock.patch.object(Image, "OPEN", without):
+            self.assertNotIn("WEBP", vision.still_formats(Image))
+            self.assertEqual(read_image("data:image/gif;base64," + base64.b64encode(buf.getvalue()).decode()).size, (5, 3))
+        self.assertEqual(vision.still_formats(Image)[:2], ("PNG", "JPEG"))
+
     def test_local_files_only_inside_the_folder(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as d:
