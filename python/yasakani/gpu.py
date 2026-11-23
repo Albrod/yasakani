@@ -754,6 +754,7 @@ INK2_DRAFT_BYTES_PER_POSITION = 10240     # with the drafter loaded: 87,296 B pe
 INK2_ENGINE_ROLLBACK = 64                 # the engine's own rollback positions, part of the overhead below
 INK2_ROLLBACK_MIB_PER_POSITION = 1.8      # 512 rollback positions took 801 MiB more than the engine's own 64 (1.79 MiB each)
 INK2_OVERHEAD_MIB = 1800                  # the rest above the files, the cache and the rollback rings: 1,511 to 1,732 MiB measured
+INK2_FAST_OVERHEAD_MIB = 500              # the fast path (0.3.3) on top: passes of 256 rows, BF16 copies, partials (384 to 470 MiB)
 INK2_CONTEXT_STEP = 4096                  # a context chosen from the free memory is a multiple of this
 INK2_MIN_CONTEXT = 8192                   # below this the model is not loaded (give --max-ctx to try a smaller one)
 
@@ -763,11 +764,12 @@ def ink2_rollback_mib(rollback: int) -> float:
     return max(0, int(rollback) - INK2_ENGINE_ROLLBACK) * INK2_ROLLBACK_MIB_PER_POSITION if rollback else 0.0
 
 
-def ink2_context(free_mib: float, files_bytes: int, bytes_per_position: int, default_ctx: int, rollback: int) -> int:
+def ink2_context(free_mib: float, files_bytes: int, bytes_per_position: int, default_ctx: int, rollback: int, fast: bool = False) -> int:
     """The context of an Inkling-2 folder for ``free_mib`` MiB of free GPU memory: ``default_ctx`` (the folder's) when it fits, else
     the longest multiple of INK2_CONTEXT_STEP that fits, 0 when not even INK2_MIN_CONTEXT fits.  ``files_bytes`` = the weights and,
-    when it is loaded, the drafter; ``bytes_per_position`` = the engine's per position of context (ink2_bytes_per_position)."""
-    room = free_mib - files_bytes / MIB - INK2_OVERHEAD_MIB - ink2_rollback_mib(rollback) - MARGIN_MIB
+    when it is loaded, the drafter; ``bytes_per_position`` = the engine's per position of context (ink2_bytes_per_position);
+    ``fast``: the fast path of 0.3.3 (INK2_FAST_OVERHEAD_MIB more)."""
+    room = free_mib - files_bytes / MIB - ink2_overhead_mib(fast) - ink2_rollback_mib(rollback) - MARGIN_MIB
     n = max(0, int(room * MIB // bytes_per_position))
     if n >= default_ctx:
         return int(default_ctx)
@@ -775,11 +777,18 @@ def ink2_context(free_mib: float, files_bytes: int, bytes_per_position: int, def
     return n if n >= INK2_MIN_CONTEXT else 0
 
 
-def ink2_bytes_per_position(cache_bytes: int, drafter: bool) -> int:
-    """What the engine takes per position of context: the cache of config.json (``cache_bytes``) and the measured rest."""
-    return int(cache_bytes) + INK2_EXTRA_BYTES_PER_POSITION + (INK2_DRAFT_BYTES_PER_POSITION if drafter else 0)
+def ink2_overhead_mib(fast: bool = False) -> int:
+    return INK2_OVERHEAD_MIB + (INK2_FAST_OVERHEAD_MIB if fast else 0)
 
 
-def ink2_need_mib(ctx: int, files_bytes: int, bytes_per_position: int, rollback: int) -> int:
+def ink2_bytes_per_position(cache_bytes: int, drafter: bool, fast: bool = False) -> int:
+    """What the engine takes per position of context: the cache of config.json (``cache_bytes``) and the measured rest.  With the
+    fast path the attention scores of the full-attention visits need no buffer per position (their cache is 8-bit: give
+    ``cache_bytes`` of inkling2.bytes_per_position(config, mxfp8=True))."""
+    extra = 0 if fast else INK2_EXTRA_BYTES_PER_POSITION
+    return int(cache_bytes) + extra + (INK2_DRAFT_BYTES_PER_POSITION if drafter else 0)
+
+
+def ink2_need_mib(ctx: int, files_bytes: int, bytes_per_position: int, rollback: int, fast: bool = False) -> int:
     """The free GPU memory a context of ``ctx`` positions needs by the rule of ink2_context (for the message when it does not fit)."""
-    return int(files_bytes / MIB + INK2_OVERHEAD_MIB + ink2_rollback_mib(rollback) + MARGIN_MIB + ctx * bytes_per_position / MIB) + 1
+    return int(files_bytes / MIB + ink2_overhead_mib(fast) + ink2_rollback_mib(rollback) + MARGIN_MIB + ctx * bytes_per_position / MIB) + 1

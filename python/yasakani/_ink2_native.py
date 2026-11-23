@@ -195,6 +195,8 @@ def open_dll(path):
     lib.ink2_finalize.argtypes = [vp]
     lib.ink2_reset.argtypes = [vp]
     lib.ink2_step.argtypes = [vp, ci, vp]
+    if hasattr(lib, "ink2_step_top1"):
+        lib.ink2_step_top1.argtypes = [vp, ci, ctypes.POINTER(ci)]
     lib.ink2_feed.argtypes = [vp, ci]
     lib.ink2_set_option.argtypes = [vp, ctypes.c_char_p, ci]
     lib.ink2_timing.argtypes = [vp, ctypes.POINTER(ctypes.c_double)]
@@ -203,6 +205,8 @@ def open_dll(path):
     lib.ink2_get.argtypes = [vp, ci, ci, vp, cll]
     lib.ink2_memory_used.argtypes = [vp]
     lib.ink2_memory_used.restype = cll
+    if hasattr(lib, "ink2_kv_memory"):
+        lib.ink2_kv_memory.argtypes = [vp, ctypes.POINTER(cll), ctypes.POINTER(cll)]
     lib.ink2_device_memory.argtypes = [vp, ctypes.POINTER(cll), ctypes.POINTER(cll)]
     lib.ink2_profile.argtypes = [vp, ci, ctypes.POINTER(ctypes.c_double), ci]
     lib.ink2_kernel_name.restype = ctypes.c_char_p
@@ -232,7 +236,18 @@ def open_dll(path):
         lib.ink2_packed_dense.restype = ci
         lib.ink2_packed_dense.argtypes = [vp]
         lib.caps = int(lib.ink2_capabilities())
+    if hasattr(lib, "ink2_fast_path"):  # the fast kernels (0.3.3)
+        lib.ink2_fast_path.restype = ci
+        lib.ink2_fast_path.argtypes = [vp]
+    if hasattr(lib, "ink2_nvfp4_prompt"):  # the NVFP4 tensor-core prompt products (0.3.3)
+        lib.ink2_nvfp4_prompt.restype = ci
+        lib.ink2_nvfp4_prompt.argtypes = []
     return lib
+
+
+def nvfp4_prompt(lib):
+    """1 when the library has the NVFP4 tensor-core prompt products and the current CUDA device runs them (RTX 50), else 0."""
+    return int(lib.ink2_nvfp4_prompt()) if hasattr(lib, "ink2_nvfp4_prompt") else 0
 
 
 def capabilities(dll):
@@ -265,7 +280,8 @@ class Ink2Native:
 
     # -- loading -----------------------------------------------------------
     def load(self, model_dir, backend="host", max_positions=4096, dll=None, weights=None, log=None, max_rows=None,
-             rollback=None, chunk=None, dense_dir=None, dense_mode="packed", dense_only=None, checkpoint=None):
+             rollback=None, chunk=None, dense_dir=None, dense_mode="packed", dense_only=None, checkpoint=None,
+             kv_mxfp8=None, kv_hot=None, kv_split=None):
         """max_rows / rollback / chunk (DLL version 2): largest pass, positions truncate() can always drop,
         rows per pass of feed_many(); None = the defaults of the DLL.
         dense_dir: folder of packed dense matrices (ink2_pack_dense.py); every matrix listed in its
@@ -279,7 +295,10 @@ class Ink2Native:
         u8 [R, C/2], scale e4m3 [R, C/16], amax f32 [1], denominator f32 [1] (the engine's factor is
         amax / denominator in float32); mxfp8 weight e4m3 [R, C], scale u8 [R, C/32]. dense_mode "packed" sends
         them as stored (needs CAP_PACKED_DENSE); "decoded" sends the same values in bfloat16 (check of the
-        packed path)."""
+        packed path).
+        kv_mxfp8 / kv_hot / kv_split (INK2_CAP_KV): 1 = the keys and values of the full-attention visits as
+        MXFP8 with BF16 copies of the sinks and of the last kv_hot positions; kv_split = partitions of their
+        attention."""
         t0 = time.perf_counter()
         self.model_dir = model_dir
         self.backend = backend
@@ -313,11 +332,16 @@ class Ink2Native:
             raise RuntimeError("ink2_create: " + self.lib.ink2_last_error(None).decode("utf-8", "replace"))
         self.vocab, self.hidden_size = c.vocab, c.hidden
         self.abi = self.lib.abi
-        for name, value in (("max_rows", max_rows), ("rollback", rollback), ("chunk", chunk)):
-            if value is not None:
-                if self.abi < 2:
-                    raise RuntimeError("option %s needs a DLL of version 2" % name)
-                self.set_option(name, value)
+        try:
+            for name, value in (("max_rows", max_rows), ("rollback", rollback), ("chunk", chunk),
+                                ("kv_mxfp8", kv_mxfp8), ("kv_hot", kv_hot), ("kv_split", kv_split)):
+                if value is not None:
+                    if self.abi < 2:
+                        raise RuntimeError("option %s needs a DLL of version 2" % name)
+                    self.set_option(name, value)
+        except (RuntimeError, TypeError, ValueError):
+            self.close()
+            raise
 
         sent = [0, 0]
         dense = None
@@ -512,6 +536,14 @@ class Ink2Native:
         if self.abi < version:
             raise RuntimeError("%s needs a DLL of version %d (this one: %d)" % (what, version, self.abi))
 
+    def step_top1(self, token):
+        """A step whose logits stay on the device (option device_greedy): -> the arg-max id, the same as numpy.argmax."""
+        winner = ctypes.c_int()
+        self._check(self.lib.ink2_step_top1(self.h, int(token), ctypes.byref(winner)), "step_top1")
+        self.num_seen += 1
+        self.seen_ids.append(int(token))
+        return winner.value
+
     def feed_many(self, ids):
         """Prompt tokens whose predictions are not needed, in passes of several rows (same results as feed())."""
         self._need(2, "feed_many")
@@ -555,6 +587,10 @@ class Ink2Native:
 
     def position(self):
         return int(self.lib.ink2_position(self.h)) if self.abi >= 2 else self.num_seen
+
+    def fast_path(self):
+        """0 = general kernels, else the compute capability the fast kernels run on (None: a library without them)."""
+        return int(self.lib.ink2_fast_path(self.h)) if hasattr(self.lib, "ink2_fast_path") else None
 
     def set_option(self, name, value):
         """"graph": 1 = record the kernels of a step once and replay them with one call (cuda backend)."""
@@ -608,6 +644,14 @@ class Ink2Native:
         if self.lib.ink2_device_memory(self.h, ctypes.byref(free), ctypes.byref(total)) != 0:
             return None
         return free.value, total.value
+
+    def kv_memory(self):
+        """Allocated (cache, attention workspace) bytes, including scales and the precise tail."""
+        if not hasattr(self.lib, "ink2_kv_memory"):
+            raise RuntimeError("this engine library does not report KV allocations")
+        cache, work = ctypes.c_longlong(), ctypes.c_longlong()
+        self._check(self.lib.ink2_kv_memory(self.h, ctypes.byref(cache), ctypes.byref(work)), "kv_memory")
+        return cache.value, work.value
 
     def profile(self, enable):
         """Switches the per-part timers (device synchronised after every kernel) and returns the seconds so far."""

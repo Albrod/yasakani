@@ -30,6 +30,17 @@ auto (default) lets the engine use the drafter only while it makes generation fa
 A folder without the drafter, or an engine library without the drafter calls (or, for a converted drafter file, without the
 capability to multiply it as stored), generates without drafting; with ``on`` that is an error.
 
+The fast path (0.3.3; ``--fast auto | on | off`` / ``$YASAKANI_INK2_FAST``, see ``FAST_ENGINE_OPTIONS``): the keys and values of the
+full-attention layer visits in an 8-bit cache (MXFP8 with BF16 copies of the first 8 and the last 128 positions), prompt passes
+of 256 rows with tiled Flash-GQA attention on the tensor cores, the fast expert kernels, the Split-K attention for single steps
+and short passes (every row of a pass with logits gets the bits of a single step), the arg-max on the GPU for greedy steps, the
+Split-K attention of the drafter and its position-aware on / off rule, and on the RTX 50 series the expert products of prompt
+passes on the NVFP4 tensor cores.  auto (default) = on when the library runs the NVFP4 prompt products on this GPU (RTX 50),
+else off; on = the fast path with what the GPU supports; off = the engine as in 0.3.2 (the same results bit for bit).  The fast
+path gives other numbers than the 0.3.2 path (the 8-bit cache rounds the keys and values; other sum orders): greedy output can
+differ after some tokens.  ``--copy auto`` / ``$YASAKANI_INK2_COPY=auto`` (default off) adds copy decoding for edits
+(``_ink2_copyedit``): ids that repeat the context are proposed and checked in one pass; the output does not change.
+
 Tool calls (OpenAI ``tools``; the parsing draws on PR #28 by @audreyt): the template declares the tools in a block
 ``<|message_system|>tool_declare<|content_xml|>[JSON specs]<|end_message|>`` and writes a call of an earlier turn as
 ``<|message_model|>NAME<|content_invoke_tool_json|>{"name":NAME,"args":{...}}<|end_message|>``; a tool result is a
@@ -79,6 +90,13 @@ CONTEXT_MARGIN = 16                    # positions kept free at the end of the c
 DRAFT_MODES = ("auto", "on", "off")
 DRAFT_ENV, DRAFT_DEPTH_ENV = "YASAKANI_DRAFT", "YASAKANI_DRAFT_DEPTH"
 ROLLBACK_ENV = "YASAKANI_INK2_ROLLBACK"
+FAST_MODES = ("auto", "on", "off")
+FAST_ENV = "YASAKANI_INK2_FAST"
+# The fast path: (before the load) rows of the largest prompt pass and of a feed_many pass, the 8-bit cache and its BF16 copies
+# of the last positions; (after it) the engine options in this order.  "nvfp4_prefill" only where nvfp4_prompt() says so.
+FAST_LOAD_OPTIONS = (("max_rows", 256), ("chunk", 256), ("kv_mxfp8", 1), ("kv_hot", 128))
+FAST_ENGINE_OPTIONS = (("packed_prefill", 1), ("nvfp4_prefill", 4), ("flash_attn", 3), ("rel_t", 1), ("fast", 1),
+                       ("splitk_attn", 1), ("flash_min_rows", 9), ("splitk_max_rows", 8))
 # positions the engine can drop without reading the prompt again (its option "rollback"; the engine's own default is 64).  The next
 # request of a chat goes on from the ids already read only where it starts with them: a client that does not send the thinking of
 # the last reply back (most OpenAI clients) or that writes a tool call in another form drops the whole last reply, which the engine
@@ -94,6 +112,22 @@ def rollback_positions(environ=None) -> int:
         return max(0, int(v)) if v else DEFAULT_ROLLBACK
     except ValueError:
         return DEFAULT_ROLLBACK
+
+
+def fast_mode_of(value: Optional[str] = None, environ=None) -> str:
+    """auto | on | off: ``value`` (--fast), else ``$YASAKANI_INK2_FAST``, else auto."""
+    env = os.environ if environ is None else environ
+    v = value if value not in (None, "") else env.get(FAST_ENV, "")
+    v = (v or "auto").strip().lower()
+    if v not in FAST_MODES:
+        raise YasakaniError("%s / --fast must be one of %s, not %r" % (FAST_ENV, ", ".join(FAST_MODES), v))
+    return v
+
+
+def fast_expected(mode: str, compute_cap) -> bool:
+    """For planning the context before the load: does ``mode`` turn the fast path on for a GPU of ``compute_cap`` (nvidia-smi,
+    (major, minor) or None)?  auto: on the RTX 50 series (12, 0), the GPUs the NVFP4 prompt products run on."""
+    return mode == "on" or (mode == "auto" and compute_cap == (12, 0))
 
 
 MAX_DRAFT_DEPTH = 7
@@ -735,7 +769,10 @@ class Ink2Engine:
     """The engine library with the state of one sequence: the ids it has read since the last reset, so that a prompt that only
     extends them (the next turn of a chat) reads only the new ids."""
 
-    def __init__(self, pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, graph: bool = True, log=None):
+    def __init__(self, pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, graph: bool = True, log=None,
+                 fast: Optional[str] = None):
+        """``fast``: auto | on | off (None: $YASAKANI_INK2_FAST, else auto); ``self.fast`` says what the engine runs."""
+        fast_mode = fast_mode_of(fast)
         read_config(pack.root)                               # values the library does not take stop here, with a message
         self.dll = find_dll(dll)
         self.binding_path = find_binding(self.dll)
@@ -744,6 +781,15 @@ class Ink2Engine:
         self.build_info = lib.ink2_build_info().decode("utf-8", "replace")
         self.backend = backend_of(self.build_info)
         self.max_ctx = int(max_ctx)
+        nvfp4 = self.backend == "cuda" and bool(getattr(self.mod, "nvfp4_prompt", lambda _: 0)(lib))
+        self.fast = fast_mode == "on" or (fast_mode == "auto" and nvfp4)
+        self.fast_mode, self.fast_nvfp4 = fast_mode, self.fast and nvfp4
+        if self.fast and not (lib.caps & 16 and hasattr(lib, "ink2_fast_path")):
+            if fast_mode == "on":
+                raise YasakaniError("--fast on needs the engine library of 0.3.3 or later (%s)" % self.dll)
+            self.fast = self.fast_nvfp4 = False
+        if self.fast and self.backend != "cuda":           # the fast path runs on the GPU only (the CPU build of the tests: off)
+            self.fast = self.fast_nvfp4 = False
         self._cancel = threading.Event()
         t0 = time.perf_counter()
         self.weights_note = pack.weights_format
@@ -754,11 +800,12 @@ class Ink2Engine:
             else:
                 self.native = self.mod.Ink2Native().load(str(pack.root), backend=self.backend, max_positions=self.max_ctx,
                                                          dll=str(self.dll), weights=pack.weights.name, log=log,
-                                                         **self._rollback_kw())
+                                                         **self._load_options())
+            self.device_greedy = False
+            if self.fast:
+                self._fast_options(lib)
         except (RuntimeError, OSError, AssertionError, KeyError, ValueError) as ex:
-            if self._yskn is not None:
-                self._yskn.close()
-                self._yskn = None
+            self.close()
             raise YasakaniError("the Inkling-2 engine could not load the model: %s" % ex) from ex
         if graph and self.backend == "cuda":
             try:
@@ -773,6 +820,38 @@ class Ink2Engine:
         self.draft_mode = "off"
         self.draft_depth = 0
         self.draft_note = "drafter: not set up"
+        self.copying = False                                 # copy decoding on (set_copy)
+        self.copy_note = "copy: off"
+        if self.fast:
+            self.fast_note = "fast path: on (8-bit key/value cache%s)" % (
+                ", NVFP4 prompt products" if self.fast_nvfp4 else "; this GPU has no NVFP4 prompt products")
+        else:
+            self.fast_note = "fast path: off%s" % (" (--fast off)" if fast_mode == "off" else " (the NVFP4 prompt products of the RTX 50 "
+                                                   "series are not available here; --fast on turns it on)")
+
+    def _fast_options(self, lib) -> None:
+        """The engine options of the fast path after the load (FAST_ENGINE_OPTIONS), the arg-max on the GPU for greedy steps
+        (when the library has ink2_step_top1) and the drafter settings (``draft_fast``, read when the drafter is loaded)."""
+        nat = self.native
+        for name, value in FAST_ENGINE_OPTIONS:
+            if name == "nvfp4_prefill" and not self.fast_nvfp4:
+                continue
+            nat.set_option(name, value)
+        nat.flash_attn = dict(FAST_ENGINE_OPTIONS)["flash_attn"]   # copy decoding keeps its passes below the flash kernels
+        if self.backend == "cuda" and hasattr(lib, "ink2_step_top1"):
+            nat.set_option("device_greedy", 1)
+            nat.device_greedy = self.device_greedy = True
+        nat.draft_fast = True
+
+    def _load_options(self) -> dict:
+        kw = self._rollback_kw()
+        if self.fast:
+            parameters = inspect.signature(self.mod.Ink2Native.load).parameters
+            for name, value in FAST_LOAD_OPTIONS:
+                if name not in parameters:
+                    raise YasakaniError("the fast path needs the binding of 0.3.3 or later (%s)" % self.binding_path)
+                kw[name] = value
+        return kw
 
     def _rollback_kw(self) -> dict:
         """{"rollback": n} for the binding's load (DEFAULT_ROLLBACK, or $YASAKANI_INK2_ROLLBACK; 0 = the engine's default)."""
@@ -784,10 +863,10 @@ class Ink2Engine:
         if not 0 <= n <= self.max_ctx:
             raise YasakaniError("%s must be a number from 0 to %d, not %r" % (ROLLBACK_ENV, self.max_ctx, v))
         try:
-            takes = "rollback" in inspect.signature(self.mod.Ink2Native.load).parameters
+            parameters = inspect.signature(self.mod.Ink2Native.load).parameters
         except (TypeError, ValueError):
-            takes = False
-        return {"rollback": n} if n and takes else {}
+            parameters = {}
+        return {"rollback": n} if n and "rollback" in parameters else {}
 
     # -- drafter ------------------------------------------------------------------------------------------------------------------
     def set_drafter(self, pack: "Ink2Pack", mode: str = "auto", depth: Optional[int] = None) -> str:
@@ -851,6 +930,39 @@ class Ink2Engine:
         except RuntimeError:
             pass
         return " (converted, scheme %s, %d matrices multiplied as stored)" % (pack.drafter_entry.get("scheme") or "?", n)
+
+    # -- copy decoding ------------------------------------------------------------------------------------------------------
+    def set_copy(self, mode: Optional[str] = None, min_match=None) -> str:
+        """Copy decoding (--copy / $YASAKANI_INK2_COPY): "auto" proposes ids copied from the context (edits) through spec_step; the
+        output does not change.  -> the line for the start-up output."""
+        from . import _ink2_copyedit as ce
+        try:
+            mode, n = ce.mode_of(mode), ce.min_of(min_match)
+        except ValueError as ex:
+            raise YasakaniError(str(ex)) from ex
+        self.copying = False
+        if mode == "off":
+            ce.enable(self.native, "off")
+            self.copy_note = "copy: off"
+            return self.copy_note
+        try:
+            st = ce.enable(self.native, mode, n)
+        except (RuntimeError, AttributeError) as ex:
+            self.copy_note = "copy: not available with this engine library (%s)" % ex
+            return self.copy_note
+        self.copying = True
+        self.copy_note = "copy: auto (matches of %d ids or more, passes up to %d ids; used only while it pays)" % (n, max(st["ladder"]))
+        return self.copy_note
+
+    def copy_stats(self) -> dict:
+        if not self.copying:
+            return {}
+        from . import _ink2_copyedit as ce
+        return ce.stats(self.native)
+
+    def can_spec(self) -> bool:
+        """A pass of spec_step fits: drafting, or copy decoding with room for the anchor."""
+        return self.can_draft() or (self.copying and self.fed is not None and len(self.fed) + 1 <= self.max_ctx)
 
     def can_draft(self) -> bool:
         """A drafting pass fits: drafter loaded and room for the anchor and every proposed token in the context."""
@@ -916,7 +1028,7 @@ class Ink2Engine:
             packed = False
         view = Y.CheckpointView(yf, dense="packed" if packed else "bf16")
         kw = dict(backend=self.backend, max_positions=self.max_ctx, dll=str(self.dll), weights=pack.weights.name, log=log,
-                  **self._rollback_kw())
+                  **self._load_options())
         try:
             takes_reader = "checkpoint" in inspect.signature(self.mod.Ink2Native.load).parameters
         except (TypeError, ValueError):
@@ -969,6 +1081,18 @@ class Ink2Engine:
         self.fed.append(int(token))
         self.last_logits = logits
         return logits
+
+    def step_top1(self, token: int) -> int:
+        if len(self.fed) >= self.max_ctx:
+            raise YasakaniError("the context of %d positions is full" % self.max_ctx)
+        try:
+            result = self.native.step_top1(token)
+        except RuntimeError as ex:
+            self.fed = None
+            raise YasakaniError("engine step failed: %s" % ex) from ex
+        self.fed.append(int(token))
+        self.last_logits = None
+        return result
 
     def read_prompt(self, ids: Sequence[int]) -> Tuple[np.ndarray, int]:
         """Read the prompt; -> (logits after its last id, ids that did not have to be read again).
@@ -1032,15 +1156,17 @@ class Ink2Engine:
             self._yskn = None
 
 
-def bytes_per_position(config: dict) -> int:
-    """Key/value cache of the full-attention layer visits per position (float32), from config.json."""
+def bytes_per_position(config: dict, mxfp8: bool = False) -> int:
+    """Key/value cache of the full-attention layer visits per position, from config.json: float32, or with ``mxfp8`` (the fast path)
+    one byte per value and one scale byte per 32 values."""
     t = config.get("text_config") or config
     n = int(t.get("num_hidden_layers", 24))
     types = t.get("layer_types") or ["hybrid" if (i + 1) % 6 == 0 else "hybrid_sliding" for i in range(n)]
     loop = t.get("loop_config") or {}
     a, b, passes = loop.get("core_start", 6), loop.get("core_end", 18), loop.get("num_passes", 3)
     visits = sum((passes if a <= i < b else 1) for i, ty in enumerate(types) if ty != "hybrid_sliding")
-    return visits * 2 * int(t.get("num_key_value_heads", 8)) * int(t.get("head_dim", 128)) * 4
+    values = visits * 2 * int(t.get("num_key_value_heads", 8)) * int(t.get("head_dim", 128))
+    return values + values // 32 if mxfp8 else values * 4
 
 
 # ---- generation loop -----------------------------------------------------------------------------------------------------------------
@@ -1093,7 +1219,7 @@ def generate(eng: Ink2Engine, first: int, on_token, pick_at=None, ban=None) -> i
         if r:
             forced = list(r)
         banned = ban() if ban is not None else None
-        if not forced and not banned and eng.can_draft():
+        if not forced and not banned and (eng.can_spec() if getattr(eng, "copying", False) else eng.can_draft()):
             base = len(eng.fed)
             accepted, nxt = eng.spec_step(tok, pick_at(k) if pick_at else None)
             passes += 1
@@ -1120,6 +1246,10 @@ def generate(eng: Ink2Engine, first: int, on_token, pick_at=None, ban=None) -> i
                 continue
         if len(eng.fed) >= eng.max_ctx:
             return passes
+        if getattr(eng, "device_greedy", False) and not forced and not banned and pick_at is None:
+            tok = eng.step_top1(tok)
+            passes += 1
+            continue
         logits = eng.step(tok)
         passes += 1
         if forced:
@@ -1348,13 +1478,15 @@ class Ink2Runner:
 
 
 def open_runner(pack: Ink2Pack, max_ctx: int, dll: Optional[str] = None, seed0: int = 1, say=None, warm: bool = True,
-                draft: str = "auto", draft_depth: Optional[int] = None):
+                draft: str = "auto", draft_depth: Optional[int] = None, copy: Optional[str] = None, copy_min=None,
+                fast: Optional[str] = None):
     """Model folder -> (formatter, engine, runner).  The tokenizer and template are read first, so a broken folder fails before
     the load.  ``draft``: auto | on | off (see the module text); ``eng.draft_note`` says what became of the drafter."""
     fmt = Ink2Formatter(pack.root)
-    eng = Ink2Engine(pack, max_ctx, dll=dll)
+    eng = Ink2Engine(pack, max_ctx, dll=dll, fast=fast)
     try:
         eng.set_drafter(pack, draft, draft_depth)
+        eng.set_copy(copy, copy_min)                         # off unless --copy / $YASAKANI_INK2_COPY says auto
         runner = Ink2Runner(eng, fmt, pack, seed0=seed0)
         if warm:
             runner.warmup(say)

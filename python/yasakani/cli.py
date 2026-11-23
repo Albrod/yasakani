@@ -134,13 +134,24 @@ def _add_engine_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--edit-copy", choices=gpus.EDIT_COPY_MODES, default=None,
                     help="edit copy: on or off.  Default: $YASAKANI_EDIT_COPY or %s" % gpus.EDIT_COPY_DEFAULT)
     _add_wide_args(sp)
-    g = sp.add_argument_group("drafter (Inkling-2 Mini model folders; other models do not use these)")
+    g = sp.add_argument_group("Inkling-2 Mini (model folders of Inkling-2 Mini; other models do not use these)")
+    g.add_argument("--fast", choices=("auto", "on", "off"), default=None,
+                   help="the fast path of the engine: an 8-bit key/value cache, faster prompt reading and faster kernels; the output "
+                        "can differ from off after some tokens.  auto (default): on for the RTX 50 series (it uses their NVFP4 "
+                        "tensor cores to read prompts), off for other GPUs; on: on any GPU (without the NVFP4 part where there is "
+                        "none); off: the engine as in 0.3.2.  Default: $YASAKANI_INK2_FAST or auto (selfcheck: off unless --fast is given, "
+                        "because its reference is of the standard path)")
     g.add_argument("--draft", choices=("auto", "on", "off"), default=None,
                    help="the model's drafter proposes a few tokens that the model checks in one pass; the output does not change.  "
                         "auto (default): used only while it makes generation faster; on: always; off: not loaded.  "
                         "Default: $YASAKANI_DRAFT or auto")
     g.add_argument("--draft-depth", type=int, default=None, metavar="N",
                    help="tokens the drafter proposes per pass, 1 to 7 (default: $YASAKANI_DRAFT_DEPTH or the engine's)")
+    g.add_argument("--copy", choices=("auto", "off"), default=None,
+                   help="copy decoding for edits: ids that repeat the context are proposed and checked in one pass; the output does "
+                        "not change.  auto: used when a long match exists and it pays; off.  Default: $YASAKANI_INK2_COPY or off")
+    g.add_argument("--copy-min", type=int, default=None, metavar="N",
+                   help="shortest match (ids) that copy decoding uses, 4 to 64 (default: $YASAKANI_INK2_COPY_MIN or 8)")
 
 
 def _add_suppress_args(sp: argparse.ArgumentParser) -> None:

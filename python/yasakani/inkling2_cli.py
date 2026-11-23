@@ -77,15 +77,17 @@ def auto_context(args, pack: ink.Ink2Pack, det=None, say=None) -> int:
         return default
     draft, _ = draft_options(args)
     drafter = draft != "off" and pack.drafter is not None
+    args.ink2_compute_cap = g.compute_cap
+    fast = ink.fast_expected(ink.fast_mode_of(getattr(args, "fast", None)), g.compute_cap)
     files = pack.weights.stat().st_size + (pack.drafter.stat().st_size if drafter else 0)
-    per = gpus.ink2_bytes_per_position(ink.bytes_per_position(ink.read_config(pack.root)), drafter)
+    per = gpus.ink2_bytes_per_position(ink.bytes_per_position(ink.read_config(pack.root), mxfp8=fast), drafter, fast=fast)
     rollback = ink.rollback_positions()
-    n = gpus.ink2_context(g.free_mib, files, per, default, rollback)
+    n = gpus.ink2_context(g.free_mib, files, per, default, rollback, fast=fast)
     if n <= 0:
         raise YasakaniError(
             "the model does not fit in the free GPU memory (%d of %d MiB free; with a context of %d tokens it needs about %d MiB).  "
             "Close other programs that use the GPU%s, or give a smaller --max-ctx to try anyway"
-            % (g.free_mib, g.total_mib, gpus.INK2_MIN_CONTEXT, gpus.ink2_need_mib(gpus.INK2_MIN_CONTEXT, files, per, rollback),
+            % (g.free_mib, g.total_mib, gpus.INK2_MIN_CONTEXT, gpus.ink2_need_mib(gpus.INK2_MIN_CONTEXT, files, per, rollback, fast=fast),
                ", start with --draft off (the drafter needs memory too)" if drafter else ""))
     if n == default:
         say("context: %d tokens (the folder's default; %d of %d MiB of GPU memory free); --max-ctx sets it yourself"
@@ -115,13 +117,24 @@ def open_stack(args, warm: bool = True):
     pack = ink.Ink2Pack.load(args.model_dir_path)
     ctx = context_of(args, pack)
     draft, depth = draft_options(args)
+    fast = ink.fast_mode_of(getattr(args, "fast", None))
     _select_gpu(args)
-    kv = ink.bytes_per_position(ink.read_config(pack.root)) * ctx
+    cap = getattr(args, "ink2_compute_cap", None)                               # known when the context was planned
+    if cap is None and fast == "auto":                                          # --max-ctx was given: ask nvidia-smi for this line
+        try:
+            from . import gpu as gpus
+            g = gpus.detect(getattr(args, "device", 0) or 0).worst()
+            cap = g.compute_cap if g is not None else None
+        except Exception:
+            cap = None
+    mxfp8 = ink.fast_expected(fast, cap)
+    kv = ink.bytes_per_position(ink.read_config(pack.root), mxfp8=mxfp8) * ctx
     _say("loading %s (%s of weights, context %d tokens, key/value cache %s) ..." % (pack.model_id, _gb(pack.weights.stat().st_size), ctx, _gb(kv)))
     t0 = time.time()
     try:
         fmt, eng, runner = ink.open_runner(pack, ctx, dll=getattr(args, "dll", None), seed0=getattr(args, "seed0", 1), warm=warm,
-                                           draft=draft, draft_depth=depth)
+                                           draft=draft, draft_depth=depth, copy=getattr(args, "copy", None),
+                                           copy_min=getattr(args, "copy_min", None), fast=fast)
     except YasakaniError as ex:
         raise YasakaniError("%s  (a smaller --max-ctx needs less GPU memory)" % ex) if "memory" in str(ex).lower() else ex
     dm = eng.device_memory()
@@ -131,7 +144,9 @@ def open_stack(args, warm: bool = True):
     _say("model ready in %.1f s (engine load %.1f s, %s backend; %s)" % (time.time() - t0, eng.load_seconds, eng.backend, mem))
     if pack.weights_format == "yskn":
         _say("weights: %s" % eng.weights_note)
+    _say(eng.fast_note)
     _say(eng.draft_note)
+    _say(eng.copy_note)
     return pack, eng, fmt, runner
 
 
@@ -235,6 +250,14 @@ def cmd_verify(args) -> int:
 
 
 # ---- selfcheck --------------------------------------------------------------------------------------------------------------------
+def selfcheck_fast(args) -> str:
+    """The --fast value of the self-check: the one given on its command line, else "off".  The reference tokens are those of the
+    standard path.  The fast path can pick another token at a near tie, and its order of sums depends on the GPU, so a self-check
+    without --fast compares the standard path on every GPU, whatever $YASAKANI_INK2_FAST says."""
+    v = getattr(args, "fast", None)
+    return v if v not in (None, "") else "off"
+
+
 def cmd_selfcheck(args) -> int:
     refuse_unsupported(args)
     pack = ink.Ink2Pack.load(args.model_dir_path)
@@ -242,6 +265,9 @@ def cmd_selfcheck(args) -> int:
     if not cases:
         print("the reference file has no cases")
         return 2
+    if getattr(args, "fast", None) in (None, ""):
+        args.fast = selfcheck_fast(args)
+        _say("self-check: comparing the standard path (the reference is of this path; --fast on compares the fast path instead)")
     pack, eng, fmt, runner = open_stack(args, warm=False)
     try:
         rc = ink.run_selfcheck(eng, fmt, cases)

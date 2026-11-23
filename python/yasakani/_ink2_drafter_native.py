@@ -30,6 +30,7 @@ import numpy as np
 
 from . import _ink2_ckpt as ink2_ckpt  # numpy only
 from . import _ink2_drafter_common as ydc
+from . import _ink2_draft_gov as ydg  # the position-aware on / off rule and the Split-K attention of the drafter
 
 CAP_DRAFTER_PACKED = 4  # ink2_capabilities(): packed drafter matrices (nvfp4 / mxfp8) and packed folded head
 CAP_Q3 = 8              # ink2_capabilities(): the 3-bit format q3
@@ -457,6 +458,7 @@ def _draft_after_load(self, path, calibrate, cut):
     if cut == "default":
         cut = DEFAULT_CUT if getattr(self.lib, "_has_cut", False) else None
     self.draft_cut(cut)
+    ydg.after_load(self)
     return self
 
 
@@ -789,8 +791,12 @@ def spec_step(self, anchor, pick=None, want_logits=False):
     st = self._sstats
     t0 = time.perf_counter()
     if depth <= 0:
-        logits = self.step(anchor)
-        nxt = int(np.argmax(logits)) if pick is None else int(pick(logits))
+        if pick is None and not want_logits and getattr(self, "device_greedy", False):
+            logits = None
+            nxt = self.step_top1(anchor)
+        else:
+            logits = self.step(anchor)
+            nxt = int(np.argmax(logits)) if pick is None else int(pick(logits))
         dt = time.perf_counter() - t0
         if self.draft_loaded():
             self._gov.update_plain(dt)
@@ -880,3 +886,4 @@ def install(cls):
               draft_commit_features, draft_memory, draft_packed, _row_logits, spec_step, spec_stats, lib_max_positions,
               draft_conf, draft_propose_conf, draft_cut):
         setattr(cls, f.__name__, f)
+    ydg.install(cls)
