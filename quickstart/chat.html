@@ -151,6 +151,8 @@
   .kv .k { color: var(--dim); font-size: 13px; padding-top: 3px; }
   .kv .v { min-width: 0; overflow-wrap: anywhere; }
   .kv .sub { color: var(--ink2); font-size: 14px; margin-left: 1em; }
+  #chk_upd { margin-left: 1em; padding: 2px 10px; font-size: 13px; }
+  #chk_upd[hidden] { display: none; }
   .line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
   .line code { font-family: var(--mono); font-size: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 9px; min-width: 0; overflow-wrap: anywhere; }
   .line .nm { font-weight: 700; }
@@ -268,7 +270,7 @@
   <div class="kv"><div class="k" id="md_l_gpu"></div><div class="v"><span id="gpu_name"></span><span class="sub" id="gpu_drv"></span></div></div>
   <div class="kv"><div class="k" id="md_l_mem"></div><div class="v"><div class="mem" id="mem_bar" hidden><i id="mem_fill"></i></div><span id="mem_text"></span></div></div>
   <div class="kv"><div class="k" id="md_l_ctx"></div><div class="v" id="ctx_v"></div></div>
-  <div class="kv"><div class="k" id="md_l_ver"></div><div class="v" id="ver_v"></div></div>
+  <div class="kv"><div class="k" id="md_l_ver"></div><div class="v"><span id="ver_v"></span><button class="btn2" id="chk_upd" type="button" hidden></button><p class="hint" id="chk_note" aria-live="polite"></p></div></div>
   <div class="kv" id="row_quit" hidden><div class="k" id="md_l_quit"></div><div class="v"><button class="btn2" id="quit2" type="button"></button><p class="hint" id="md_quit_hint"></p></div></div>
 </div></section>
 
@@ -351,6 +353,9 @@ const TEXT = {
     md_sw_fail: '切り替えられませんでした（{m}）。',
     md_sw_back: '切り替えは終わりませんでした。前のモデルを使っています。黒い画面に出ている内容を確認してください。',
     md_quit: '終了', md_quit_go: 'YASAKANI を終了する', md_quit_hint: 'モデルを止めて、GPU のメモリを空けます。',
+    chk: '更新を確認', chk_run: '確認しています…', chk_tip: 'github.com に新しい版を 1 回だけ問い合わせます（このパソコンの情報は送りません）',
+    chk_latest: '最新の版です（{v}）', chk_fail: '新しい版を確かめられませんでした（{m}）。今の版のまま使えます。',
+    chk_busy: '確認がまだ終わっていません。少し待って、もう一度押してください。',
   },
   en: {
     title: 'YASAKANI chat', me: 'You', ai: 'YASAKANI',
@@ -423,6 +428,9 @@ const TEXT = {
     md_sw_fail: 'Could not switch ({m}).',
     md_sw_back: 'The switch did not finish. The model before is in use. Look at the messages in the black window.',
     md_quit: 'Quit', md_quit_go: 'Quit YASAKANI', md_quit_hint: 'Stops the model and frees the GPU memory.',
+    chk: 'Check for updates', chk_run: 'Checking…', chk_tip: 'Asks github.com once for a new version (nothing about this computer is sent)',
+    chk_latest: 'You have the latest version ({v})', chk_fail: 'Could not check for a new version ({m}). The current version stays in use.',
+    chk_busy: 'The check has not finished yet. Wait a moment and press again.',
   },
 };
 // The fixed labels of the page: element id -> key of TEXT.
@@ -463,6 +471,8 @@ const LOST_MS = 20000;                 // usually
 const SWITCH_MS = 20 * 60000;          // after a model switch: the first-time checks of a model take minutes, with or without answers
 const UPDATE_MS = 10 * 60000;          // after the update button
 const ASK_MS = 10000;                  // one question
+const CHECK_MS = 20000;                // "check for updates": the launcher waits about 12 s for github.com
+let checkingUpd = false;       // "check for updates" was pressed and its answer has not come
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 // Text that is painted again and again is only written when it changed, so a selection made in it stays.
@@ -552,7 +562,7 @@ function paintStatus() {
   if (said !== now) { said = now; $('live').textContent = phase === 'loading' && !checking ? L.loading : text || st; }
 }
 function refresh() {
-  paintStatus(); setButton(); paintSpeed(); paintApi(); paintModel(); showUpdate();
+  paintStatus(); setButton(); paintSpeed(); paintApi(); paintModel(); showUpdate(); paintCheck();
   const h = document.querySelector('#log .empty h1');         // after a model switch the empty chat names the new model
   if (h && h.textContent !== emptyTitle()) h.textContent = emptyTitle();
 }
@@ -1135,6 +1145,42 @@ function showUpdate() {
   $('upd').hidden = false;
 }
 $('upd_later').addEventListener('click', () => { $('upd').hidden = true; updOff = true; });
+
+// "Check for updates" (beside the version in the model tab): asks the launcher to ask github.com now, once, as item 7 of its
+// menu does.  Only a launcher that says so in its config (update_check_now) and gave this page its control token takes it; the
+// token is sent in the X-YASAKANI-Control header and is not used up.  A newer version: the launcher's config then has it, and the
+// banner above appears as when the launcher knew it at the start.  Hidden while an update is known or under way.
+function paintCheck() {
+  const show = controls && cfg.update_check_now === true && !cfg.update && !quiet();
+  const b = $('chk_upd');
+  b.hidden = !show && !checkingUpd; b.disabled = checkingUpd;
+  put('chk_upd', checkingUpd ? L.chk_run : L.chk); b.title = L.chk_tip;
+  if (!show && !checkingUpd) put('chk_note', '');
+}
+$('chk_upd').addEventListener('click', async () => {
+  if (checkingUpd || quiet()) return;
+  if (!cfg.control_token) await loadConfig();
+  const token = cfg.control_token;
+  if (!token) { put('chk_note', L.c_later); return; }
+  checkingUpd = true; put('chk_note', ''); paintCheck();
+  let note = '';
+  const c = new AbortController(), timer = setTimeout(() => c.abort(), CHECK_MS);
+  try {
+    const r = await fetch('/webchat/check_update', { method: 'POST', headers: { 'X-YASAKANI-Control': token }, cache: 'no-store', signal: c.signal });
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON */ }
+    if (r.status === 403) { await loadConfig(); note = L.c_retry; }
+    else if (!r.ok || !j || typeof j !== 'object') note = t('chk_fail', { m: (j && j.error && j.error.message) || 'HTTP ' + r.status });
+    else if (j.state === 'newer') { await loadConfig(); }        // the config has the update and its token: the banner shows
+    else if (j.state === 'latest') note = t('chk_latest', { v: String(j.version) });
+    else if (j.state === 'busy') note = L.chk_busy;
+    else note = t('chk_fail', { m: String(j.message || '') });
+  } catch (e) { note = t('chk_fail', { m: e.name === 'AbortError' ? 'timeout' : L.gone }); }
+  finally { clearTimeout(timer); }
+  checkingUpd = false;
+  if (quiet()) return;
+  refresh(); put('chk_note', note);
+});
 $('upd_go').addEventListener('click', async () => {
   if (busy) busy.abort();
   if (bench) bench.abort();

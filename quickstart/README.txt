@@ -48,6 +48,8 @@ START.cmd がすること
     直接開く前です（問い合わせる前に表示します。送るのは最新の版を聞くリクエスト 1 回だけで、このパソコンの情報は送りません）。
     新しい版がある時、メニューの前では更新するかを聞きます。ブラウザーの画面を直接開く時は、黒い画面では聞きません。
     画面に「更新する」ボタンが出ます。「y」と答えるかボタンを押すまで、何も変えません。
+    画面の「モデル・状態」の「更新を確認」を押すと、その場で 1 回だけ問い合わせます
+    （押した時だけ。--no-update-check の時も使えます）。
     更新すると今の起動ファイルを backup フォルダーに控え、エンジンとパッケージを入れ直します（モデルはそのまま）。
     今すぐ確かめる：メニューの 7 か START.cmd --action update
     前の版に戻す：START.cmd --action rollback
@@ -103,6 +105,8 @@ Good to know
     it opens the browser page directly (it says so first; one request, nothing about this computer is sent). If there is a
     newer one, it asks before the menu whether to update. When the page opens directly, nothing is asked in the black
     window: the page shows an Update button. Nothing changes until you answer y or press the button.
+    "Check for updates" in the Model tab of the page asks at once, one request, only when you press it
+    (also with --no-update-check).
     An update copies the current start files to the backup folder and installs the engine and the package again
     (the models are kept). Check now: 7 in the menu or START.cmd --action update. Go back: START.cmd --action rollback.
     Turn the check off: START.cmd --no-update-check (on again: --update-check).

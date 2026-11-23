@@ -23,6 +23,7 @@ stops `yasakani serve` and ends, or starts it again with the other downloaded mo
 
 Updates: at most once a day, when the menu is shown or the browser page is opened directly, the script asks GitHub's API for the
 latest release (one HTTPS request without anything about this computer; it says so first, and --no-update-check turns it off).
+The page's "check for updates" asks the same once, at once, only when it is pressed (also with --no-update-check).
 Nothing is updated without a yes (at the menu: the question; in the page: the update button).  An update downloads the start files
 of that release, checks them against its SHA256SUMS.txt, keeps the current ones in backup/<version>/, puts the new ones in place and
 runs the new quickstart.py, which installs its own engine as usual.  --action rollback goes back.
@@ -68,6 +69,7 @@ UPDATE_UA = "yasakani-quickstart"
 START_FILES = ("LICENSE", "README.txt", "START.cmd", "chat.html", "lookahead_check.py", "quickstart.py")
 MAX_START_FILE, MAX_START_ZIP, MAX_SUMS, MAX_API = 4 << 20, 16 << 20, 64 << 10, 1 << 20
 CHECK_EVERY = 24 * 3600
+CHECK_NOW_WAIT = 12.0               # the page's "check for updates": how long its request waits for the check (fetch_latest: 5 s)
 UPDATE_RC = 75                      # run_web: the page asked for the update; the server is stopped
 SWITCH_RC = 76                      # run_web: the page picked another downloaded model (a.web_switch); the server is stopped
 QUIT_RC = 77                        # run_web: the quit button of the page; the server is stopped and the launcher ends
@@ -614,11 +616,25 @@ def load_state(path):
         return {}
 
 
+_STATE_LOCK = threading.Lock()          # the page's "check for updates" saves from a thread of its own
+
+
 def save_state(path, st):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(st, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    """Writes the state file through a temporary file.  One writer at a time (two threads sharing the temporary file could make
+    os.replace fail on Windows), and a short wait when another program has the file open at that moment (Windows refuses to
+    replace an open file: a reader, a virus scanner)."""
+    with _STATE_LOCK:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(st), f, indent=1, sort_keys=True)
+        for left in range(39, -1, -1):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if not left:
+                    raise
+                time.sleep(0.05)
 
 
 def ask(prompt, default="", eof=None):
@@ -1138,9 +1154,11 @@ def check_disabled(a, st, environ=None):
         or st.get("update_check") is False
 
 
-def update_check(ui, st, save, src, force=False, now=None, disabled=False):
-    """The check of the menu (at most once a day) or, with ``force``, of the menu item and --action update.  -> the newer release
-    or None.  Never raises: a failed check prints one line and goes on."""
+def update_check(ui, st, save, src, force=False, now=None, disabled=False, result=None):
+    """The check of the menu (at most once a day) or, with ``force``, of the menu item, --action update and the page's "check for
+    updates".  -> the newer release or None.  Never raises: a failed check prints one line and goes on.  ``result`` (a dict), when
+    given, gets "state" ("newer", "latest", "skipped" or "failed") and for a failure "message", for a check that asked."""
+    result = {} if result is None else result
     now = time.time() if now is None else now
     if disabled and not force:
         return None
@@ -1159,14 +1177,17 @@ def update_check(ui, st, save, src, force=False, now=None, disabled=False):
         if hasattr(e, "close"):
             e.close()                                   # an HTTPError holds the answer
         save()
-        ui.say("upd_fail", e=str(e) if isinstance(e, UpdateError) else type(e).__name__)
+        result.update(state="failed", message=str(e) if isinstance(e, UpdateError) else type(e).__name__)
+        ui.say("upd_fail", e=result["message"])
         return None
     st["update_latest"] = {"version": rel["version"], "tag": rel["tag"]}
     save()
     if not is_newer(rel["version"], QS_VERSION) or (not force and rel["version"] == st.get("update_skip")):
+        result["state"] = "latest" if not is_newer(rel["version"], QS_VERSION) else "skipped"
         if force or not is_newer(rel["version"], QS_VERSION):
             ui.say("upd_latest", v=QS_VERSION)
         return None
+    result["state"] = "newer"
     return rel
 
 
@@ -1316,15 +1337,27 @@ class LocalServer(ThreadingHTTPServer):
 class UpdateRequest:
     """The update button of the chat page.  It exists only when this launcher found a newer version.  The page gets the
     one-time ``token`` from /webchat/config (which only pages of this address can read) and sends it in the X-Yasakani-Token header
-    of a POST to /webchat/update; the request must also name this address in Host and Origin.  The token works once."""
+    of a POST to /webchat/update; the request must also name this address in Host and Origin.  The token works once.
+    Made without ``rel`` it has no button until arm() (the page's "check for updates" found a newer version)."""
 
     HEADER = "X-Yasakani-Token"
 
-    def __init__(self, rel):
+    def __init__(self, rel=None):
         self.rel = rel
-        self.token = hashlib.sha256(os.urandom(32)).hexdigest()
+        self.token = hashlib.sha256(os.urandom(32)).hexdigest() if rel else None
         self.event = threading.Event()
         self._lock = threading.Lock()
+        self._closed = False
+
+    def arm(self, rel):
+        """The button of ``rel`` from now on, as if the launcher had known it when the page was opened.  -> False when the
+        launcher is leaving the page (close() came first)."""
+        with self._lock:
+            if self._closed:
+                return False
+            if self.rel is None:
+                self.rel, self.token = rel, hashlib.sha256(os.urandom(32)).hexdigest()
+            return True
 
     def take(self, token):
         with self._lock:
@@ -1337,7 +1370,7 @@ class UpdateRequest:
         """From here on the update button is not taken (the launcher leaves the page for another reason: the quit button, a model
         switch, Enter, the end of the server).  -> False when the token was used or closed before."""
         with self._lock:
-            was_open, self.token = self.token is not None, None
+            was_open, self.token, self._closed = self.token is not None, None, True
             return was_open
 
 
@@ -1362,12 +1395,70 @@ class ControlRequest:
             self.token, self.action, self.model = None, action, model
             return True
 
+    def valid(self, token):
+        """The token of the page, without using it up (the page's "check for updates" changes nothing that the token guards)."""
+        with self._lock:
+            return bool(self.token and token and hmac.compare_digest(self.token.encode(), token.encode("utf-8", "replace")))
+
     def close(self):
         """From here on no control request is accepted (the launcher leaves the page for another reason, e.g. Enter).  -> False
         when the token was used or closed before."""
         with self._lock:
             was_open, self.token = self.token is not None, None
             return was_open
+
+
+class UpdateCheckNow:
+    """The "check for updates" control of the chat page: POST /webchat/check_update with the page's control token runs ``check``
+    (update_check with force=True, as menu item 7: one request to github.com) in a thread of its own, one at a time; a second
+    press while it runs gets that check's answer.  A newer version arms ``update`` (an UpdateRequest), so the page's update
+    button and POST /webchat/update work as when the launcher knew of it at the start.  The answer is JSON: {"state": "newer",
+    "version"}, {"state": "latest", "version"} or {"state": "failed", "message"}; "busy" when the check did not end in ``wait``
+    seconds (it goes on and arms the button if it finds a newer version)."""
+
+    def __init__(self, check, update, wait=CHECK_NOW_WAIT):
+        self.check, self.update, self.wait = check, update, wait
+        self._lock = threading.Lock()
+        self._box, self._thread, self._closed = None, None, False
+
+    def _work(self, box):
+        result = {}
+        try:
+            rel = self.check(result)
+        except Exception as e:  # noqa: BLE001 - update_check does not raise; this is only a guard for the page's answer
+            rel, result = None, {"state": "failed", "message": type(e).__name__}
+        if rel and self.update.arm(rel):
+            answer = {"state": "newer", "version": rel["version"]}
+        elif rel:
+            answer = {"state": "failed", "message": "the launcher is leaving the page"}
+        elif result.get("state") in ("latest", "skipped"):
+            answer = {"state": "latest", "version": QS_VERSION}
+        else:
+            answer = {"state": "failed", "message": " ".join(str(result.get("message") or "no answer").split())[:160]}
+        box["answer"] = answer
+        box["done"].set()
+
+    def run(self):
+        with self._lock:
+            if self._closed:
+                return {"state": "failed", "message": "the launcher is leaving the page"}
+            if self.update.rel is not None:              # known already: the page's button is there, nothing to ask
+                return {"state": "newer", "version": self.update.rel["version"]}
+            box = self._box
+            if box is None or box["done"].is_set():
+                box = self._box = {"done": threading.Event(), "answer": None}
+                self._thread = threading.Thread(target=self._work, args=(box,), daemon=True)
+                self._thread.start()
+        if not box["done"].wait(self.wait):
+            return {"state": "busy", "message": "the check is still under way"}
+        return dict(box["answer"])
+
+    def close(self, wait=10.0):
+        """No more checks; a check under way may end first (it writes the state file)."""
+        with self._lock:
+            self._closed, t = True, self._thread
+        if t is not None:
+            t.join(wait)
 
 
 class WebSession:
@@ -1490,7 +1581,7 @@ class GpuWatch:
             return dict(self._value)
 
 
-def make_web_handler(page, conf, engine_port, web_port, update=None, control=None, session=None, gpu=None):
+def make_web_handler(page, conf, engine_port, web_port, update=None, control=None, session=None, gpu=None, checknow=None):
     """The handler of the browser chat: the page, its settings, and three paths passed on to `yasakani serve`.
 
     Like `yasakani serve`, it answers only requests that name this address in ``Host`` and, if they carry an ``Origin``, come from
@@ -1498,11 +1589,12 @@ def make_web_handler(page, conf, engine_port, web_port, update=None, control=Non
     (an UpdateRequest) it also answers POST /webchat/update; without it that path does not exist.  In the same way ``control`` (a
     ControlRequest) brings POST /webchat/shutdown and /webchat/switch_model, and ``session`` (a WebSession) GET /webchat/status.
     ``gpu`` (a GpuWatch) gives the GPU line of /webchat/config.  ``engine_port`` None means that no `yasakani serve` runs now (the
-    checks of a model switch, open_check_server): api_base is null and the paths that are passed on answer 503."""
+    checks of a model switch, open_check_server): api_base is null and the paths that are passed on answer 503.  ``checknow`` (an
+    UpdateCheckNow, only together with ``control``) brings POST /webchat/check_update, the page's "check for updates"."""
     own = ("127.0.0.1:%d" % web_port, "localhost:%d" % web_port)
     origins = tuple("http://" + h for h in own)
-    if update is not None:
-        conf = dict(conf, update={"version": update.rel["version"], "page": update.rel["page"]})
+    if control is None:
+        checknow = None                                 # it takes the control token of the page
     if control is not None and session is None:
         session = WebSession(conf.get("model"))         # a control request is checked against the session's models
     # the address of `yasakani serve` for other programs on this computer
@@ -1513,8 +1605,12 @@ def make_web_handler(page, conf, engine_port, web_port, update=None, control=Non
         c = dict(conf, api_base=api_base, model_id=DEFAULT_MODEL_ID, max_context_tokens=None, models_installed=[],
                  control_token=control.token if control is not None else None,
                  gpu=gpu.get() if gpu is not None else {"name": None, "driver": None, "total_mib": None, "used_mib": None})
-        if update is not None:
+        rel = update.rel if update is not None else None
+        if rel is not None:                             # known at the start, or found by the page's "check for updates"
+            c["update"] = {"version": rel["version"], "page": rel["page"]}
             c["update_token"] = update.token            # null once it was used or the launcher is leaving the page
+        if checknow is not None:
+            c["update_check_now"] = True                # the page shows its "check for updates"
         if session is not None:
             c.update(model_id=session.model_id, max_context_tokens=session.max_context,
                      models_installed=[{"name": m, "current": m == session.model} for m in session.installed])
@@ -1629,8 +1725,10 @@ def make_web_handler(page, conf, engine_port, web_port, update=None, control=Non
             if why:
                 return self._error(403, "forbidden: " + why, "forbidden", close=True)
             path = self.path.split("?", 1)[0]
-            if update is not None and path == "/webchat/update":
+            if update is not None and update.rel is not None and path == "/webchat/update":
                 return self._update()
+            if checknow is not None and path == "/webchat/check_update":
+                return self._check_now()
             if control is not None and path in ("/webchat/shutdown", "/webchat/switch_model"):
                 return self._control(path == "/webchat/switch_model")
             if path != "/v1/chat/completions":
@@ -1660,6 +1758,22 @@ def make_web_handler(page, conf, engine_port, web_port, update=None, control=Non
                        json.dumps({"status": "updating", "version": update.rel["version"]}).encode("utf-8"), close=True)
             self.wfile.flush()
             update.event.set()
+
+        def _check_now(self):
+            # as _control: Origin, the size, then the token (not used up: nothing that the token guards changes here)
+            if (self.headers.get("Origin") or "").lower() not in origins:
+                return self._error(403, "forbidden: origin", "forbidden", close=True)
+            try:
+                n = int(self.headers.get("Content-Length", "") or 0)
+            except ValueError:
+                n = -1
+            if n < 0 or n > CONTROL_MAX_BODY:
+                return self._error(413, "request body too large", "invalid_request_error", close=True)
+            if n:
+                self.rfile.read(n)
+            if not control.valid(self.headers.get(ControlRequest.HEADER)):
+                return self._error(403, "forbidden: token", "forbidden", close=True)
+            self._send(200, "application/json; charset=utf-8", json.dumps(checknow.run()).encode("utf-8"))
 
         def _control(self, switch):
             # the order: Origin, the size, the request itself (a refused request leaves the token valid), then the token
@@ -1999,22 +2113,26 @@ def stay_for_the_page(session, since, clock=time.monotonic, sleep=time.sleep):
         pass
 
 
-def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, installed=(), reopen=None):
+def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, installed=(), reopen=None, check_now=None):
     """The page in the browser.  Starts `yasakani serve`, opens the page at once (it shows the loading and goes on when the model
     is ready), then waits for Enter, a button of the page or the end of the server.  -> 0, 7 (the server did not start, or it
     ended by itself with an error), 8 (--web-test failed), UPDATE_RC, QUIT_RC, or SWITCH_RC with the model's name in a.web_switch.
     ``gpu`` is a GpuWatch and ``installed`` the models the page can switch between.  ``reopen`` is the port of a page that waits
     after a model switch: the page's server comes back on that port and no browser window is opened.  On every way out
     `yasakani serve` is stopped and the page's server is closed; the tokens of the page's buttons end with the wait (if the update
-    button and a control request were both taken within one look of the wait, the update counts)."""
+    button and a control request were both taken within one look of the wait, the update counts).  ``check_now`` (a function of a
+    result dict -> the newer release or None: update_check with force=True) is the page's "check for updates"; the release that
+    the page's update button stands for, known at the start or found by it, is left in a.web_update."""
+    a.web_update = None
     page, page_path = read_page()
     if page is None:
         ui.say("web_nopage", p=page_path)
         return 7
     wanted = reopen or getattr(a, "web_port", None) or WEB_PORT
     eport = pick_port(ENGINE_PORT, avoid=(wanted,))
-    update = UpdateRequest(update_rel) if update_rel else None
     control = None if a.web_test else ControlRequest()  # --web-test only looks: no quit button, no model switch
+    update = UpdateRequest(update_rel) if update_rel or (check_now and control) else None
+    checknow = UpdateCheckNow(check_now, update) if check_now and control else None
     before = gpu.get(fresh=True)["used_mib"] if gpu is not None else None     # the GPU memory in use before this model is loaded
     ui.say("web_boot")
     proc = subprocess.Popen([vpy, "-m", "yasakani", "serve", "--model-dir", mdir, "--dll", dll, "--port", str(eport)], env=env)
@@ -2024,7 +2142,7 @@ def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, instal
     conf = page_settings(ui, name)
 
     def handler(port):
-        return make_web_handler(page, conf, eport, port, update, control, session, gpu)
+        return make_web_handler(page, conf, eport, port, update, control, session, gpu, checknow)
 
     httpd, why = None, None
     try:
@@ -2059,7 +2177,9 @@ def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, instal
             why = "enter"
         # Whatever ended the wait: the page's buttons are not taken any more.  A button that was taken in the same moment (its
         # token is used and the page has its 202) counts.
-        pressed, asked = update is not None and not update.close(), not control.close()
+        # (an update button that was never armed has no token either: not pressed)
+        pressed = update is not None and not update.close() and update.rel is not None
+        asked = not control.close()
         if pressed:
             why = "update"
         elif asked and control.action and why in ("enter", "ended"):
@@ -2088,6 +2208,10 @@ def run_web(ui, a, vpy, env, mdir, dll, model, update_rel=None, gpu=None, instal
             control.close()
         if update is not None:
             update.close()
+        if checknow is not None:
+            checknow.close()
+        if update is not None and update.rel is not None:
+            a.web_update = update.rel
         t_end = time.monotonic()
         if proc.poll() is None:
             session.leave("stopping")
@@ -2444,6 +2568,13 @@ def main(argv=None):
     print(ui.t("support", u=SUPPORT_URL, r=REPO_URL))
     action = a.action
     pending = None                                      # a newer release this launcher knows of (offered once, then in the chat page)
+
+    def check_now(result):                              # the page's "check for updates": as menu item 7, also with --no-update-check
+        rel = update_check(ui, st, save, src, force=True, result=result)
+        if rel:
+            ui.say("upd_page", o=QS_VERSION, n=rel["version"])
+        return rel
+
     if action == "menu" or direct:
         print()
         pending = update_check(ui, st, save, src, disabled=check_disabled(a, st))
@@ -2473,7 +2604,8 @@ def main(argv=None):
             reopen = None
             while True:                                 # once more for every model the page switches to
                 rc = run_web(ui, a, vpy, env, mdir, dll, model, pending, gpu_watch,
-                             [] if a.model_dir else installed_models(home, got, quality_fits), reopen)
+                             [] if a.model_dir else installed_models(home, got, quality_fits), reopen, check_now)
+                pending = getattr(a, "web_update", None) or pending     # also a release the page's "check for updates" found
                 if rc != SWITCH_RC:
                     break
                 # The page waits at its address.  What the steps above did for the first model, for this one: run the checks if
