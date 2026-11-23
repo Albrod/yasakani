@@ -545,7 +545,7 @@ class StubTests(unittest.TestCase):
             self.assertEqual((r.status, r.mask), ("unknown-gpu", 0))
 
     def test_rtx50_auto(self):
-        with self.open(120, STUB_WIDE_R48=2.6) as eng:
+        with self.open(120, STUB_WIDE_R48=2.8) as eng:          # over the RTX 50 limit of 0.3.4: 0.9 x 48 / 16 = 2.70
             st = eng.wide_state()
             self.assertEqual((st.allowed, st.mask, st.native), (True, 7, True))
             r = self.setup(eng)
