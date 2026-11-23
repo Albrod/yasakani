@@ -118,6 +118,11 @@ OVERHEAD_MIB = {"quality": 2300, "speed": 2100, "max": 2300}
 INK2_FILES_BYTES = (15052423172, 209688040)
 INK2_BYTES_PER_POSITION = 65536 + 12288 + 10240       # config.json's cache + the engine's rest + the drafter's, per position
 INK2_ROLLBACK_MIB, INK2_OVERHEAD_MIB = (512 - 64) * 1.8, 1800
+# The fast path (0.3.3; --fast auto turns it on for compute capability 12.0, the RTX 50 series): an 8-bit cache (one byte per value and
+# one scale byte per 32 values) and no score buffer per position, and INK2_FAST_OVERHEAD_MIB more (gpu.py ink2_bytes_per_position).
+INK2_FAST_BYTES_PER_POSITION = 65536 // 4 + 65536 // 4 // 32 + 10240
+INK2_FAST_OVERHEAD_MIB = 500
+INK2_FAST_ENV = "YASAKANI_INK2_FAST"
 INK2_DEFAULT_CONTEXT, INK2_CONTEXT_STEP, INK2_MIN_CONTEXT = 32768, 4096, 8192
 
 # ---- the NVIDIA driver (0.1.4).  yskn.dll carries the CUDA 13.2 runtime (linked in, there is no separate runtime DLL).  Under CUDA minor
@@ -281,6 +286,8 @@ T = {
     "m_max": {"ja": "最高品質モデル", "en": "max-quality model"},
     "m_inkling2": {"ja": "Inkling-2 Mini（試験的）", "en": "Inkling-2 Mini model (experimental)"},
     "checks_done": {"ja": "点検は済んでいます（飛ばします）。", "en": "The checks were done before (skipped)."},
+    "checks_skipped": {"ja": "--skip-checks なので点検はしません（出力が正しいかは確かめていません）。",
+                       "en": "The checks are not run (--skip-checks): the output has not been checked."},
     "engine_have": {"ja": "エンジンは準備済みです。", "en": "The engine is already in place."},
     "engine_local": {"ja": "このフォルダーにある {z} を使います。", "en": "Using {z} from this folder."},
     "engine_get": {"ja": "ダウンロード中: {u}", "en": "Downloading: {u}"},
@@ -830,10 +837,26 @@ def estimate_context(free_mib, model):
     return (without, True) if without > with_head else (with_head, False)
 
 
-def estimate_ink2_context(free_mib):
-    """The context the package will choose for the Inkling-2 Mini folder (yasakani/gpu.py, ink2_context()); 0 = it does not fit."""
-    room = free_mib - sum(INK2_FILES_BYTES) / float(1 << 20) - INK2_OVERHEAD_MIB - INK2_ROLLBACK_MIB - MARGIN_MIB
-    n = max(0, int(room * (1 << 20) // INK2_BYTES_PER_POSITION))
+# A copy of FAST_AUTO_CAPS of the package (python/yasakani/inkling2.py): auto turns the fast path on for RTX 30 (8.6), RTX 40 (8.9)
+# and RTX 50 (12.0) cards (0.3.4; 12.0 only in 0.3.3).  Keep the two equal (tests/test_quickstart_checks_ctx.py compares them).
+INK2_FAST_AUTO_CAPS = ((8, 6), (8, 9), (12, 0))
+
+
+def ink2_fast_expected(cc, environ=None):
+    """Does the package expect the fast path for a GPU of compute capability ``cc`` ((major, minor) or None)?  As inkling2.py
+    fast_expected(): YASAKANI_INK2_FAST on / off, else auto = on for INK2_FAST_AUTO_CAPS (unknown: off)."""
+    env = os.environ if environ is None else environ
+    mode = (env.get(INK2_FAST_ENV) or "auto").strip().lower()
+    return mode == "on" or (mode == "auto" and tuple(cc or ()) in INK2_FAST_AUTO_CAPS)
+
+
+def estimate_ink2_context(free_mib, fast=False):
+    """The context the package will choose for the Inkling-2 Mini folder (yasakani/gpu.py, ink2_context()); 0 = it does not fit.
+    ``fast``: planned for the fast path (chat and serve on an RTX 50 card); without it the standard path, which `yasakani selfcheck`
+    plans with since 0.3.3."""
+    over = INK2_OVERHEAD_MIB + (INK2_FAST_OVERHEAD_MIB if fast else 0)
+    room = free_mib - sum(INK2_FILES_BYTES) / float(1 << 20) - over - INK2_ROLLBACK_MIB - MARGIN_MIB
+    n = max(0, int(room * (1 << 20) // (INK2_FAST_BYTES_PER_POSITION if fast else INK2_BYTES_PER_POSITION)))
     if n >= INK2_DEFAULT_CONTEXT:
         return INK2_DEFAULT_CONTEXT
     n = (n // INK2_CONTEXT_STEP) * INK2_CONTEXT_STEP
@@ -2257,8 +2280,8 @@ def main(argv=None):
         Mini on every card, when its context would be shorter than the folder's 32,768 tokens or it does not fit."""
         if gpu["total"] is None or used is None or a.model_dir:
             return
-        if model == "inkling2":
-            n_ctx = estimate_ink2_context(gpu["total"] - used)
+        if model == "inkling2":                 # the context of chat and serve: the fast path on RTX 30 / 40 / 50 cards (0.3.4)
+            n_ctx = estimate_ink2_context(gpu["total"] - used, fast=ink2_fast_expected(gpu.get("cc")))
             if n_ctx <= 0:
                 ui.say("ctx_short", u=used)
             elif n_ctx < INK2_DEFAULT_CONTEXT:
@@ -2376,7 +2399,7 @@ def main(argv=None):
     def run_checks():
         """info, verify and selfcheck for the model in use, unless it passed them before.  -> 0, or the exit code to end with."""
         if checks_done():
-            ui.say("checks_done")
+            ui.say("checks_skipped" if a.skip_checks else "checks_done")     # #18: --skip-checks never ran them
             return 0
         differs = False
         for cmd in ("info", "verify", "selfcheck"):

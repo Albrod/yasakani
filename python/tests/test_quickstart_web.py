@@ -1990,11 +1990,13 @@ class LauncherTests(RunWebBase):
 
     def test_context_line_for_inkling2_on_a_fuller_24_gb_card(self):
         h = self.home(checked=("inkling2",), downloaded=("inkling2",), model="inkling2")
-        for used, want in ((800, None), (5000, QS.estimate_ink2_context(24564 - 5000)), (9000, 0)):
+        # 0.3.4: auto = the fast path on an RTX 4090 (8.9), so the launcher plans with it (12,288 tokens with 6,000 MiB in use)
+        for used, want in ((800, None), (5000, None), (6000, QS.estimate_ink2_context(24564 - 6000, fast=True)), (9000, 0)):
             card = dict(index=0, uuid="GPU-b", name="NVIDIA GeForce RTX 4090", cc=(8, 9), total=24564, used=used, driver="616.92")
             self.out.truncate(0)
             self.out.seek(0)
-            with mock.patch.object(QS, "query_gpus", lambda run=None: [dict(card)]):
+            with mock.patch.object(QS, "query_gpus", lambda run=None: [dict(card)]), \
+                    mock.patch.dict(os.environ, {"YASAKANI_INK2_FAST": ""}):
                 self.assertEqual(self.run_main(h, "--action", "none"), 0)
             out = self.out.getvalue()
             if want is None:
