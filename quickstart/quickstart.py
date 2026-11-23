@@ -55,7 +55,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 QS_VERSION = "0.3.4"
 ENGINE_ZIP = "yasakani-0.3.4-win-x64.zip"
 ENGINE_URL = "https://github.com/yasakani-dev/yasakani/releases/download/v0.3.4/" + ENGINE_ZIP
-ENGINE_SHA256 = "64830c2a9e3c1d34684a65f68a57480fffbab56ac1e4d5953f922e8b0c6db07f"
+ENGINE_SHA256 = "831576fe908c0dc52494aae6534d2a45e27f310b3ceaba9bbc0b1e65e4a8a7fc"
 REPO_URL = "https://github.com/yasakani-dev/yasakani"
 SUPPORT_URL = "https://camp-fire.jp/projects/992233/view"
 ENGINE_PORT, WEB_PORT = 8765, 8766      # `yasakani serve` and the browser chat; the next free ports are used if these are taken
