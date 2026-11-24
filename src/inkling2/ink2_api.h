@@ -27,10 +27,14 @@ enum {
   INK2_CAP_KV = 16              // options kv_mxfp8, kv_hot, kv_split and ink2_kv_memory
 };
 
+#if defined(_WIN32)
 #ifdef INK2_BUILD
 #define INK2_API extern "C" __declspec(dllexport)
 #else
 #define INK2_API extern "C" __declspec(dllimport)
+#endif
+#else
+#define INK2_API extern "C" __attribute__((visibility("default")))
 #endif
 
 typedef struct Ink2Config {
